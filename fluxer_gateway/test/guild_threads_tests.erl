@@ -342,7 +342,7 @@ tainted_inactive_reload_masks_role_bits_test() ->
         stop_captures(Pids)
     end.
 
-viewer_guild_create_carries_joined_threads_test() ->
+viewer_guild_create_carries_viewable_text_threads_test() ->
     with_guild(fun(State) ->
         GuildState = guild_data:get_guild_state(?A, State, #{
             thread_viewer => true, bot => false
@@ -355,7 +355,7 @@ viewer_guild_create_carries_joined_threads_test() ->
         ?assertNot(maps:is_key(<<"user_id">>, Member)),
         ?assertNot(maps:is_key(<<"member_ids_preview">>, T1)),
         VState = guild_data:get_guild_state(?V, State, #{thread_viewer => true, bot => false}),
-        ?assertEqual([], maps:get(<<"threads">>, VState)),
+        ?assertEqual([?T1], [maps:get(<<"id">>, T) || T <- maps:get(<<"threads">>, VState)]),
         XState = guild_data:get_guild_state(?X, State, #{thread_viewer => true, bot => true}),
         ?assertEqual(
             [?T1, ?T2],

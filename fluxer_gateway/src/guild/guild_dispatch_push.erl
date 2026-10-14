@@ -1700,6 +1700,51 @@ collect_role_id(Role, Acc) ->
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
+%% 验证多设备通知资格、在线状态失效和逐条更新的宽限截止时间
+-spec cached_activity_handles_multiple_devices_and_refreshes_each_message_grace_deadline_test() ->
+    ok.
+cached_activity_handles_multiple_devices_and_refreshes_each_message_grace_deadline_test() ->
+    Previous = application:get_env(fluxer_gateway, push_presence_eligibility),
+    application:set_env(fluxer_gateway, push_presence_eligibility, true),
+    Tab = ets:new(cached_push_presence, [set]),
+    Desktop = #{user_id => 1, pid => self(), push_hold => true},
+    Phone = #{user_id => 1, pid => self(), push_hold => false},
+    Sessions = #{<<"desktop">> => Desktop, <<"phone">> => Phone},
+    State = #{member_presence => Tab},
+    try
+        {#{1 := false}, {Held, FirstDeadline}} = build_push_session_eligibility(
+            Sessions, State
+        ),
+        ?assertEqual(#{1 => [{<<"desktop">>, self()}]}, Held),
+        timer:sleep(5),
+        {#{1 := false}, {Held, NextDeadline}} = build_push_session_eligibility(Sessions, State),
+        ?assert(NextDeadline > FirstDeadline),
+        ?assertEqual(
+            {#{1 => true}, none},
+            build_push_session_eligibility(#{<<"phone">> => Phone}, State)
+        ),
+        PresenceSession = #{<<"desktop">> => maps:remove(push_hold, Desktop)},
+        ?assertEqual(
+            {#{1 => true}, none}, build_push_session_eligibility(PresenceSession, State)
+        ),
+        ets:insert(Tab, {1, #{<<"status">> => <<"online">>}}),
+        guild_member_list_read:note_presence_write(1),
+        {#{1 := false}, _} = build_push_session_eligibility(PresenceSession, State),
+        ets:insert(Tab, {1, #{<<"status">> => <<"idle">>}}),
+        guild_member_list_read:note_presence_write(1),
+        ?assertEqual(
+            {#{1 => true}, none}, build_push_session_eligibility(PresenceSession, State)
+        )
+    after
+        ets:delete(Tab),
+        case Previous of
+            {ok, Value} ->
+                application:set_env(fluxer_gateway, push_presence_eligibility, Value);
+            undefined ->
+                application:unset_env(fluxer_gateway, push_presence_eligibility)
+        end
+    end.
+
 presence_eligibility_suppresses_active_desktop_test() ->
     Tab = ets:new(test_member_presence, [set, public]),
     try

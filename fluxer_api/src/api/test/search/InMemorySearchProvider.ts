@@ -452,9 +452,12 @@ function compareThreadCursor(doc: SearchableThread, cursor: ThreadSearchCursor):
 	return doc.createdAt - cursor.createdAt || doc.idSequence - cursor.idSequence;
 }
 
+/** 在内存搜索实现中应用与正式后端一致的线程范围过滤 */
 function matchesThreadFilters(doc: SearchableThread, filters: ThreadSearchFilters): boolean {
+	// 测试搜索也必须排除显式范围之外的线程
 	if (doc.guildId !== filters.guildId || doc.parentId !== filters.parentId) return false;
 	if (filters.publicOnly && doc.type === 12 && !filters.privateThreadIds?.includes(doc.id)) return false;
+	if (filters.threadIds !== undefined && !filters.threadIds.includes(doc.id)) return false;
 	if (filters.archived !== undefined && doc.archived !== filters.archived) return false;
 	if (filters.tagIds && filters.tagIds.length > 0) {
 		const matches =

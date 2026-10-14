@@ -234,7 +234,7 @@ export function ThreadController(app: HonoApp) {
 			operationId: 'list_guild_active_threads',
 			summary: 'List active guild threads',
 			description:
-				'Returns every active thread in the guild that the bot can view, newest first, with a thread member object for each thread the bot joined.',
+				'Returns viewable non-forum threads and joined forum or media posts, newest first, with the bot’s own memberships. Forum directory subscriptions do not expose unjoined posts.',
 			responseSchema: ActiveThreadsResponse,
 			statusCode: 200,
 			security: ['botToken'],

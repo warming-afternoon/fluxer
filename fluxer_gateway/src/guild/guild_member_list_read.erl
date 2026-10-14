@@ -13,6 +13,7 @@
     snapshot/2,
     with_member_item_memo/1,
     note_presence_write/1,
+    presence_seq/0,
     get_members_cursor/2
 ]).
 
@@ -318,6 +319,7 @@ new_range_entry(Stamp, Ref, Range, StoreGroups, ReadCtx) ->
     Users = maps:from_list([{UserId, true} || UserId <- Keys, is_integer(UserId)]),
     {Stamp, Seq, Users, Keys, Op, range_connected_users(Users, ReadCtx)}.
 
+%% 读取本进程在线状态写入序列，供缓存判断 ETS 内容是否变化
 -spec presence_seq() -> non_neg_integer().
 presence_seq() ->
     element(1, presence_writes()).

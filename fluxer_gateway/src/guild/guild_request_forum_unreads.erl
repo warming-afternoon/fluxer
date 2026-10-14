@@ -102,6 +102,7 @@ guild_scope(GuildId, Request, Guilds) ->
             denied
     end.
 
+%% 将论坛未读查询限制为用户已加入且可访问的帖子
 -spec scope(map() | undefined, map(), map()) -> {ok, #{integer() => thread_scope()}} | denied.
 scope(undefined, _Request, _State) ->
     denied;
@@ -112,8 +113,19 @@ scope(Session, #{channel_id := ForumId, thread_ids := ThreadIds}, State) when
         guild_thread_gate:session_viewer(Session) andalso is_forum(ForumId, State) andalso
             guild_member_list_connected:session_can_view_channel(Session, ForumId, State)
     of
-        true -> {ok, thread_scopes(ForumId, ThreadIds, State)};
-        false -> denied
+        true ->
+            Joined = [
+                Id
+             || Id <- ThreadIds,
+                is_integer(Id),
+                case guild_thread_gate:store(State) of
+                    undefined -> false;
+                    Tab -> guild_thread_store:is_member(Tab, Id, maps:get(user_id, Session))
+                end
+            ],
+            {ok, thread_scopes(ForumId, Joined, State)};
+        false ->
+            denied
     end;
 scope(_Session, _Request, _State) ->
     denied.

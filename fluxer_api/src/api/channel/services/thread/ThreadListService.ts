@@ -9,7 +9,7 @@ import {loadThreadViews} from '@app/api/channel/services/thread/ThreadViews';
 import type {ThreadViewer} from '@app/api/experiment/ChannelThreadsGate';
 import type {ThreadState} from '@app/api/models/ThreadState';
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
-import {THREAD_PARENT_CHANNEL_TYPES} from '@fluxer/constants/src/ThreadConstants';
+import {THREAD_ONLY_CHANNEL_TYPES, THREAD_PARENT_CHANNEL_TYPES} from '@fluxer/constants/src/ThreadConstants';
 import {
 	canListArchivedThreads,
 	isThreadModerator,
@@ -22,8 +22,10 @@ import type {
 } from '@fluxer/schema/src/domains/channel/ThreadRequestSchemas';
 
 export class ThreadListService {
+	/** 注入线程目录所需的业务依赖 */
 	constructor(private readonly ctx: ThreadServiceContext) {}
 
+	/** 返回可见普通线程及用户已加入的论坛和媒体帖子 */
 	async listGuildActive(params: {userId: UserID; guildId: GuildID}): Promise<ActiveThreadsResponse> {
 		const {guildId, userId} = params;
 		const guild = await this.ctx.gatewayService.getGuildData({guildId, userId});
@@ -34,7 +36,17 @@ export class ThreadListService {
 		]);
 		const viewable = new Set(viewableChannelIds.map((id) => id.toString()));
 		const joined = new Set(joinedThreadIds);
-		const candidates = states.filter((state) => viewable.has(state.parentId.toString()));
+		// 批量读取父频道类型，避免逐帖查询与未加入论坛帖子泄漏
+		const parents = await this.ctx.channelRepository.channelData.listChannels([
+			...new Set(states.map((state) => state.parentId)),
+		]);
+		const parentTypes = new Map(parents.map((parent) => [parent.id, parent.type]));
+		const candidates = states.filter(
+			(state) =>
+				viewable.has(state.parentId.toString()) &&
+				parentTypes.has(state.parentId) &&
+				(!THREAD_ONLY_CHANNEL_TYPES.has(parentTypes.get(state.parentId)!) || joined.has(state.threadId)),
+		);
 		const memberships = await this.memberships(
 			candidates.filter((state) => joined.has(state.threadId)),
 			userId,
@@ -78,6 +90,7 @@ export class ThreadListService {
 		return views.map((view) => mapThreadToResponse(view));
 	}
 
+	/** 按归档时间分页返回允许发现的帖子，论坛范围限定为已加入帖子 */
 	async listPublicArchived(params: {
 		viewer: ThreadViewer;
 		userId: UserID;
@@ -86,6 +99,23 @@ export class ThreadListService {
 		limit: number;
 	}): Promise<ArchivedThreadsResponse> {
 		const auth = await this.authorizeParent(params.viewer, params.userId, params.channelId, false);
+		// 先过滤成员范围再分页，保证 has_more 与实际可见结果一致
+		if (THREAD_ONLY_CHANNEL_TYPES.has(auth.channel.type)) {
+			const ids = await this.ctx.channelRepository.threads.listJoinedThreadIds(params.userId, auth.channel.guildId!);
+			const states = (await this.ctx.channelRepository.threads.getStates(ids))
+				.filter(
+					(state) =>
+						state.parentId === auth.channel.id &&
+						state.archived &&
+						(!params.before || (state.archiveTimestamp ?? state.createdAt).getTime() < params.before.getTime()),
+				)
+				.sort(
+					(a, b) =>
+						(b.archiveTimestamp ?? b.createdAt).getTime() - (a.archiveTimestamp ?? a.createdAt).getTime() ||
+						(a.threadId > b.threadId ? -1 : a.threadId < b.threadId ? 1 : 0),
+				);
+			return this.respondPage(states.slice(0, params.limit), states.length > params.limit, params.userId, auth);
+		}
 		const page = await this.ctx.channelRepository.threads.listArchivedThreads(auth.channel.id, false, {
 			before: params.before,
 			limit: params.limit,

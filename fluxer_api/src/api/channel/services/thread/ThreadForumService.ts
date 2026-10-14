@@ -40,8 +40,10 @@ const SEARCH_INDEX_RETRY_AFTER_SECONDS = 2;
 const MAX_SEARCH_PRIVATE_THREAD_IDS = 1000;
 
 export class ThreadForumService {
+	/** 注入论坛帖子查询所需的业务依赖 */
 	constructor(private readonly ctx: ThreadServiceContext) {}
 
+	/** 批量返回已加入帖子的作者与首条消息 */
 	async postData(params: {
 		viewer: ThreadViewer;
 		userId: UserID;
@@ -53,7 +55,11 @@ export class ThreadForumService {
 		const guildId = parentAuth.channel.guildId!;
 		const {threads, channelData} = this.ctx.channelRepository;
 		const requestedIds = [...new Set(params.threadIds)];
-		const states = (await threads.getStates(requestedIds)).filter((state) => state.parentId === parentAuth.channel.id);
+		// 按加入关系限制批量请求，避免加载未加入帖子的内容
+		const memberships = new Set(await threads.listJoinedThreadIds(params.userId, guildId));
+		const states = (await threads.getStates(requestedIds.filter((threadId) => memberships.has(threadId)))).filter(
+			(state) => state.parentId === parentAuth.channel.id && memberships.has(state.threadId),
+		);
 		const threadIds = states.map((state) => state.threadId);
 		const [channels, firstMessages] = await Promise.all([
 			channelData.listChannels(threadIds),
@@ -84,7 +90,7 @@ export class ThreadForumService {
 		const ownerByThread = new Map(channels.map((channel) => [channel.id.toString(), channel.ownerId?.toString()]));
 		return {
 			threads: Object.fromEntries(
-				requestedIds.map((threadId) => {
+				threadIds.map((threadId) => {
 					const key = threadId.toString();
 					const ownerId = ownerByThread.get(key);
 					return [
@@ -99,6 +105,7 @@ export class ThreadForumService {
 		};
 	}
 
+	/** 在已有权限规则内搜索帖子，并限制论坛结果为已加入范围 */
 	async search(params: {
 		viewer: ThreadViewer;
 		userId: UserID;
@@ -144,6 +151,14 @@ export class ThreadForumService {
 				? []
 				: await threads.listJoinedPrivateThreadIds(params.userId, guildId, parent.id, MAX_SEARCH_PRIVATE_THREAD_IDS);
 		const joinedPrivate = new Set(privateThreadIds.map((id) => id.toString()));
+		// 将成员范围交给搜索后端过滤，保持结果总数与分页语义一致
+		const directoryIds = THREAD_ONLY_CHANNEL_TYPES.has(parent.type)
+			? (await threads.listJoinedThreadIds(params.userId, guildId)).map((id) => id.toString())
+			: undefined;
+		const directoryIdSet = directoryIds === undefined ? undefined : new Set(directoryIds);
+		if (directoryIds?.length === 0) {
+			return {threads: [], members: [], has_more: false, total_results: 0, first_messages: []};
+		}
 		const result = await searchThreadDocuments({
 			name: query.name ?? '',
 			filters: {
@@ -151,6 +166,7 @@ export class ThreadForumService {
 				parentId: parent.id.toString(),
 				publicOnly: !moderator,
 				privateThreadIds: [...joinedPrivate],
+				threadIds: directoryIds,
 				archived: query.archived,
 				tagIds,
 				tagSetting,
@@ -166,7 +182,9 @@ export class ThreadForumService {
 		const order = searchHitThreadIds(result);
 		const states = (await threads.getStates(order)).filter(
 			(state) =>
-				state.parentId === parent.id && (moderator || !state.isPrivate || joinedPrivate.has(state.threadId.toString())),
+				state.parentId === parent.id &&
+				(directoryIdSet === undefined || directoryIdSet.has(state.threadId.toString())) &&
+				(moderator || !state.isPrivate || joinedPrivate.has(state.threadId.toString())),
 		);
 		const views = await loadThreadViews(this.ctx.channelRepository, states, [parent]);
 		const viewById = new Map(views.map((view) => [view.state.threadId.toString(), view]));

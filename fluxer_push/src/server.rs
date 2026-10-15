@@ -6,6 +6,7 @@ use crate::metrics::Metrics;
 use crate::relay;
 use crate::relay_consent::{self, RelayConsentStore};
 use crate::rpc::RpcClient;
+use crate::subscription_batcher::SubscriptionBatcher;
 use crate::tokens::TokenCache;
 use crate::vendor;
 use axum::Router;
@@ -85,7 +86,9 @@ pub struct AppState {
     pub(crate) metrics: Arc<Metrics>,
     pub(crate) sidecar: Arc<Sidecar>,
     pub(crate) relay_consent: RelayConsentStore,
-    pub(crate) rpc: RpcClient,
+    pub(crate) rpc: Arc<RpcClient>,
+    /// 清除通知任务共用设备批查缓冲区。
+    pub(crate) subscription_batcher: Option<SubscriptionBatcher>,
     pub(crate) http: reqwest::Client,
     pub(crate) web_push_http: reqwest::Client,
     pub(crate) apns_http: reqwest::Client,
@@ -99,8 +102,13 @@ impl AppState {
         let relay_consent = RelayConsentStore::new(cfg.relay_consent_accepted);
         metrics.record_relay_consent_accepted(relay_consent.accepted());
         let http = vendor::http_client()?;
+        let rpc = Arc::new(RpcClient::new(&cfg.rpc, http.clone(), Arc::clone(&metrics)));
+        let subscription_batcher = cfg.subscription_batching_enabled.then(|| {
+            SubscriptionBatcher::new(cfg.queue_capacity, Arc::clone(&rpc), Arc::clone(&metrics))
+        });
         Ok(Self {
-            rpc: RpcClient::new(&cfg.rpc, http.clone(), Arc::clone(&metrics)),
+            rpc,
+            subscription_batcher,
             relay_consent,
             sidecar: Arc::new(Sidecar::new(Arc::clone(&metrics))),
             web_push_http: vendor::web_push_http_client(&cfg.private_hosts)?,
@@ -155,6 +163,9 @@ async fn run_delivery(cfg: DeliveryConfig) -> anyhow::Result<()> {
     state.sidecar.set_serving(false);
     subscriber.abort();
     drain_jobs(&state, jobs, JOB_DRAIN_TIMEOUT).await;
+    if let Some(batcher) = &state.subscription_batcher {
+        batcher.shutdown().await;
+    }
     serving.stop().await;
     Ok(())
 }

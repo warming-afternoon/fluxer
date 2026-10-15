@@ -289,6 +289,33 @@ const RPC_OUTCOME_COUNT: usize = RpcOutcome::ALL.len();
 const CONSENT_UPDATE_COUNT: usize = ConsentUpdate::ALL.len();
 
 pub struct Metrics {
+    /// 设备批查的 requests 指标，不含用户标识。
+    pub(crate) subscription_batch_requests: AtomicU64,
+
+    /// 设备批查的 batches 指标，不含用户标识。
+    pub(crate) subscription_batch_batches: AtomicU64,
+
+    /// 设备批查的 users 指标，不含用户标识。
+    pub(crate) subscription_batch_users: AtomicU64,
+
+    /// 设备批查的 queued 指标，不含用户标识。
+    pub(crate) subscription_batch_queued: AtomicU64,
+
+    /// 设备批查的 inflight 指标，不含用户标识。
+    pub(crate) subscription_batch_inflight: AtomicU64,
+
+    /// 设备批查的 wait_ms 指标，不含用户标识。
+    pub(crate) subscription_batch_wait_ms: AtomicU64,
+
+    /// 设备批查的 rejected 指标，不含用户标识。
+    pub(crate) subscription_batch_rejected: AtomicU64,
+
+    /// 设备批查的 expired 指标，不含用户标识。
+    pub(crate) subscription_batch_expired: AtomicU64,
+
+    /// 设备批查的 failed 指标，不含用户标识。
+    pub(crate) subscription_batch_failed: AtomicU64,
+
     jobs_received: [AtomicU64; JOB_KIND_COUNT],
     jobs_rejected: [AtomicU64; JOB_REJECTION_COUNT],
     jobs_completed: [AtomicU64; JOB_KIND_COUNT],
@@ -318,6 +345,16 @@ pub struct Metrics {
 impl Metrics {
     pub fn new() -> Self {
         Self {
+            subscription_batch_requests: AtomicU64::new(0),
+            subscription_batch_batches: AtomicU64::new(0),
+            subscription_batch_users: AtomicU64::new(0),
+            subscription_batch_queued: AtomicU64::new(0),
+            subscription_batch_inflight: AtomicU64::new(0),
+            subscription_batch_wait_ms: AtomicU64::new(0),
+            subscription_batch_rejected: AtomicU64::new(0),
+            subscription_batch_expired: AtomicU64::new(0),
+            subscription_batch_failed: AtomicU64::new(0),
+
             jobs_received: [const { AtomicU64::new(0) }; JOB_KIND_COUNT],
             jobs_rejected: [const { AtomicU64::new(0) }; JOB_REJECTION_COUNT],
             jobs_completed: [const { AtomicU64::new(0) }; JOB_KIND_COUNT],
@@ -577,6 +614,51 @@ impl Metrics {
             out,
             "fluxer_push_rings_suppressed_total",
             &self.rings_suppressed,
+        )?;
+        render_counter(
+            out,
+            "fluxer_push_subscription_batch_requests_total",
+            &self.subscription_batch_requests,
+        )?;
+        render_counter(
+            out,
+            "fluxer_push_subscription_batch_batches_total",
+            &self.subscription_batch_batches,
+        )?;
+        render_counter(
+            out,
+            "fluxer_push_subscription_batch_users_total",
+            &self.subscription_batch_users,
+        )?;
+        render_gauge(
+            out,
+            "fluxer_push_subscription_batch_queued",
+            &self.subscription_batch_queued,
+        )?;
+        render_gauge(
+            out,
+            "fluxer_push_subscription_batch_inflight",
+            &self.subscription_batch_inflight,
+        )?;
+        render_counter(
+            out,
+            "fluxer_push_subscription_batch_wait_ms_total",
+            &self.subscription_batch_wait_ms,
+        )?;
+        render_counter(
+            out,
+            "fluxer_push_subscription_batch_rejected_total",
+            &self.subscription_batch_rejected,
+        )?;
+        render_counter(
+            out,
+            "fluxer_push_subscription_batch_expired_total",
+            &self.subscription_batch_expired,
+        )?;
+        render_counter(
+            out,
+            "fluxer_push_subscription_batch_failed_total",
+            &self.subscription_batch_failed,
         )?;
         render_gauge(out, "fluxer_push_queue_depth", &self.queue_depth)?;
         render_gauge(

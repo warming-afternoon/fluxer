@@ -182,6 +182,9 @@ pub struct DeliveryConfig {
     pub nats: NatsConfig,
     pub rpc: RpcConfig,
     pub queue_capacity: usize,
+    /// 是否合并清除通知任务的设备查询。
+    pub subscription_batching_enabled: bool,
+
     pub send_concurrency: usize,
     pub vapid: VapidConfig,
     pub apns: Option<ApnsConfig>,
@@ -259,6 +262,11 @@ impl DeliveryConfig {
                 1,
                 1_000_000,
             )?,
+            subscription_batching_enabled: parse_bool(
+                "FLUXER_PUSH_SUBSCRIPTION_BATCHING_ENABLED",
+                env.get("FLUXER_PUSH_SUBSCRIPTION_BATCHING_ENABLED"),
+            )?
+            .unwrap_or(true),
             send_concurrency: parse_number(
                 "FLUXER_PUSH_SERVICE_SEND_CONCURRENCY",
                 env.get("FLUXER_PUSH_SERVICE_SEND_CONCURRENCY"),

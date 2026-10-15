@@ -1671,21 +1671,15 @@ export class RpcService {
 		return resolveLimitSafe(this.limitConfigService.getConfigSnapshot(), ctx, key, fallback);
 	}
 
+	/** 批量读取通知设置并保持 RPC 响应与输入用户逐项对齐 */
 	private async getUserGuildSettings(params: {userIds: Array<UserID>; guildId: GuildID}): Promise<{
+		/** 按请求用户顺序排列的设置，缺失项为 null */
 		user_guild_settings: Array<UserGuildSettings | null>;
 	}> {
+		// 保留个人设置的零社区映射，避免在 RPC 层逐用户发起查询。
 		const {userIds, guildId} = params;
 		const actualGuildId = guildId === createGuildID(0n) ? null : guildId;
-		const settled = await allSettledWithConcurrency(userIds, RPC_RESPONSE_MAP_CONCURRENCY, (userId) =>
-			this.userRepository.findGuildSettings(userId, actualGuildId),
-		);
-		const userGuildSettings: Array<UserGuildSettings | null> = [];
-		for (const result of settled) {
-			if (result.status === 'rejected') {
-				throw result.reason;
-			}
-			userGuildSettings.push(result.value);
-		}
+		const userGuildSettings = await this.userRepository.findGuildSettingsBatch(userIds, actualGuildId);
 		return {user_guild_settings: userGuildSettings};
 	}
 

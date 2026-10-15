@@ -229,6 +229,15 @@ export class UserRepository {
 		return this.settingsRepo.findGuildSettings(userId, guildId);
 	}
 
+	/** 通过设置仓储批量读取社区通知设置 */
+	async findGuildSettingsBatch(
+		userIds: Array<UserID>,
+		guildId: GuildID | null,
+	): Promise<Array<UserGuildSettings | null>> {
+		// 数据访问与分块逻辑统一由设置仓储负责。
+		return this.settingsRepo.findGuildSettingsBatch(userIds, guildId);
+	}
+
 	async findAllGuildSettings(userId: UserID): Promise<Array<UserGuildSettings>> {
 		return this.settingsRepo.findAllGuildSettings(userId);
 	}

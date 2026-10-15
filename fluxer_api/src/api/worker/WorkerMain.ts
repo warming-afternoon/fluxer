@@ -2,7 +2,7 @@
 
 import {Config} from '@app/api/Config';
 import {createApiContext} from '@app/api/CreateApiContext';
-import {setDatabaseQueryExecutor} from '@app/api/database/CassandraQueryExecution';
+import {setDatabaseQueryExecutor, shutdownDatabaseQueryExecutor} from '@app/api/database/CassandraQueryExecution';
 import {ensurePostgresKvSchema, PostgresKvQueryExecutor} from '@app/api/database/PostgresKvQueryExecutor';
 import {
 	jetStreamActivityPublisher,
@@ -207,6 +207,7 @@ export async function startWorkerMain(): Promise<void> {
 		});
 		await cleanupStep('postgres', async () => {
 			if (postgresInitialized) {
+				await shutdownDatabaseQueryExecutor();
 				setDatabaseQueryExecutor(null);
 				await shutdownPostgres();
 				postgresInitialized = false;
@@ -232,7 +233,8 @@ export async function startWorkerMain(): Promise<void> {
 			postgresInitialized = true;
 			const postgres = getDefaultPostgresClient();
 			await ensurePostgresKvSchema(postgres);
-			setDatabaseQueryExecutor(new PostgresKvQueryExecutor(postgres));
+			const executor = new PostgresKvQueryExecutor(postgres, Config.postgres.readStateBatchingEnabled);
+			setDatabaseQueryExecutor(executor);
 			Logger.info('Postgres KV client initialised for worker backend');
 		}
 		if (Config.database.backend === 'cassandra') {

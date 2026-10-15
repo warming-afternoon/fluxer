@@ -70,6 +70,8 @@ export interface APIConfig {
 		maxConnections: number;
 		kvTable: string;
 		preparedStatements: boolean;
+		/** 是否启用跨请求收集窗口 */
+		readStateBatchingEnabled: boolean;
 	};
 	database: {
 		backend: 'cassandra' | 'postgres';

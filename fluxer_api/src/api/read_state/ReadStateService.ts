@@ -29,6 +29,8 @@ function hadUnreadThrough(previous: ReadState | null, messageId: MessageID, unre
 }
 
 export class ReadStateService {
+	private readonly afterWriteQueues = new Map<string, Promise<void>>();
+
 	constructor(
 		private repository: ReadStateRepository,
 		private gatewayService: IGatewayService,
@@ -69,28 +71,30 @@ export class ReadStateService {
 			manual ?? false,
 			marker,
 		);
-		if (!implicit) {
-			await this.clearPushChannelNotifications({userId, channelId, messageId});
-		} else if (hadUnreadThrough(previous, messageId, implicit.unreadThrough)) {
-			void this.clearPushChannelNotifications({userId, channelId, messageId});
-		}
-		if (emitGateway) {
-			await this.dispatchMessageAck({
-				userId,
-				channelId,
-				messageId: readState.lastMessageId ?? messageId,
-				mentionCount: readState.mentionCount,
-				manual,
-				version: readState.version,
-				readState,
-			}).catch((error) => {
-				Logger.error(
-					{userId: userId.toString(), channelId: channelId.toString(), error},
-					'Failed to dispatch MESSAGE_ACK',
-				);
-				return null;
-			});
-		}
+		await this.afterWrite(userId, channelId, async () => {
+			if (!implicit) {
+				await this.clearPushChannelNotifications({userId, channelId, messageId});
+			} else if (hadUnreadThrough(previous, messageId, implicit.unreadThrough)) {
+				void this.clearPushChannelNotifications({userId, channelId, messageId});
+			}
+			if (emitGateway) {
+				await this.dispatchMessageAck({
+					userId,
+					channelId,
+					messageId: readState.lastMessageId ?? messageId,
+					mentionCount: readState.mentionCount,
+					manual,
+					version: readState.version,
+					readState,
+				}).catch((error) => {
+					Logger.error(
+						{userId: userId.toString(), channelId: channelId.toString(), error},
+						'Failed to dispatch MESSAGE_ACK',
+					);
+					return null;
+				});
+			}
+		});
 		return readState;
 	}
 
@@ -169,29 +173,44 @@ export class ReadStateService {
 			const readStatesByChannel = new Map(updatedReadStates.map((readState) => [readState.channelId, readState]));
 			await Promise.all(
 				readStates.map(({channelId, messageId}) =>
-					Promise.all([
-						this.dispatchMessageAck({
-							userId,
-							channelId,
-							messageId: readStatesByChannel.get(channelId)?.lastMessageId ?? messageId,
-							mentionCount: readStatesByChannel.get(channelId)?.mentionCount ?? 0,
-							version: readStatesByChannel.get(channelId)?.version,
-							readState: readStatesByChannel.get(channelId),
-						}).catch((error) => {
-							Logger.error(
-								{userId: userId.toString(), channelId: channelId.toString(), error},
-								'Failed to dispatch MESSAGE_ACK for bulk ack',
-							);
-							return null;
-						}),
-						this.clearPushChannelNotifications({userId, channelId, messageId}),
-					]),
+					this.afterWrite(userId, channelId, async () => {
+						await Promise.all([
+							this.dispatchMessageAck({
+								userId,
+								channelId,
+								messageId: readStatesByChannel.get(channelId)?.lastMessageId ?? messageId,
+								mentionCount: readStatesByChannel.get(channelId)?.mentionCount ?? 0,
+								version: readStatesByChannel.get(channelId)?.version,
+								readState: readStatesByChannel.get(channelId),
+							}).catch((error) => {
+								Logger.error(
+									{userId: userId.toString(), channelId: channelId.toString(), error},
+									'Failed to dispatch MESSAGE_ACK for bulk ack',
+								);
+								return null;
+							}),
+							this.clearPushChannelNotifications({userId, channelId, messageId}),
+						]);
+					}),
 				),
 			);
 			return updatedReadStates;
 		} catch (error) {
 			Logger.error({userId: userId.toString(), error}, 'Bulk ack messages failed');
 			throw error;
+		}
+	}
+
+	/** 同一用户与频道的提交后通知按顺序发送，防止手动回退被较早的确认覆盖 */
+	private async afterWrite(userId: UserID, channelId: ChannelID, task: () => Promise<void>): Promise<void> {
+		const key = `${userId}:${channelId}`;
+		const previous = this.afterWriteQueues.get(key) ?? Promise.resolve();
+		const current = previous.catch(() => undefined).then(task);
+		this.afterWriteQueues.set(key, current);
+		try {
+			await current;
+		} finally {
+			if (this.afterWriteQueues.get(key) === current) this.afterWriteQueues.delete(key);
 		}
 	}
 

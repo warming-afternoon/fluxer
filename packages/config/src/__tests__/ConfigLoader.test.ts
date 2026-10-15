@@ -304,6 +304,7 @@ describe('ConfigLoader', () => {
 			FLUXER_POSTGRES_MAX_CONNECTIONS: '7',
 			FLUXER_POSTGRES_SSL_CA: '-----BEGIN CERTIFICATE-----\\n-----END CERTIFICATE-----',
 			FLUXER_POSTGRES_PREPARED_STATEMENTS: 'false',
+			FLUXER_READ_STATE_BATCHING_ENABLED: 'false',
 			FLUXER_API_WORKER_MODE: 'single_task',
 			FLUXER_API_WORKER_TASK: 'processStripeWebhook',
 			FLUXER_LIVEKIT_ENABLED: 'true',
@@ -320,6 +321,7 @@ describe('ConfigLoader', () => {
 		expect(config.database.postgres.max_connections).toBe(7);
 		expect(config.database.postgres.ssl_ca).toBe('-----BEGIN CERTIFICATE-----\\n-----END CERTIFICATE-----');
 		expect(config.database.postgres.prepared_statements).toBe(false);
+		expect(config.database.postgres.read_state_batching_enabled).toBe(false);
 		expect(config.services.api.worker?.mode).toBe('single_task');
 		expect(config.services.api.worker?.task).toBe('processStripeWebhook');
 		expect(config.integrations.voice.default_region?.id).toBe('local');

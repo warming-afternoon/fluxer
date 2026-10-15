@@ -49,6 +49,10 @@ const NAMED_FLUXER_ENV_OVERRIDES: Record<string, NamedEnvOverride> = {
 	FLUXER_POSTGRES_SSL: {path: ['database', 'postgres', 'ssl'], parse: parseBoolean},
 	FLUXER_POSTGRES_SSL_CA: {path: ['database', 'postgres', 'ssl_ca']},
 	FLUXER_POSTGRES_MAX_CONNECTIONS: {path: ['database', 'postgres', 'max_connections'], parse: parseInteger},
+	FLUXER_READ_STATE_BATCHING_ENABLED: {
+		path: ['database', 'postgres', 'read_state_batching_enabled'],
+		parse: parseBoolean,
+	},
 	FLUXER_POSTGRES_KV_TABLE: {path: ['database', 'postgres', 'kv_table']},
 	FLUXER_POSTGRES_PREPARED_STATEMENTS: {path: ['database', 'postgres', 'prepared_statements'], parse: parseBoolean},
 	FLUXER_DATABASE_BACKEND: {path: ['database', 'backend']},

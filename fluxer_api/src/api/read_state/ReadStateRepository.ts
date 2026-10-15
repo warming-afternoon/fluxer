@@ -4,6 +4,7 @@ import type {ChannelID, GuildID, MessageID, UserID} from '@app/api/BrandedTypes'
 import {channelIdToMessageId, createMessageID} from '@app/api/BrandedTypes';
 import {
 	BatchBuilder,
+	executeReadStateMutations,
 	fetchMany,
 	fetchManyInChunks,
 	fetchOne,
@@ -91,6 +92,17 @@ export class ReadStateRepository {
 		manual = false,
 		marker?: ReadStateMarker | null,
 	): Promise<ReadStateUpsert> {
+		// 单条请求与其他用户的请求共享数据库批次，提交后才返回状态。
+		const pending = executeReadStateMutations([
+			{kind: 'ack', userId, channelId, messageId, mentionCount, lastPinTimestamp, manual, marker},
+		]);
+		if (pending) {
+			const [result] = await pending;
+			return {
+				readState: new ReadState(result!.row!),
+				previous: result!.previous ? new ReadState(result!.previous) : null,
+			};
+		}
 		return this.upsertReadStateRow(userId, channelId, messageId, mentionCount, lastPinTimestamp, manual, marker);
 	}
 
@@ -142,6 +154,12 @@ export class ReadStateRepository {
 	> {
 		if (updates.length === 0) {
 			return [];
+		}
+		// 提及增量必须与确认使用同一用户顺序，避免并发清零或覆盖。
+		const pending = executeReadStateMutations(updates.map((update) => ({kind: 'mention', ...update})));
+		if (pending) {
+			const results = await pending;
+			return updates.filter((_, index) => results[index]!.applied).map(({userId, channelId}) => ({userId, channelId}));
 		}
 		return this.bulkIncrementMentionCountsRows(updates);
 	}
@@ -215,6 +233,11 @@ export class ReadStateRepository {
 			marker?: ReadStateMarker | null;
 		}>,
 	): Promise<Array<ReadState>> {
+		// 批量 HTTP 与单条 HTTP 均经过同一个数据库协调器。
+		const pending = executeReadStateMutations(
+			readStates.map((state) => ({kind: 'ack', userId, ...state, mentionCount: 0})),
+		);
+		if (pending) return (await pending).map((result) => new ReadState(result.row!));
 		return this.bulkAckMessageRows(userId, readStates);
 	}
 
@@ -278,6 +301,12 @@ export class ReadStateRepository {
 		lastPinTimestamp: Date,
 		marker?: ReadStateMarker | null,
 	): Promise<void> {
+		// 置顶确认也参与同一顺序，避免整行写入覆盖并发置顶变化。
+		const pending = executeReadStateMutations([{kind: 'pin', userId, channelId, lastPinTimestamp, marker}]);
+		if (pending) {
+			await pending;
+			return;
+		}
 		await upsertOne(
 			ReadStates.patchByPk(
 				{user_id: userId, channel_id: channelId},

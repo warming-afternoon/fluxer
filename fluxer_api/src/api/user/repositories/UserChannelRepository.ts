@@ -8,6 +8,7 @@ import {
 import {
 	BatchBuilder,
 	deleteOneOrMany,
+	executeReadStateMutations,
 	fetchMany,
 	fetchManyInChunks,
 	fetchOne,
@@ -265,6 +266,12 @@ export class UserChannelRepository {
 	}
 
 	async deleteAllReadStates(userId: UserID): Promise<void> {
+		// 删除也参与用户级事务顺序，避免排队确认在删除之后重新写回旧数据。
+		const pending = executeReadStateMutations([{kind: 'deleteUser', userId}]);
+		if (pending) {
+			await pending;
+			return;
+		}
 		await deleteOneOrMany(
 			ReadStates.deleteCql({
 				where: ReadStates.where.eq('user_id'),

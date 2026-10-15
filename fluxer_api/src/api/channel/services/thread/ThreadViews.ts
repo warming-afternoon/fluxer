@@ -3,6 +3,7 @@
 import type {ChannelID, GuildID} from '@app/api/BrandedTypes';
 import type {ChannelRepository} from '@app/api/channel/ChannelRepository';
 import type {ThreadView} from '@app/api/channel/services/thread/ThreadMappers';
+import {getChannelMetadata} from '@app/api/database/CassandraQueryExecution';
 import type {Channel} from '@app/api/models/Channel';
 import {ThreadState} from '@app/api/models/ThreadState';
 import {ThreadStats} from '@app/api/models/ThreadStats';
@@ -31,10 +32,15 @@ export async function loadThreadViews(
 	const threadIds = states.map((state) => state.threadId);
 	const parentTypes = new Map<ChannelID, number>(knownParents.map((parent) => [parent.id, parent.type]));
 	const missingParents = [...new Set(states.map((state) => state.parentId))].filter((id) => !parentTypes.has(id));
+	const metadata = missingParents.length > 0 ? getChannelMetadata(missingParents) : null;
 	const [channels, stats, parents] = await Promise.all([
 		repository.channelData.listChannels(threadIds),
 		repository.threads.getStatsMany(threadIds),
-		missingParents.length > 0 ? repository.channelData.listChannels(missingParents) : Promise.resolve([]),
+		metadata !== null
+			? metadata.then((rows) => [...rows.values()].map((row) => ({id: row.channelId, type: row.type})))
+			: missingParents.length > 0
+				? repository.channelData.listChannels(missingParents)
+				: Promise.resolve([]),
 	]);
 	for (const parent of parents) parentTypes.set(parent.id, parent.type);
 	const taggedParents = [

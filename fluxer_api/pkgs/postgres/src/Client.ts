@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import type {Pool, PoolClient, PoolConfig, QueryResult, QueryResultRow} from 'pg';
 import pg from 'pg';
+import {type PostgresNotificationCallbacks, PostgresNotificationListener} from './PostgresNotificationListener';
 
 const MAX_DIAGNOSTIC_FIELD_LENGTH = 128;
 
@@ -48,6 +49,8 @@ export interface IPostgresClient extends PostgresQueryable {
 	shutdown(): Promise<void>;
 	transaction<T>(fn: (client: PostgresQueryable) => Promise<T>): Promise<T>;
 	kvTable(): string;
+	/** 可选的专用通知连接，测试后端可以不提供 */
+	listen?(channel: string, callbacks: PostgresNotificationCallbacks): Promise<{close(): Promise<void>}>;
 }
 
 interface DefaultClientState {
@@ -109,6 +112,7 @@ class PostgresClient implements IPostgresClient {
 	private activeOperations = 0;
 	private resolveOperationsDrained: (() => void) | null = null;
 	private readonly acquiredConnections = new WeakMap<PoolClient, AcquiredPostgresConnection>();
+	private readonly listeners = new Set<PostgresNotificationListener>();
 
 	constructor(
 		config: PostgresConfig,
@@ -203,6 +207,8 @@ class PostgresClient implements IPostgresClient {
 
 	private async closePool(): Promise<void> {
 		await this.connection;
+		await Promise.all([...this.listeners].map((listener) => listener.close()));
+		this.listeners.clear();
 		if (this.activeOperations > 0) {
 			await new Promise<void>((resolve) => {
 				this.resolveOperationsDrained = resolve;
@@ -264,6 +270,39 @@ class PostgresClient implements IPostgresClient {
 
 	kvTable(): string {
 		return this.config.kvTable ?? 'fluxer_kv';
+	}
+
+	/** 建立查询池以外的通知连接，失败时清理所有重连资源 */
+	async listen(channel: string, callbacks: PostgresNotificationCallbacks): Promise<{close(): Promise<void>}> {
+		this.getPool();
+		assertIdentifier(channel);
+		const listener = new PostgresNotificationListener(
+			{
+				connectionString: this.config.url || undefined,
+				host: this.config.url ? undefined : (this.config.host ?? '127.0.0.1'),
+				port: this.config.url ? undefined : (this.config.port ?? 5432),
+				database: this.config.url ? undefined : (this.config.database ?? 'fluxer'),
+				user: this.config.url ? undefined : (this.config.username ?? 'fluxer'),
+				password: this.config.url ? undefined : (this.config.password ?? 'fluxer'),
+				ssl: this.config.ssl ? {rejectUnauthorized: true, ca: normalizePem(this.config.sslCa)} : undefined,
+			},
+			channel,
+			callbacks,
+		);
+		this.listeners.add(listener);
+		try {
+			await listener.start();
+		} catch (error) {
+			this.listeners.delete(listener);
+			await listener.close();
+			throw error;
+		}
+		return {
+			close: async () => {
+				this.listeners.delete(listener);
+				await listener.close();
+			},
+		};
 	}
 
 	private async withPool<T>(operation: (pool: Pool) => Promise<T>): Promise<T> {

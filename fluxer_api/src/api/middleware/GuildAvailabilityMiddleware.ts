@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {type ChannelID, createChannelID, createGuildID, type GuildID} from '@app/api/BrandedTypes';
+import {getChannelMetadata} from '@app/api/database/CassandraQueryExecution';
 import type {Guild} from '@app/api/models/Guild';
 import type {User} from '@app/api/models/User';
 import type {HonoEnv} from '@app/api/types/HonoEnv';
@@ -63,6 +64,9 @@ async function resolveGuildIdForRequest(ctx: Context<HonoEnv>, path: string): Pr
 	if (channelId === null) {
 		return null;
 	}
+	// 只消费稳定字段，不把元数据放入要求完整频道对象的请求缓存。
+	const metadata = getChannelMetadata([channelId]);
+	if (metadata !== null) return (await metadata).get(channelId)?.guildId ?? null;
 	const channel = await ctx.get('channelRepository').channelData.findUnique(channelId);
 	ctx.get('requestCache')?.channels.set(channelId, channel);
 	return channel?.guildId ?? null;

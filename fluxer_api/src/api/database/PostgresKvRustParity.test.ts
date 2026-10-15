@@ -38,11 +38,16 @@ function lockNamespace(source: string, pattern: RegExp): number {
 }
 
 describe('Postgres KV schema parity between the API and fluxer_svc', () => {
-	it('creates the same indexes apart from the API-only numeric index', () => {
+	it('creates the same indexes apart from API query-specific indexes', () => {
 		const typescript = indexSuffixes(TYPESCRIPT_SOURCE, /\$\{kvTable\}_([a-z_]+)/g);
 		const rust = indexSuffixes(RUST_SOURCE, /\{kv_table\}_([a-z_]+)/g);
 		expect(rust).toEqual(RUST_INDEX_SUFFIXES);
-		expect(typescript.filter((suffix) => !rust.includes(suffix))).toEqual(['row_key_numeric_idx']);
+		// 成员分页与计数由 API 执行，其专用索引与原数值索引由 API 初始化。
+		expect(typescript.filter((suffix) => !rust.includes(suffix))).toEqual([
+			'guild_members_count_cover_idx',
+			'guild_members_user_numeric_idx',
+			'row_key_numeric_idx',
+		]);
 		expect(rust.filter((suffix) => !typescript.includes(suffix))).toEqual([]);
 	});
 

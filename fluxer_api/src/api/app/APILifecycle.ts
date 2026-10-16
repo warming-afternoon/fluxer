@@ -8,6 +8,7 @@ import {
 	renderReadStateMetrics,
 	setDatabaseQueryExecutor,
 	shutdownDatabaseQueryExecutor,
+	startCassandraMetadataCaches,
 } from '@app/api/database/CassandraQueryExecution';
 import {ensurePostgresKvSchema, PostgresKvQueryExecutor} from '@app/api/database/PostgresKvQueryExecutor';
 import {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
@@ -133,7 +134,10 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 				const postgres = getDefaultPostgresClient();
 				await ensurePostgresKvSchema(postgres);
 				const executor = new PostgresKvQueryExecutor(postgres, config.postgres.readStateBatchingEnabled);
-				await executor.startChannelMetadataCache(config.postgres.channelMetadataCacheEnabled);
+				await executor.startChannelMetadataCache(
+					config.database.metadataCache?.channelEnabled ?? config.postgres.channelMetadataCacheEnabled,
+					config.database.metadataCache?.guildEnabled ?? config.postgres.guildAvailabilityCacheEnabled,
+				);
 				setDatabaseQueryExecutor(executor);
 				logger.info('Postgres KV client initialized');
 			} else if (config.database.backend === 'postgres') {
@@ -148,6 +152,13 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 					username: config.cassandra.username || undefined,
 					password: config.cassandra.password || undefined,
 				});
+				const cacheOptions = config.database.metadataCache;
+				if (cacheOptions && !config.dev.testModeEnabled) {
+					await startCassandraMetadataCaches(cacheOptions, config.cassandra.keyspace, {
+						kv: config.kv,
+						namespace: config.instance.baseDomain,
+					});
+				}
 				logger.info('Cassandra client initialized');
 			} else if (config.database.backend === 'cassandra') {
 				logger.info('Using injected database query executor for tests');

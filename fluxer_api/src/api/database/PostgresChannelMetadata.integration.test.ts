@@ -2,6 +2,7 @@
 
 import {createChannelID, createGuildID} from '@app/api/BrandedTypes';
 import {ChannelMetadataCache} from '@app/api/database/ChannelMetadataCache';
+import {GuildAvailabilityCache} from '@app/api/database/GuildAvailabilityCache';
 import {PostgresChannelMetadataInvalidation} from '@app/api/database/PostgresChannelMetadataInvalidation';
 import {
 	ensurePostgresKvSchema,
@@ -14,7 +15,8 @@ import {
 	initPostgres,
 	shutdownPostgres,
 } from '@pkgs/postgres/src/Client';
-import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
+import type {PostgresNotificationCallbacks} from '@pkgs/postgres/src/PostgresNotificationListener';
+import {afterAll, beforeAll, beforeEach, describe, expect, it, vi} from 'vitest';
 
 const testUrl = process.env.FLUXER_CHANNEL_METADATA_TEST_POSTGRES_URL;
 const kvTable = `kv_channel_meta_${process.pid}`;
@@ -183,4 +185,48 @@ describe.skipIf(!testUrl)('PostgreSQL channel metadata invalidation integration'
 		expect(broken.renderReadStateMetrics()).toContain('fluxer_channel_metadata_ready 0');
 		await broken.shutdown();
 	});
+});
+
+it('shares one listener, routes guild invalidation, fails safe on disconnect, and recovers empty', async () => {
+	const id = createGuildID(2n);
+	let callbacks!: PostgresNotificationCallbacks;
+	const load = vi.fn(async () => ({guildId: id, unavailableForEveryone: false, unavailableForNonStaff: false}));
+	const guilds = new GuildAvailabilityCache(load);
+	const channels = new ChannelMetadataCache(async () => new Map());
+	const close = vi.fn(async () => {});
+	const query = vi.fn(async () => ({rows: [], rowCount: 0}));
+	const listen = vi.fn(async (_name, cb) => {
+		callbacks = cb;
+		cb.state(true);
+		return {close};
+	});
+	const client = {
+		kvTable: () => 'test_kv',
+		transaction: async (fn: (db: {query: typeof query}) => Promise<void>) => fn({query}),
+		listen,
+	} as unknown as IPostgresClient;
+	const invalidation = new PostgresChannelMetadataInvalidation(client, channels, guilds);
+	await invalidation.start(false, true);
+	expect(listen).toHaveBeenCalledTimes(1);
+	expect(channels.renderMetrics()).toContain('fluxer_channel_metadata_ready 0');
+	await guilds.get(id);
+	callbacks.message(JSON.stringify({table: 'other', entity: 'guild', id: '2'}));
+	await guilds.get(id);
+	expect(load).toHaveBeenCalledTimes(1);
+	callbacks.message(JSON.stringify({table: 'test_kv', entity: 'guild', id: '2'}));
+	await guilds.get(id);
+	expect(load).toHaveBeenCalledTimes(2);
+	callbacks.state(false);
+	await guilds.get(id);
+	await guilds.get(id);
+	expect(load).toHaveBeenCalledTimes(4);
+	callbacks.state(true);
+	await guilds.get(id);
+	callbacks.message(JSON.stringify({table: 'test_kv', clear: true}));
+	await guilds.get(id);
+	expect(load).toHaveBeenCalledTimes(6);
+	callbacks.message('malformed');
+	expect(guilds.renderMetrics()).toContain('fluxer_guild_availability_ready 0');
+	await invalidation.shutdown();
+	expect(close).toHaveBeenCalledTimes(1);
 });

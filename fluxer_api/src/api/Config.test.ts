@@ -298,3 +298,38 @@ describe('buildAPIConfigFromMaster setup token', () => {
 		);
 	});
 });
+
+describe('backend-neutral metadata cache settings', () => {
+	it('preserves PG defaults and keeps Cassandra opt-in', async () => {
+		const master = await loadConfig();
+		const pg = {...master, database: {...master.database, backend: 'postgres' as const, metadata_cache: undefined}};
+		const ca = {...master, database: {...master.database, backend: 'cassandra' as const, metadata_cache: undefined}};
+		expect(buildAPIConfigFromMaster(pg).database.metadataCache).toEqual({channelEnabled: true, guildEnabled: false});
+		expect(buildAPIConfigFromMaster(ca).database.metadataCache).toEqual({channelEnabled: false, guildEnabled: false});
+	});
+
+	it('uses identical explicit toggles for both backends and honors legacy PG config otherwise', async () => {
+		const master = await loadConfig();
+		for (const backend of ['postgres', 'cassandra'] as const) {
+			const config = buildAPIConfigFromMaster({
+				...master,
+				database: {...master.database, backend, metadata_cache: {channel_enabled: true, guild_enabled: true}},
+			});
+			expect(config.database.metadataCache).toEqual({channelEnabled: true, guildEnabled: true});
+		}
+		const legacy = buildAPIConfigFromMaster({
+			...master,
+			database: {
+				...master.database,
+				backend: 'postgres',
+				metadata_cache: undefined,
+				postgres: {
+					...master.database.postgres,
+					channel_metadata_cache_enabled: false,
+					guild_availability_cache_enabled: true,
+				},
+			},
+		});
+		expect(legacy.database.metadataCache).toEqual({channelEnabled: false, guildEnabled: true});
+	});
+});

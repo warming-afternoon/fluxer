@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {type ChannelID, createChannelID, createGuildID, type GuildID} from '@app/api/BrandedTypes';
-import {getChannelMetadata} from '@app/api/database/CassandraQueryExecution';
+import {getChannelMetadata, getGuildAvailability} from '@app/api/database/CassandraQueryExecution';
 import type {Guild} from '@app/api/models/Guild';
 import type {User} from '@app/api/models/User';
 import type {HonoEnv} from '@app/api/types/HonoEnv';
@@ -81,6 +81,17 @@ export const GuildAvailabilityMiddleware = createMiddleware<HonoEnv>(async (ctx,
 	const normalizedPath = normalizeRequestPath(ctx.req.path);
 	const guildId = await resolveGuildIdForRequest(ctx, normalizedPath);
 	if (guildId === null) {
+		await next();
+		return;
+	}
+	const availability = getGuildAvailability(guildId);
+	if (availability !== null) {
+		const snapshot = await availability;
+		if (snapshot && (snapshot.unavailableForEveryone || (snapshot.unavailableForNonStaff && !isStaffUser(user)))) {
+			throw new MissingAccessError();
+		}
+		// Missing guilds preserve UnknownGuildError's original pass-through behavior.
+		// The snapshot must never enter the full Guild request cache.
 		await next();
 		return;
 	}

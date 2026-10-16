@@ -2,7 +2,11 @@
 
 import {Config} from '@app/api/Config';
 import {createApiContext} from '@app/api/CreateApiContext';
-import {setDatabaseQueryExecutor, shutdownDatabaseQueryExecutor} from '@app/api/database/CassandraQueryExecution';
+import {
+	setDatabaseQueryExecutor,
+	shutdownDatabaseQueryExecutor,
+	startCassandraMetadataCaches,
+} from '@app/api/database/CassandraQueryExecution';
 import {ensurePostgresKvSchema, PostgresKvQueryExecutor} from '@app/api/database/PostgresKvQueryExecutor';
 import {
 	jetStreamActivityPublisher,
@@ -171,6 +175,7 @@ export async function startWorkerMain(): Promise<void> {
 		await cleanupStep('storage change feed', shutdownStorageChangeFeed);
 		await cleanupStep('shared lists', stopSharedListWatch);
 		await cleanupStep('activity events', () => shutdownActivityEvents());
+		await cleanupStep('metadata caches and database executor', shutdownDatabaseQueryExecutor);
 		await cleanupStep('jetstream', async () => {
 			await jsConnectionManager?.drain();
 			jsConnectionManager = null;
@@ -207,7 +212,6 @@ export async function startWorkerMain(): Promise<void> {
 		});
 		await cleanupStep('postgres', async () => {
 			if (postgresInitialized) {
-				await shutdownDatabaseQueryExecutor();
 				setDatabaseQueryExecutor(null);
 				await shutdownPostgres();
 				postgresInitialized = false;
@@ -234,7 +238,10 @@ export async function startWorkerMain(): Promise<void> {
 			const postgres = getDefaultPostgresClient();
 			await ensurePostgresKvSchema(postgres);
 			const executor = new PostgresKvQueryExecutor(postgres, Config.postgres.readStateBatchingEnabled);
-			await executor.startChannelMetadataCache(Config.postgres.channelMetadataCacheEnabled);
+			await executor.startChannelMetadataCache(
+				Config.database.metadataCache?.channelEnabled ?? Config.postgres.channelMetadataCacheEnabled,
+				Config.database.metadataCache?.guildEnabled ?? Config.postgres.guildAvailabilityCacheEnabled,
+			);
 			setDatabaseQueryExecutor(executor);
 			Logger.info('Postgres KV client initialised for worker backend');
 		}
@@ -280,6 +287,12 @@ export async function startWorkerMain(): Promise<void> {
 			name: 'fluxer-worker',
 		});
 		await jsConnectionManager.connect();
+		if (Config.database.backend === 'cassandra' && Config.database.metadataCache) {
+			await startCassandraMetadataCaches(Config.database.metadataCache, Config.cassandra.keyspace, {
+				kv: Config.kv,
+				namespace: Config.instance.baseDomain,
+			});
+		}
 		Logger.info('JetStream connection established');
 		const queue = new JetStreamWorkerQueue(jsConnectionManager);
 		await queue.ensureInfrastructure(activeWorkerLanes);

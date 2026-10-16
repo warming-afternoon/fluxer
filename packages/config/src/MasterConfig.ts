@@ -47,6 +47,8 @@ export interface MasterConfig {
 	};
 	database: {
 		backend: DatabaseBackend;
+		/** Shared overrides; omitted values preserve each backend's defaults. */
+		metadata_cache?: {channel_enabled?: boolean; guild_enabled?: boolean};
 		cassandra: {
 			hosts: Array<string>;
 			port: number;
@@ -71,6 +73,7 @@ export interface MasterConfig {
 			read_state_batching_enabled: boolean;
 			/** 是否启用带数据库失效通知的频道元数据缓存 */
 			channel_metadata_cache_enabled: boolean;
+			guild_availability_cache_enabled: boolean;
 		};
 	};
 	s3?: {

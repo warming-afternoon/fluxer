@@ -246,6 +246,9 @@ export class KVClient implements IKVProvider {
 		} else {
 			this.client = new Redis(this.url, {
 				connectTimeout: this.timeoutMs,
+				...(resolvedConfig.enableOfflineQueue === undefined
+					? {}
+					: {enableOfflineQueue: resolvedConfig.enableOfflineQueue}),
 				commandTimeout: this.timeoutMs,
 				maxRetriesPerRequest: 1,
 				protocol: 2,
@@ -257,9 +260,13 @@ export class KVClient implements IKVProvider {
 	private createClusterClient(clusterConfig: ResolvedKVClientConfig): Cluster {
 		const {node, redisOptions} = resolveKVClusterConnection(clusterConfig.url);
 		return new Cluster([node], {
+			...(clusterConfig.enableOfflineQueue === undefined ? {} : {enableOfflineQueue: clusterConfig.enableOfflineQueue}),
 			clusterRetryStrategy: createRetryStrategy(),
 			redisOptions: {
 				...redisOptions,
+				...(clusterConfig.enableOfflineQueue === undefined
+					? {}
+					: {enableOfflineQueue: clusterConfig.enableOfflineQueue}),
 				connectTimeout: clusterConfig.timeoutMs,
 				commandTimeout: clusterConfig.timeoutMs,
 				maxRetriesPerRequest: 1,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type {ChannelID} from '@app/api/BrandedTypes';
+import type {ChannelID, GuildID} from '@app/api/BrandedTypes';
 import {getKvMeta, getTableMetadata} from '@app/api/database/CassandraMetaRegistry';
 import type {
 	CassandraParams,
@@ -12,12 +12,15 @@ import type {
 } from '@app/api/database/CassandraTypes';
 import {isConditionalQuery, validateTtlSeconds} from '@app/api/database/CassandraTypes';
 import {type ChannelMetadata, ChannelMetadataCache} from '@app/api/database/ChannelMetadataCache';
+import {type GuildAvailability, GuildAvailabilityCache} from '@app/api/database/GuildAvailabilityCache';
 import {PostgresChannelMetadataInvalidation} from '@app/api/database/PostgresChannelMetadataInvalidation';
 import {PostgresReadStateBatcher} from '@app/api/database/PostgresReadStateBatcher';
 import type {ReadStateMutation, ReadStateMutationResult} from '@app/api/database/ReadStateMutation';
 import type {ChannelRow, ReadStateRow} from '@app/api/database/types/ChannelTypes';
+import type {GuildRow} from '@app/api/database/types/GuildTypes';
 import {Logger} from '@app/api/Logger';
-import {Channels} from '@app/api/Tables';
+import {Channels, Guilds} from '@app/api/Tables';
+import {GuildFeatures} from '@fluxer/constants/src/GuildConstants';
 import {type IPostgresClient, type PostgresQueryable, quoteIdentifier} from '@pkgs/postgres/src/Client';
 import cassandra from 'cassandra-driver';
 
@@ -97,6 +100,11 @@ const EXPIRED_STORED_ROW = 'kv.expires_at IS NOT NULL AND kv.expires_at <= now()
 const MERGED_ROW_DATA = `CASE WHEN ${EXPIRED_STORED_ROW} THEN EXCLUDED.row_data ELSE kv.row_data || EXCLUDED.row_data END`;
 const KEPT_EXPIRES_AT = `CASE WHEN ${EXPIRED_STORED_ROW} THEN NULL ELSE kv.expires_at END`;
 const NO_EXPIRY = 'infinity';
+const FETCH_GUILD_AVAILABILITY = Guilds.select({
+	columns: ['guild_id', 'features'],
+	where: Guilds.where.eq('guild_id'),
+	limit: 1,
+});
 
 export async function postgresKvPassIsFresh(
 	client: IPostgresClient,
@@ -1028,6 +1036,8 @@ WHERE kv.table_name = expired.table_name AND kv.row_key = expired.row_key`,
 export class PostgresKvQueryExecutor {
 	private readonly table: string;
 	private readonly readStateBatcher: PostgresReadStateBatcher;
+	private readonly guildAvailability: GuildAvailabilityCache;
+	private guildAvailabilityEnabled = false;
 	private readonly channelMetadata: ChannelMetadataCache;
 	private readonly channelInvalidation: PostgresChannelMetadataInvalidation;
 
@@ -1047,7 +1057,25 @@ export class PostgresKvQueryExecutor {
 				rows.map((row) => [row.channel_id, {channelId: row.channel_id, guildId: row.guild_id ?? null, type: row.type}]),
 			);
 		});
-		this.channelInvalidation = new PostgresChannelMetadataInvalidation(client, this.channelMetadata);
+		this.guildAvailability = new GuildAvailabilityCache(async (id) => {
+			const [row] = await this.executeQuery<Pick<GuildRow, 'guild_id' | 'features'>>(
+				FETCH_GUILD_AVAILABILITY.bind({
+					guild_id: id,
+				}),
+			);
+			return row
+				? {
+						guildId: row.guild_id,
+						unavailableForEveryone: row.features?.has(GuildFeatures.UNAVAILABLE_FOR_EVERYONE) ?? false,
+						unavailableForNonStaff: row.features?.has(GuildFeatures.UNAVAILABLE_FOR_EVERYONE_BUT_STAFF) ?? false,
+					}
+				: null;
+		});
+		this.channelInvalidation = new PostgresChannelMetadataInvalidation(
+			client,
+			this.channelMetadata,
+			this.guildAvailability,
+		);
 		this.readStateBatcher = new PostgresReadStateBatcher(
 			client,
 			{
@@ -1059,6 +1087,11 @@ export class PostgresKvQueryExecutor {
 		);
 	}
 
+	clearMetadataCachesForTesting(): void {
+		this.channelMetadata.clear();
+		this.guildAvailability.clear();
+	}
+
 	/** 已读状态在数据库层共享缓冲区，不依赖 HTTP 请求如何分组 */
 	executeReadStateMutations(mutations: ReadonlyArray<ReadStateMutation>): Promise<Array<ReadStateMutationResult>> {
 		return this.readStateBatcher.enqueue(mutations);
@@ -1066,19 +1099,24 @@ export class PostgresKvQueryExecutor {
 
 	/** 报告跨请求组批和积压水位 */
 	renderReadStateMetrics(): string {
-		return this.readStateBatcher.renderMetrics() + this.channelMetadata.renderMetrics();
+		return (
+			this.readStateBatcher.renderMetrics() +
+			this.channelMetadata.renderMetrics() +
+			this.guildAvailability.renderMetrics()
+		);
 	}
 
 	/** 启用失败只停用缓存，不影响数据库和已读批处理服务 */
-	async startChannelMetadataCache(enabled = true): Promise<void> {
-		if (!enabled) return;
+	async startChannelMetadataCache(enabled = true, guildAvailabilityEnabled = false): Promise<void> {
+		this.guildAvailabilityEnabled = guildAvailabilityEnabled;
+		if (!enabled && !guildAvailabilityEnabled) return;
 		try {
-			await this.channelInvalidation.start();
+			await this.channelInvalidation.start(enabled, guildAvailabilityEnabled);
 		} catch (error) {
 			await this.channelInvalidation.shutdown();
 			logWarn(
 				{errorName: error instanceof Error ? error.name : 'UnknownError'},
-				'Channel metadata cache disabled: notification initialization failed',
+				'Metadata caches disabled: notification initialization failed',
 			);
 		}
 	}
@@ -1086,6 +1124,10 @@ export class PostgresKvQueryExecutor {
 	/** PostgreSQL 共用稳定字段缓存，未启用时使用原批量读取 */
 	getChannelMetadata(ids: ReadonlyArray<ChannelID>): Promise<Map<ChannelID, ChannelMetadata>> {
 		return this.channelMetadata.getMany(ids);
+	}
+
+	getGuildAvailability(id: GuildID): Promise<GuildAvailability | null> | null {
+		return this.guildAvailabilityEnabled ? this.guildAvailability.get(id) : null;
 	}
 
 	/** 先结束已接收的状态更新，再交由生命周期关闭连接池 */

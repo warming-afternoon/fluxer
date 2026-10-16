@@ -98,6 +98,8 @@ export interface MasterConfig {
 			max_inflight_requests: number;
 			/** 是否合并已读清通知与派发网关调用。 */
 			read_state_combined_gateway_rpc_enabled?: boolean;
+			/** 是否为会话已读请求只读取认证所需用户字段。 */
+			read_state_narrow_auth_enabled?: boolean;
 			automated_message_deletion_delay_days: number;
 			ip_ban_exempt_ips: Array<string>;
 			donation_proxy_key: string;

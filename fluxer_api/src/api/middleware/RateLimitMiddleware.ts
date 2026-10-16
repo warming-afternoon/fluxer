@@ -2,6 +2,7 @@
 
 import {createHash} from 'node:crypto';
 import * as AuthSession from '@app/api/auth/AuthSession';
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import {Config} from '@app/api/Config';
 import type {HonoEnv} from '@app/api/types/HonoEnv';
 import {getRequestClientIp} from '@app/api/utils/RequestClientIp';
@@ -40,7 +41,7 @@ function shouldEnforceRateLimits(ctx: Context<HonoEnv>): boolean {
 }
 
 function getAccountType(ctx: Context<HonoEnv>): AccountType {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user) {
 		const params = ctx.req.param();
 		if ('token' in params && 'webhook_id' in params) {
@@ -80,7 +81,7 @@ function getForwardedClientIdentifier(ctx: Context<HonoEnv>, bucket: string): st
 }
 
 function getClientIdentifier(ctx: Context<HonoEnv>, routeConfig: RouteRateLimitConfig): string {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (user?.id) {
 		const tokenType = ctx.get('authTokenType') ?? 'session';
 		if (tokenType === 'bearer') {
@@ -108,7 +109,7 @@ async function getRequestEmailIdentifier(ctx: Context<HonoEnv>): Promise<string 
 }
 
 function getGlobalRateLimit(ctx: Context<HonoEnv>): number {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (user?.flags && (user.flags & UserFlags.HIGH_GLOBAL_RATE_LIMIT) !== 0n) {
 		return 1200;
 	}
@@ -155,7 +156,7 @@ function getRetryAfterSeconds(result: RateLimitResult): number {
 async function revokeAuthenticatedSessionOnGlobalRateLimit(ctx: Context<HonoEnv>): Promise<void> {
 	const authTokenType = ctx.get('authTokenType');
 	if (authTokenType !== 'session') return;
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user || user.isBot) return;
 	const token = ctx.get('authToken');
 	if (!token) return;
@@ -172,7 +173,7 @@ export function RateLimitMiddleware(routeConfig: RouteRateLimitConfig): Middlewa
 			await next();
 			return;
 		}
-		const user = ctx.get('user');
+		const user = getRequestIdentity(ctx);
 		if (user?.flags && (user.flags & UserFlags.RATE_LIMIT_BYPASS) !== 0n) {
 			await next();
 			return;

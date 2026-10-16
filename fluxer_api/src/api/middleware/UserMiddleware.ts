@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import * as AuthSession from '@app/api/auth/AuthSession';
+import {isReadStatePrincipalRequest} from '@app/api/auth/ReadStatePrincipal';
+import {Config} from '@app/api/Config';
+import {isSyntheticUserId} from '@app/api/constants/Core';
 import {Logger} from '@app/api/Logger';
 import {hashRequestToken, recordAuthFailure} from '@app/api/middleware/RequestErrorTelemetry';
 import type {User} from '@app/api/models/User';
 import type {HonoEnv} from '@app/api/types/HonoEnv';
+import {ReadStatePrincipalRepository} from '@app/api/user/repositories/auth/ReadStatePrincipalRepository';
 import {isSignInRefused} from '@app/api/user/UserHelpers';
 import {getRequestClientIp} from '@app/api/utils/RequestClientIp';
 import {stripApiPrefix} from '@app/api/utils/RequestPathUtils';
 import type {Context} from 'hono';
 import {createMiddleware} from 'hono/factory';
+
+const readStatePrincipals = new ReadStatePrincipalRepository();
 
 type TokenType = 'session' | 'bearer' | 'bot' | 'admin_api_key';
 
@@ -65,16 +71,19 @@ function parseAuthHeader(authHeader?: string | null): ParsedAuthHeader | null {
 
 function setUserInContext(ctx: Context<HonoEnv>, user: User, trackActivity: boolean): void {
 	ctx.set('user', user);
-	if (trackActivity) {
-		const now = new Date();
-		const ip = getRequestClientIp(ctx);
-		const kvActivityTracker = ctx.get('kvActivityTracker');
-		const userActivityBuffer = ctx.get('userActivityBuffer');
-		userActivityBuffer.recordActivity(user.id, now, ip);
-		void kvActivityTracker.updateActivity(user.id, now).catch((error: unknown) => {
-			Logger.warn({error, userId: user.id}, 'Failed to update real-time user activity');
-		});
-	}
+	if (trackActivity) recordUserActivity(ctx, user.id);
+}
+
+/** 身份字段优化不改变活动记录与会话使用时间的既有行为。 */
+function recordUserActivity(ctx: Context<HonoEnv>, userId: User['id']): void {
+	const now = new Date();
+	const ip = getRequestClientIp(ctx);
+	const kvActivityTracker = ctx.get('kvActivityTracker');
+	const userActivityBuffer = ctx.get('userActivityBuffer');
+	userActivityBuffer.recordActivity(userId, now, ip);
+	void kvActivityTracker.updateActivity(userId, now).catch((error: unknown) => {
+		Logger.warn({error, userId: userId.toString()}, 'Failed to update real-time user activity');
+	});
 }
 
 export const UserMiddleware = createMiddleware<HonoEnv>(async (ctx, next) => {
@@ -89,6 +98,7 @@ export const UserMiddleware = createMiddleware<HonoEnv>(async (ctx, next) => {
 	ctx.set('oauthBearerAllowed', false);
 	ctx.set('oauthBearerScopes', undefined);
 	ctx.set('authToken', undefined);
+	ctx.set('readStatePrincipal', undefined);
 	if (!parsed) {
 		if (rawAuthHeader) {
 			recordAuthFailure(resolvedClientIp, hashRequestToken(rawAuthHeader));
@@ -102,12 +112,21 @@ export const UserMiddleware = createMiddleware<HonoEnv>(async (ctx, next) => {
 		const apiContext = ctx.get('apiContext');
 		const authSession = await AuthSession.getAuthSessionByToken(apiContext, token);
 		if (authSession) {
-			const user = await apiContext.services.users.findUnique(authSession.userId);
+			const narrow =
+				Config.readState?.narrowAuthEnabled === true &&
+				isReadStatePrincipalRequest(ctx.req.method, ctx.req.path) &&
+				!isSyntheticUserId(authSession.userId);
+			const principal = narrow ? await readStatePrincipals.findUnique(authSession.userId) : null;
+			const fullUser = narrow ? null : await apiContext.services.users.findUnique(authSession.userId);
+			const user = principal ?? fullUser;
 			if (user && !isSignInRefused(user)) {
 				void AuthSession.updateAuthSessionLastUsed(apiContext, authSession.sessionIdHash);
 				ctx.set('authSession', authSession);
 				ctx.set('authTokenType', 'session');
-				setUserInContext(ctx, user, true);
+				if (principal) {
+					ctx.set('readStatePrincipal', principal);
+					recordUserActivity(ctx, principal.id);
+				} else if (fullUser) setUserInContext(ctx, fullUser, true);
 			} else {
 				recordAuthFailure(resolvedClientIp, tokenHash);
 				if (user) {

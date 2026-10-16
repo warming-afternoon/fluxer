@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import {type ChannelID, createChannelID, createGuildID, type GuildID} from '@app/api/BrandedTypes';
 import {getChannelMetadata, getGuildAvailability} from '@app/api/database/CassandraQueryExecution';
 import type {Guild} from '@app/api/models/Guild';
@@ -41,11 +42,11 @@ function extractChannelId(path: string): ChannelID | null {
 	return createChannelID(BigInt(channelId));
 }
 
-function isStaffUser(user: User): boolean {
+function isStaffUser(user: Pick<User, 'flags'>): boolean {
 	return (user.flags & UserFlags.STAFF) === UserFlags.STAFF;
 }
 
-function isGuildUnavailableForUser(guild: Guild, user: User): boolean {
+function isGuildUnavailableForUser(guild: Guild, user: Pick<User, 'flags'>): boolean {
 	if (guild.features.has(GuildFeatures.UNAVAILABLE_FOR_EVERYONE)) {
 		return true;
 	}
@@ -73,7 +74,7 @@ async function resolveGuildIdForRequest(ctx: Context<HonoEnv>, path: string): Pr
 }
 
 export const GuildAvailabilityMiddleware = createMiddleware<HonoEnv>(async (ctx, next) => {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user) {
 		await next();
 		return;

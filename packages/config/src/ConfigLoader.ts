@@ -108,6 +108,7 @@ function defaultConfig(): MasterConfig {
 				request_timeout_ms: 120_000,
 				max_inflight_requests: 512,
 				read_state_combined_gateway_rpc_enabled: false,
+				read_state_narrow_auth_enabled: false,
 				automated_message_deletion_delay_days: 7,
 				ip_ban_exempt_ips: [],
 				donation_proxy_key: '',
@@ -636,6 +637,7 @@ function normalizeConfig(config: MasterConfig): MasterConfig {
 		config.services.api.read_state_combined_gateway_rpc_enabled ?? false,
 		'FLUXER_READ_STATE_COMBINED_GATEWAY_RPC_ENABLED',
 	);
+	assertBoolean(config.services.api.read_state_narrow_auth_enabled ?? false, 'FLUXER_READ_STATE_NARROW_AUTH_ENABLED');
 	assertIntegerInRange(config.services.api.max_inflight_requests, 'FLUXER_API_MAX_INFLIGHT_REQUESTS', 1, 100_000);
 	assertIntegerInRange(
 		config.services.api.automated_message_deletion_delay_days,

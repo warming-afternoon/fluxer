@@ -8,7 +8,8 @@ const args = process.argv.slice(2),
 	file = args[args.indexOf('--fixture') + 1];
 if (process.env.BENCH_TEST_CREATE_STOP_FILE)
 	setTimeout(() => fs.writeFileSync(args[args.indexOf('--stop-file') + 1], 'ignored contents'), 100);
-const steps = args[args.indexOf('--online-steps') + 1] || '4';
+const stepIndex = args.indexOf('--online-steps');
+const steps = stepIndex >= 0 ? args[stepIndex + 1] : '4';
 const fixture = loadForumLoadFixture(file, Number(steps.split(',').at(-1)));
 const memberIds = (thread) => thread.memberIndexes.map((index) => fixture.accounts[index].id);
 const users = new Map(fixture.accounts.map((a) => [a.email || a.login, a]));
@@ -35,7 +36,11 @@ class MockSocket extends EventTarget {
 			sockets.set(this.id, this);
 			this.emit({op: 0, t: 'READY', s: ++this.seq, d: {}});
 		}
-		if (p.op === 14 && !process.env.BENCH_TEST_SUBSCRIPTION_HANG) {
+		if (
+			p.op === 14 &&
+			p.d.subscriptions[fixture.guildId]?.active !== false &&
+			!process.env.BENCH_TEST_SUBSCRIPTION_HANG
+		) {
 			const ts = fixture.threads.filter((t) => memberIds(t).includes(this.id)).map((t) => ({id: t.id}));
 			const partial =
 				process.env.BENCH_TEST_PARTIAL_SYNC ||
@@ -72,6 +77,11 @@ globalThis.fetch = async (url, options) => {
 		body = JSON.parse(options.body);
 	if (path.endsWith('/auth/login'))
 		return new Response(JSON.stringify({token: users.get(body.email || body.login).id}), {status: 200});
+	if (path.endsWith('/read-states/ack'))
+		return new Response(
+			JSON.stringify({read_states: body.read_states.map((e) => ({id: e.channel_id, last_message_id: e.message_id}))}),
+			{status: 200},
+		);
 	if (path.endsWith('/ack')) {
 		if (process.env.BENCH_TEST_ACK_DELAY_MS)
 			await new Promise((resolve) => setTimeout(resolve, Number(process.env.BENCH_TEST_ACK_DELAY_MS)));
@@ -93,6 +103,8 @@ globalThis.fetch = async (url, options) => {
 			const ws = sockets.get(id);
 			if (ws && !(process.env.BENCH_TEST_MISSING && index === 0)) {
 				ws.emit({op: 0, t: 'MESSAGE_CREATE', s: ++ws.seq, d: message});
+				if (process.env.BENCH_TEST_LATE_DUPLICATE)
+					setTimeout(() => ws.emit({op: 0, t: 'MESSAGE_CREATE', s: ++ws.seq, d: message}), 50);
 				if (process.env.BENCH_TEST_DUPLICATE) ws.emit({op: 0, t: 'MESSAGE_CREATE', s: ++ws.seq, d: message});
 			}
 		}

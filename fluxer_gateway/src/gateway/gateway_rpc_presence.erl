@@ -12,6 +12,7 @@
 -define(PRESENCE_LOOKUP_TIMEOUT, 2000).
 
 -spec execute_method(binary(), map()) -> term().
+execute_method(<<"presence.acknowledge_read_state">>, P) -> handle_read_ack(P);
 execute_method(<<"presence.dispatch">>, P) -> handle_dispatch(P);
 execute_method(<<"presence.join_guild">>, P) -> handle_join_guild(P);
 execute_method(<<"presence.leave_guild">>, P) -> handle_leave_guild(P);
@@ -22,6 +23,23 @@ execute_method(<<"presence.add_temporary_guild">>, P) -> handle_add_temp_guild(P
 execute_method(<<"presence.remove_temporary_guild">>, P) -> handle_remove_temp_guild(P);
 execute_method(<<"presence.sync_group_dm_recipients">>, P) -> handle_sync_dm_recipients(P);
 execute_method(Method, _P) -> gateway_rpc_error:raise(<<"Unknown method: ", Method/binary>>).
+
+%% 单次调用完成已读的两个副作用，清理失败仍尝试派发，分别返回执行状态。
+-spec handle_read_ack(map()) -> map().
+handle_read_ack(#{<<"user_id">> := UserId, <<"channel_id">> := ChannelId,
+    <<"message_id">> := MessageId, <<"ack_data">> := Data}) when is_map(Data) ->
+    Clear = fun() -> gateway_rpc_push:execute_method(<<"push.clear_channel_notifications">>,
+        #{<<"user_id">> => UserId, <<"channel_id">> => ChannelId, <<"message_id">> => MessageId}) end,
+    Dispatch = fun() -> handle_dispatch(#{<<"user_id">> => UserId,
+        <<"event">> => <<"MESSAGE_ACK">>, <<"data">> => Data}) end,
+    execute_read_ack(Clear, Dispatch).
+
+%% 两步均执行一次，异常不隐藏为整体成功，也不引入数据库或任务重试。
+-spec execute_read_ack(fun(() -> term()), fun(() -> term())) -> map().
+execute_read_ack(Clear, Dispatch) ->
+    ClearOk = try Clear() of true -> true; _ -> false catch _:_ -> false end,
+    DispatchOk = try Dispatch() of true -> true; _ -> false catch _:_ -> false end,
+    #{<<"clear_ok">> => ClearOk, <<"dispatch_ok">> => DispatchOk}.
 
 -spec handle_dispatch(map()) -> true.
 handle_dispatch(#{<<"user_id">> := UserIdBin, <<"event">> := Event, <<"data">> := Data}) ->
@@ -343,6 +361,17 @@ sync_blocked_ids_for_user(_UserId) ->
     ok.
 
 -ifdef(TEST).
+
+%% 清理失败仍继续派发，保留原来的副作用执行次序。
+combined_read_ack_preserves_order_and_partial_failure_test() ->
+    Self = self(),
+    Clear = fun() -> Self ! cleared, erlang:error(clear_failed) end,
+    Dispatch = fun() -> Self ! dispatched, true end,
+    ?assertEqual(#{<<"clear_ok">> => false, <<"dispatch_ok">> => true}, execute_read_ack(Clear, Dispatch)),
+    receive cleared -> ok after 0 -> ?assert(false) end,
+    receive dispatched -> ok after 0 -> ?assert(false) end,
+    ?assertEqual(#{<<"clear_ok">> => true, <<"dispatch_ok">> => false},
+        execute_read_ack(fun() -> true end, fun() -> erlang:error(dispatch_failed) end)).
 
 dispatch_event_atom_accepts_thread_events_test() ->
     ?assertEqual(

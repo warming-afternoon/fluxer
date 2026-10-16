@@ -678,6 +678,27 @@ export class GatewayService {
 		});
 	}
 
+	/** 用一次 RPC 顺序执行通知清理和已读派发，不合并不同用户的任务。 */
+	async acknowledgeReadState(params: {
+		userId: UserID;
+		channelId: ChannelID;
+		messageId: MessageID;
+		data: Record<string, unknown>;
+	}): Promise<void> {
+		if (params.userId === SYSTEM_USER_ID) {
+			await this.clearPushChannelNotifications(params);
+			return;
+		}
+		const result = await this.call<{clear_ok: boolean; dispatch_ok: boolean}>('presence.acknowledge_read_state', {
+			user_id: params.userId.toString(),
+			channel_id: params.channelId.toString(),
+			message_id: params.messageId.toString(),
+			ack_data: params.data,
+		});
+		if (result.clear_ok !== true) Logger.error('Combined read-state RPC failed to clear notifications');
+		if (result.dispatch_ok !== true) throw new BadGatewayError();
+	}
+
 	async clearPushChannelNotifications({
 		userId,
 		channelId,

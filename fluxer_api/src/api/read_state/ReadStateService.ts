@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {ChannelID, MessageID, UserID} from '@app/api/BrandedTypes';
+import {Config} from '@app/api/Config';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import {Logger} from '@app/api/Logger';
 import type {ReadState} from '@app/api/models/ReadState';
@@ -72,6 +73,10 @@ export class ReadStateService {
 			marker,
 		);
 		await this.afterWrite(userId, channelId, async () => {
+			if (!implicit && emitGateway && Config.readState?.combinedGatewayRpcEnabled) {
+				await this.notifyCombinedReadState({userId, channelId, messageId, readState, manual});
+				return;
+			}
 			if (!implicit) {
 				await this.clearPushChannelNotifications({userId, channelId, messageId});
 			} else if (hadUnreadThrough(previous, messageId, implicit.unreadThrough)) {
@@ -174,6 +179,11 @@ export class ReadStateService {
 			await Promise.all(
 				readStates.map(({channelId, messageId}) =>
 					this.afterWrite(userId, channelId, async () => {
+						const state = readStatesByChannel.get(channelId);
+						if (state && Config.readState?.combinedGatewayRpcEnabled) {
+							await this.notifyCombinedReadState({userId, channelId, messageId, readState: state});
+							return;
+						}
 						await Promise.all([
 							this.dispatchMessageAck({
 								userId,
@@ -242,6 +252,38 @@ export class ReadStateService {
 		});
 		await this.repository.upsertPinAck(userId, channelId, timestamp, marker);
 		await this.dispatchPinsAck({userId, channelId, timestamp, marker});
+	}
+
+	/** 单条和批量显式确认复用同一已读网关通知，保持权威游标与原清理游标。 */
+	private async notifyCombinedReadState(params: {
+		userId: UserID;
+		channelId: ChannelID;
+		messageId: MessageID;
+		readState: ReadState;
+		manual?: boolean;
+	}): Promise<void> {
+		const {userId, channelId, messageId, readState, manual} = params;
+		try {
+			await this.gatewayService.acknowledgeReadState({
+				userId,
+				channelId,
+				messageId,
+				data: {
+					channel_id: channelId.toString(),
+					message_id: (readState.lastMessageId ?? messageId).toString(),
+					mention_count: readState.mentionCount,
+					manual,
+					version: readState.version?.toString(),
+					...threadScope(readState),
+				},
+			});
+		} catch (error) {
+			// 与原副作用路径一致，数据库已完成后网关错误仅记录，不重试和重复派发。
+			Logger.error(
+				{error, userId: userId.toString(), channelId: channelId.toString()},
+				'Failed combined read-state gateway notification',
+			);
+		}
 	}
 
 	private async dispatchMessageAck(params: {

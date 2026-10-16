@@ -759,6 +759,17 @@ export class NoopGatewayService implements IGatewayService {
 
 	async dispatchPresence(_params: {userId: UserID; event: GatewayDispatchEvent; data: unknown}): Promise<void> {}
 
+	/** 测试默认不执行已读网关副作用。 */
+	async acknowledgeReadState(params: {
+		userId: UserID;
+		channelId: ChannelID;
+		messageId: MessageID;
+		data: Record<string, unknown>;
+	}): Promise<void> {
+		await this.clearPushChannelNotifications(params);
+		await this.dispatchPresence({userId: params.userId, event: 'MESSAGE_ACK', data: params.data});
+	}
+
 	async clearPushChannelNotifications(_params: {
 		userId: UserID;
 		channelId: ChannelID;

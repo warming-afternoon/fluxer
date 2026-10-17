@@ -227,6 +227,14 @@ export const RpcRequest = z.discriminatedUnion('type', [
 		type: z.literal('get_channel_threads_config').describe('Request type for fetching channel threads configuration'),
 	}),
 	z.object({
+		type: z.literal('thread_watch_contexts').describe('批量获取浏览帖子的可信上下文'),
+		// 所属服务器标识
+		guild_id: SnowflakeType,
+
+		// 待获取的帖子标识
+		thread_ids: z.array(SnowflakeType).min(1).max(100),
+	}),
+	z.object({
 		type: z.literal('list_thread_members').describe('Request type for listing the members of a thread'),
 		guild_id: SnowflakeType.describe('ID of the guild'),
 		thread_ids: z
@@ -569,6 +577,28 @@ export const RpcResponse = z.discriminatedUnion('type', [
 				config: ChannelThreadsConfigResponse.describe('Channel threads configuration'),
 			})
 			.describe('Channel threads config result'),
+	}),
+	z.object({
+		type: z.literal('thread_watch_contexts').describe('帖子浏览上下文结果'),
+		// 仅包含当前服务器内真实存在的公开线程
+		data: z.object({
+			// 帖子权限判断需要的最小服务端上下文
+			threads: z.array(
+				z.object({
+					// 帖子标识
+					id: SnowflakeStringType,
+
+					// 所属服务器标识
+					guild_id: SnowflakeStringType,
+
+					// 父频道标识
+					parent_id: SnowflakeStringType,
+
+					// 公开线程类型
+					type: z.literal(11),
+				}),
+			),
+		}),
 	}),
 	z.object({
 		type: z.literal('list_thread_members').describe('Response type for a page of thread members'),

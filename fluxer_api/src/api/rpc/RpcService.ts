@@ -23,6 +23,7 @@ import {
 	listThreadMembersPage,
 	loadForumUnreads,
 	loadThreadCollectionRpcData,
+	loadThreadWatchContexts,
 	resolveThreadGateRpcData,
 } from '@app/api/channel/services/thread/ThreadRpcData';
 import {getChannelThreadsConfig, isTainted, type ThreadViewer} from '@app/api/experiment/ChannelThreadsGate';
@@ -544,6 +545,17 @@ export class RpcService {
 					data: {config},
 				};
 			}
+			case 'thread_watch_contexts':
+				return {
+					type: 'thread_watch_contexts',
+					data: {
+						threads: await loadThreadWatchContexts(
+							this.channelRepository,
+							createGuildID(request.guild_id),
+							request.thread_ids.map(createChannelID),
+						),
+					},
+				};
 			case 'list_thread_members':
 				return {
 					type: 'list_thread_members',

@@ -22,6 +22,7 @@ export_handoff_state(State) ->
         guild_thread_subscriptions:export_handoff(State)
     ),
     Threads#{
+        thread_watch_handoff => guild_thread_watches:export(State),
         id => maps:get(id, State),
         data => maps:without(derived_data_keys(), guild_thread_load:export_handoff(State)),
         sessions => export_handoff_sessions(maps:get(sessions, State, #{})),

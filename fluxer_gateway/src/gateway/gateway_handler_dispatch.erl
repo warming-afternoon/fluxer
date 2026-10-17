@@ -521,8 +521,33 @@ forum_unreads_session_state(SessionPid) ->
 -spec handle_lazy_request(map(), pid(), state()) -> ws_result().
 handle_lazy_request(Data, Pid, State) ->
     SocketPid = self(),
-    Fun = fun() -> do_lazy_request(Data, SocketPid, Pid) end,
-    request_worker_result(start_request_worker(lazy_request, Fun, State), State).
+    %% 浏览更新直接按连接消息顺序交给会话进程，避免并行请求重排
+    case maps:is_key(<<"thread_watch_nonce">>, Data) of
+        true -> gen_server:cast(Pid, {update_thread_watches, Data, SocketPid});
+        false -> ok
+    end,
+    Raw = maps:get(<<"subscriptions">>, Data, #{}),
+    Subscriptions =
+        case is_map(Raw) of
+            true -> Raw;
+            false -> #{}
+        end,
+    Ordinary = maps:filter(
+        fun(_Guild, Options) -> map_size(Options) > 0 end,
+        maps:map(
+            fun(_Guild, Options) -> maps:remove(<<"thread_watches">>, Options) end,
+            maps:filter(fun(_Guild, Options) -> is_map(Options) end, Subscriptions)
+        )
+    ),
+    case map_size(Ordinary) of
+        0 ->
+            {ok, State};
+        _ ->
+            Fun = fun() ->
+                do_lazy_request(#{<<"subscriptions">> => Ordinary}, SocketPid, Pid)
+            end,
+            request_worker_result(start_request_worker(lazy_request, Fun, State), State)
+    end.
 
 -spec request_worker_result({ok, pid(), state()} | dropped, state()) -> ws_result().
 request_worker_result({ok, _Pid, WorkerState}, _State) ->

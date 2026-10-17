@@ -260,6 +260,8 @@ extract_extra_fields(D, Ready) ->
         collected_sessions => maps:get(collected_sessions, D, []),
         collected_presences => maps:get(collected_presences, D, []),
         guild_subscription_state => maps:get(guild_subscription_state, D, #{}),
+        thread_watch_leases => maps:get(thread_watch_leases, D, #{}),
+        thread_watch_generation => maps:get(thread_watch_generation, D, 0),
         guild_health => maps:get(guild_health, D, #{}),
         relationships => maps:get(relationships, D, load_relationships(Ready)),
         suppress_presence_updates => true,

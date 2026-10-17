@@ -116,7 +116,7 @@ thread_create(Data, State0) ->
     Base = public_payload(Data),
     {Recipients, _Memo} = recipients(
         Thread,
-        viewer_sessions(State),
+        event_sessions(Thread, [], State),
         State,
         fun(Session, Passive) ->
             is_map_key(maps:get(user_id, Session, undefined), InitialSet) orelse
@@ -131,18 +131,28 @@ thread_create(Data, State0) ->
     count(thread_create, length(Deliveries)),
     {Deliveries, remember_create(ThreadId, Initial, State)}.
 
+%% 合并成员恢复前后的候选，取消归档时也通知未持有浏览租约的成员
 -spec thread_update(map(), guild_state()) -> {[delivery()], guild_state()}.
 thread_update(Data, State0) ->
     ThreadId = snowflake_id:parse(maps:get(<<"id">>, Data)),
     WasActive = guild_thread_gate:thread(ThreadId, State0) =/= undefined,
-    Viewers = viewer_sessions(State0),
     Before = thread_or_context(ThreadId, Data, State0),
-    {BeforeRecipients, Memo} = recipients(
-        Before, Viewers, State0, joined_or_interested(ThreadId, State0), #{}
+    BeforeViewers = event_sessions(Before, [], State0),
+    {BeforeRecipients, Memo} = metadata_recipients(
+        Before, BeforeViewers, State0, joined_or_interested(ThreadId, State0), #{}
     ),
-    State = guild_state_threads:apply_event(thread_update, Data, State0),
+    State = guild_thread_watches:event(
+        thread_update,
+        Data,
+        guild_state_threads:apply_event(thread_update, Data, State0)
+    ),
     After = thread_or_context(ThreadId, Data, State),
-    {AfterRecipients, AfterMemo} = recipients(
+    Viewers =
+        case WasActive of
+            false -> union(BeforeViewers, event_sessions(After, [], State));
+            true -> BeforeViewers
+        end,
+    {AfterRecipients, AfterMemo} = metadata_recipients(
         After,
         Viewers,
         State,
@@ -215,9 +225,14 @@ thread_delete(Data, State0) ->
         Joined(Session, Passive) orelse
             is_map_key(maps:get(user_id, Session, undefined), Listed)
     end,
-    {Recipients, _Memo} = recipients(Thread, viewer_sessions(State0), State0, Wants, #{}),
+    {Recipients, _Memo} = metadata_recipients(
+        Thread, event_sessions(Thread, [], State0), State0, Wants, #{}
+    ),
     Payload = maps:with([<<"id">>, <<"guild_id">>, <<"parent_id">>, <<"type">>], Data),
-    State = guild_state_threads:apply_event(thread_delete, Data, State0),
+    State = guild_thread_watches:remove_thread(
+        ThreadId,
+        guild_state_threads:apply_event(thread_delete, Data, State0)
+    ),
     Deliveries = [{thread_delete, Pid, Payload} || {_Sid, #{pid := Pid}} <- Recipients],
     count(thread_delete, length(Deliveries)),
     {Deliveries, State}.
@@ -232,7 +247,9 @@ thread_member_update(Data, State0) ->
     Deliveries = [
         {thread_member_update, Pid, Payload}
      || Thread =/= undefined,
-        {_Sid, #{pid := Pid, user_id := UserId} = Session} <- viewer_sessions(State),
+        {_Sid, #{pid := Pid, user_id := UserId} = Session} <- event_sessions(
+            Thread, [TargetId], State
+        ),
         UserId =:= TargetId,
         can_view(Session, Thread, State)
     ],
@@ -284,7 +301,7 @@ thread_members_update(Data, State0) ->
         true
     ),
     {Suppressed, State1} = take_recent_create(ThreadId, State),
-    Viewers = viewer_sessions(State1),
+    Viewers = event_sessions(Thread, maps:keys(Added) ++ maps:keys(Removed), State1),
     {Synthesized, Memo} = synthesized_creates(
         Thread, ThreadId, maps:without(Suppressed, Added), Viewers, State1
     ),
@@ -412,6 +429,65 @@ recipients(Thread, Viewers, State, Wants, Memo0) ->
         Viewers
     ),
     {lists:reverse(Pairs), Memo}.
+
+%% 元数据事件额外投递给浏览会话，成员目录规则继续独立使用
+-spec metadata_recipients(map() | undefined, [session_pair()], guild_state(), fun(), map()) ->
+    {[session_pair()], map()}.
+metadata_recipients(undefined, _Viewers, _State, _Wants, Memo) ->
+    {[], Memo};
+metadata_recipients(Thread, Viewers, State, Wants, Memo0) ->
+    {Members, Memo1} = recipients(Thread, Viewers, State, Wants, Memo0),
+    ThreadId = snowflake_id:parse(maps:get(<<"id">>, Thread)),
+    {Watching, Memo} = lists:foldl(
+        fun({Sid, Session} = Pair, {Acc, M}) ->
+            case guild_thread_watches:watching(Sid, ThreadId, State) of
+                true ->
+                    case guild_thread_gate:thread_view_access(Session, Thread, State, M) of
+                        {true, Next} -> {[Pair | Acc], Next};
+                        {false, Next} -> {Acc, Next}
+                    end;
+                false ->
+                    {Acc, M}
+            end
+        end,
+        {[], Memo1},
+        Viewers
+    ),
+    {union(Members, Watching), Memo}.
+
+%% 论坛事件按帖子成员和浏览索引选候选，普通线程保持原行为
+-spec event_sessions(map() | undefined, [integer()], guild_state()) -> [session_pair()].
+event_sessions(undefined, Users, State) ->
+    maps:to_list(guild_online_session_index:for_users(maps:get(sessions, State, #{}), Users));
+event_sessions(Thread, Users, State) ->
+    Parent = guild_permissions_check:find_channel_by_id(
+        guild_thread_permissions:parent_id(Thread), State
+    ),
+    case Parent of
+        #{<<"type">> := Type} when Type =:= 15; Type =:= 16 ->
+            Id = snowflake_id:parse(maps:get(<<"id">>, Thread)),
+            Members =
+                case guild_thread_gate:thread(Id, State) of
+                    undefined ->
+                        snowflake_id:parse_list(maps:get(<<"_fluxer_member_ids">>, Thread, []));
+                    _ ->
+                        guild_thread_store:member_ids(guild_thread_gate:store(State), Id)
+                end,
+            Sessions = maps:get(sessions, State, #{}),
+            Candidates = maps:merge(
+                guild_online_session_index:for_users(Sessions, Members ++ Users),
+                maps:with(guild_thread_watches:sessions(Id, State), Sessions)
+            ),
+            [
+                {Sid, S}
+             || {Sid, S} <- maps:to_list(Candidates),
+                guild_thread_gate:session_viewer(S),
+                maps:get(pending_connect, S, false) =/= true,
+                is_pid(maps:get(pid, S, undefined))
+            ];
+        _ ->
+            viewer_sessions(State)
+    end.
 
 -spec joined_or_interested(integer(), guild_state()) -> fun((map(), boolean()) -> boolean()).
 joined_or_interested(ThreadId, State) ->

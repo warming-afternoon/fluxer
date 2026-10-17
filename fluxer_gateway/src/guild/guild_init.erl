@@ -45,11 +45,13 @@ init_base_state(GuildState) ->
         ),
         viewable_channels_cache => ets:new(viewable_channels_cache, [set, public])
     },
-    guild_thread_flip:converge(
-        guild_thread_subscriptions:restore_handoff(
-            guild_thread_flip:restore_handoff(
-                guild_handoff:restore_transferred_session_state(
-                    guild_thread_load:install(ThreadExtras, BaseState)
+    guild_thread_watches:restore(
+        guild_thread_flip:converge(
+            guild_thread_subscriptions:restore_handoff(
+                guild_thread_flip:restore_handoff(
+                    guild_handoff:restore_transferred_session_state(
+                        guild_thread_load:install(ThreadExtras, BaseState)
+                    )
                 )
             )
         )

@@ -348,7 +348,9 @@ thread_sessions(Event, Data, ThreadId, Thread, SessionIdOpt, State) ->
                 Sid =/= SessionIdOpt andalso is_map(Session) andalso
                     session_viewer(Session) andalso
                     maps:get(pending_connect, Session, false) =/= true andalso
-                    delivery_interested(Event, Data, Session, ThreadId, Thread, State)
+                    (delivery_interested(Event, Data, Session, ThreadId, Thread, State) orelse
+                        (watch_event(Event) andalso
+                            guild_thread_watches:watching(Sid, ThreadId, State)))
             of
                 true ->
                     {Ok, Memo1} = thread_access(Session, Ctx, Memo),
@@ -390,8 +392,35 @@ delivery_candidates(Event, Data, ThreadId, Thread, State) ->
                     _ ->
                         []
                 end,
-            guild_online_session_index:for_users(Sessions, Members ++ Mentions)
+            MemberSessions = guild_online_session_index:for_users(
+                Sessions, Members ++ Mentions
+            ),
+            case watch_event(Event) of
+                true ->
+                    maps:merge(
+                        MemberSessions,
+                        maps:with(guild_thread_watches:sessions(ThreadId, State), Sessions)
+                    );
+                false ->
+                    MemberSessions
+            end
     end.
+
+%% 浏览订阅仅接收内容变化，不自动增加输入状态或成员列表事件
+-spec watch_event(atom()) -> boolean().
+watch_event(Event) ->
+    lists:member(Event, [
+        message_create,
+        message_update,
+        message_delete,
+        message_delete_bulk,
+        message_reaction_add,
+        message_reaction_add_many,
+        message_reaction_remove,
+        message_reaction_remove_all,
+        message_reaction_remove_emoji,
+        channel_pins_update
+    ]).
 
 %% 普通论坛事件要求成员资格，消息创建允许带权限检查的直接提及例外
 -spec delivery_interested(atom(), map(), map(), integer(), map(), guild_state()) -> boolean().
@@ -521,8 +550,13 @@ channel_scoped_gated(Data, State) ->
 -spec thread_or_context(integer(), map(), guild_state()) -> map() | undefined.
 thread_or_context(ChannelId, Data, State) ->
     case thread(ChannelId, State) of
-        undefined -> guild_state_threads:thread_context(ChannelId, Data);
-        Thread -> Thread
+        undefined ->
+            case guild_state_threads:thread_context(ChannelId, Data) of
+                undefined -> guild_thread_watches:context(ChannelId, State);
+                Context -> Context
+            end;
+        Thread ->
+            Thread
     end.
 
 -spec needs_variant(guild_state()) -> boolean().

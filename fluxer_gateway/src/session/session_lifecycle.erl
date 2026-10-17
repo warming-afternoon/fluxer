@@ -596,7 +596,9 @@ serialize_state(State) ->
         collected_sessions => maps:get(collected_sessions, State),
         collected_presences => maps:get(collected_presences, State, []),
         guild_health => maps:get(guild_health, State, #{}),
-        guild_subscription_state => maps:get(guild_subscription_state, State, #{})
+        guild_subscription_state => maps:get(guild_subscription_state, State, #{}),
+        thread_watch_leases => maps:get(thread_watch_leases, State, #{}),
+        thread_watch_generation => maps:get(thread_watch_generation, State, 0)
     }.
 
 -spec serialize_transfer_state(session_state()) -> map().
@@ -648,7 +650,9 @@ serialize_transfer_runtime(State) ->
         collected_sessions => maps:get(collected_sessions, State, []),
         collected_presences => maps:get(collected_presences, State, []),
         guild_health => maps:get(guild_health, State, #{}),
-        guild_subscription_state => maps:get(guild_subscription_state, State, #{})
+        guild_subscription_state => maps:get(guild_subscription_state, State, #{}),
+        thread_watch_leases => maps:get(thread_watch_leases, State, #{}),
+        thread_watch_generation => maps:get(thread_watch_generation, State, 0)
     }.
 
 %% Always normalises to a list before trimming: a limited_deque left in the transfer

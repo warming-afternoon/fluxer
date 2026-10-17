@@ -63,6 +63,7 @@ import {handleThreadMemberListUpdate} from '@app/features/threads/events/ThreadM
 import {handleThreadMembersUpdate} from '@app/features/threads/events/ThreadMembersUpdate';
 import {handleThreadMemberUpdate} from '@app/features/threads/events/ThreadMemberUpdate';
 import {handleThreadUpdate} from '@app/features/threads/events/ThreadUpdate';
+import {handleThreadWatchAck} from '@app/features/threads/events/ThreadWatchAck';
 import {handleAuthSessionChange} from '@app/features/user/events/AuthSessionChange';
 import {handleUserConnectionsUpdate} from '@app/features/user/events/UserConnectionsUpdate';
 import {handleUserGuildSettingsUpdate} from '@app/features/user/events/UserGuildSettingsUpdate';
@@ -99,6 +100,7 @@ export interface GatewayHandlerContext {
 type GatewayEventHandler = (data: unknown, context: GatewayHandlerContext) => void;
 export type GatewayHandlerRegistry = Map<string, GatewayEventHandler>;
 
+/** 注册网关事件到各业务状态层的处理入口 */
 export function createHandlerRegistry(): GatewayHandlerRegistry {
 	const registry: GatewayHandlerRegistry = new Map();
 	registry.set('READY', handleReady as GatewayEventHandler);
@@ -142,6 +144,7 @@ export function createHandlerRegistry(): GatewayHandlerRegistry {
 	registry.set('THREAD_MEMBERS_UPDATE', handleThreadMembersUpdate as GatewayEventHandler);
 	registry.set('THREAD_MEMBER_LIST_UPDATE', handleThreadMemberListUpdate as GatewayEventHandler);
 	registry.set('FORUM_UNREADS', handleForumUnreads as GatewayEventHandler);
+	registry.set('THREAD_WATCH_ACK', handleThreadWatchAck as GatewayEventHandler);
 	registry.set('PASSIVE_UPDATES', handlePassiveUpdates as GatewayEventHandler);
 	registry.set('CHANNEL_PINS_UPDATE', handleChannelPinsUpdate as GatewayEventHandler);
 	registry.set('CHANNEL_PINS_ACK', handleChannelPinsAck as GatewayEventHandler);

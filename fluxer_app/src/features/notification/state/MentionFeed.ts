@@ -12,6 +12,7 @@ import {
 } from '@app/features/notification/utils/MentionFeedFilters';
 import {initializeStore} from '@app/features/platform/utils/StoreInitialization';
 import Relationships from '@app/features/relationship/state/Relationships';
+import ThreadMemberships from '@app/features/threads/state/ThreadMemberships';
 import {makeSyncedField} from '@app/features/user/state/SyncedField';
 import UserGuildSettings from '@app/features/user/state/UserGuildSettings';
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
@@ -184,13 +185,19 @@ class MentionFeed {
 		this.recentMentions = this.recentMentions.filter((message) => !deletedIds.has(message.id));
 	}
 
+	/** 更新提及列表，临时论坛浏览只接纳直接用户提及 */
 	handleMessageCreate(message: WireMessage): void {
 		const channel = Channels.getChannel(message.channel_id);
 		if (!channel) return;
 		const guildId = channel.guildId ?? null;
+		const browsingOnly =
+			channel.isThread() &&
+			!ThreadMemberships.isMember(channel.id) &&
+			channel.parentId != null &&
+			Channels.getChannel(channel.parentId)?.isThreadOnly() === true;
 		const mentioned = messageMentionsCurrentUser(message, {
-			suppressEveryone: UserGuildSettings.isEveryoneMentionSuppressed(guildId),
-			suppressRoles: UserGuildSettings.isRoleMentionSuppressed(guildId),
+			suppressEveryone: browsingOnly || UserGuildSettings.isEveryoneMentionSuppressed(guildId),
+			suppressRoles: browsingOnly || UserGuildSettings.isRoleMentionSuppressed(guildId),
 		});
 		if (!mentioned) {
 			return;

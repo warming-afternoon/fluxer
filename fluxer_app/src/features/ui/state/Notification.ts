@@ -219,6 +219,7 @@ class NotificationState {
 		return false;
 	}
 
+	/** 按正式关注和通知设置筛选消息，临时浏览只保留直接提及 */
 	private shouldNotifyBasedOnSettings(channel: Channel, messageRecord: Message, currentUser: User): boolean {
 		if (channel.isThread()) {
 			const isMember = ThreadMemberships.isMember(channel.id);
@@ -226,6 +227,10 @@ class NotificationState {
 				? resolveThreadNotificationLevel(channel)
 				: (resolveNewPostNotificationLevel(channel, messageRecord.id) ?? MessageNotifications.ONLY_MENTIONS);
 			if (threadLevel === MessageNotifications.NO_MESSAGES) return false;
+			// 临时浏览论坛帖子只保留直接提及通知，不扩大普通通知范围
+			if (!isMember && channel.parentId && Channels.getChannel(channel.parentId)?.isThreadOnly()) {
+				return messageRecord.mentions.some((user) => user.id === currentUser.id);
+			}
 			if (threadLevel === MessageNotifications.ALL_MESSAGES) return true;
 			return this.isMessageMentionLike(channel, messageRecord, currentUser, !isMember);
 		}

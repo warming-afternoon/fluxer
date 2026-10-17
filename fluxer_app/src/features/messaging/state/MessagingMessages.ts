@@ -42,7 +42,28 @@ export interface PendingJumpDispatch {
 	jumpType?: JumpType;
 }
 
+export interface WatchWindowRefresh {
+	// 请求开始时的窗口，用于识别实时变化
+	baseline: ChannelMessages | undefined;
+
+	// 请求期间收到的新增和编辑内容
+	updates: Map<string, Partial<WireMessage>>;
+
+	// 请求期间收到的删除，包含当时尚未加载的消息
+	deleted: Set<string>;
+
+	// 请求期间真正新增的消息标识
+	created: Set<string>;
+
+	// 请求期间已加载消息的反应快照
+	reactions: Map<string, WireMessage['reactions']>;
+
+	// 事件过多时放弃本次快照，避免恢复缓冲无限增长
+	overflowed: boolean;
+}
+
 class Messages {
+	private watchRefreshes = new Map<string, WatchWindowRefresh>();
 	private pendingJumpDispatches = new Map<string, PendingJumpDispatch>();
 	private messageRefsByAuthor = new Map<string, Map<string, Set<string>>>();
 	private indexedAuthorsByChannel = new Map<string, Map<string, string>>();
@@ -51,11 +72,12 @@ class Messages {
 	private pendingFullHydration = false;
 
 	constructor() {
-		makeAutoObservable<this, 'messageRefsByAuthor' | 'indexedAuthorsByChannel'>(
+		makeAutoObservable<this, 'messageRefsByAuthor' | 'indexedAuthorsByChannel' | 'watchRefreshes'>(
 			this,
 			{
 				messageRefsByAuthor: false,
 				indexedAuthorsByChannel: false,
+				watchRefreshes: false,
 			},
 			{autoBind: true},
 		);
@@ -253,7 +275,9 @@ class Messages {
 		return dispatch.messageId === messageId ? dispatch : null;
 	}
 
+	/** 会话失效时丢弃消息缓存和正在恢复的窗口记录 */
 	handleSessionInvalidated(): boolean {
+		this.watchRefreshes.clear();
 		const channelIds: Array<string> = [];
 		let discardedLoadedMessages = false;
 		ChannelMessages.forEach((messages) => {
@@ -427,13 +451,16 @@ class Messages {
 		return didChannelSelect;
 	}
 
+	/** 普通加载接管窗口，旧浏览补拉不得覆盖新的阅读意图 */
 	handleLoadMessages(action: {channelId: string; jump?: JumpOptions}): boolean {
+		this.watchRefreshes.delete(action.channelId);
 		const messages = ChannelMessages.getOrCreate(action.channelId);
 		this.commitMessages(messages.beginLoad(action.jump));
 		this.notifyChange();
 		return false;
 	}
 
+	/** 缓存跳转与翻页同样接管窗口并使旧浏览补拉失效 */
 	handleLoadMessagesSuccessCached(action: {
 		channelId: string;
 		jump?: JumpOptions;
@@ -441,6 +468,7 @@ class Messages {
 		after?: string;
 		limit: number;
 	}): boolean {
+		this.watchRefreshes.delete(action.channelId);
 		let messages = ChannelMessages.getOrCreate(action.channelId);
 		if (action.jump?.present) {
 			messages = messages.jumpToLiveEdge(action.limit);
@@ -462,6 +490,7 @@ class Messages {
 		return false;
 	}
 
+	/** 提交普通加载结果，避免较早的浏览补拉再次替换当前窗口 */
 	handleLoadMessagesSuccess(action: {
 		channelId: string;
 		isBefore?: boolean;
@@ -472,6 +501,7 @@ class Messages {
 		cached?: boolean;
 		messages: Array<WireMessage>;
 	}): boolean {
+		this.watchRefreshes.delete(action.channelId);
 		const messages = ChannelMessages.getOrCreate(action.channelId).applyLoadedWindow({
 			windowMessages: action.messages,
 			isBefore: action.isBefore,
@@ -517,7 +547,9 @@ class Messages {
 		return true;
 	}
 
+	/** 应用实时新增消息并记录与浏览恢复并发的变化 */
 	handleIncomingMessage(action: {channelId: string; message: WireMessage}): boolean {
+		this.recordWatchEvent(action.channelId, action.message, [], true);
 		Channels.handleMessageCreate({message: action.message});
 		const existing = ChannelMessages.get(action.channelId);
 		if (!existing?.ready) {
@@ -527,6 +559,103 @@ class Messages {
 		this.commitMessages(updated);
 		this.notifyChange();
 		return false;
+	}
+
+	/** 为一次网络刷新记录并发事件，不重复触发通知或已读更新 */
+	beginWatchRefresh(channelId: string): WatchWindowRefresh {
+		const refresh: WatchWindowRefresh = {
+			baseline: ChannelMessages.get(channelId),
+			updates: new Map(),
+			deleted: new Set(),
+			created: new Set(),
+			reactions: new Map(),
+			overflowed: false,
+		};
+		this.watchRefreshes.set(channelId, refresh);
+		return refresh;
+	}
+
+	/** 合并权威快照与实时事件，窗口被接管时返回未完成以便重新补拉 */
+	completeWatchRefresh(
+		channelId: string,
+		refresh: WatchWindowRefresh,
+		snapshot: Array<WireMessage>,
+		hasMoreBefore: boolean,
+		hasMoreAfter: boolean,
+		upperBound: string | null,
+	): boolean {
+		if (this.watchRefreshes.get(channelId) !== refresh) return false;
+		if (refresh.overflowed) throw new Error('帖子恢复期间的事件过多，需要重新获取窗口');
+		const current = ChannelMessages.getOrCreate(channelId);
+		const byId = new Map(snapshot.map((wire) => [wire.id, wire]));
+		for (const id of refresh.created) {
+			if (refresh.deleted.has(id)) continue;
+			// 历史窗口不拼接远处的新消息，但必须保留继续向后补拉的入口
+			if (upperBound && BigInt(id) > BigInt(upperBound)) {
+				hasMoreAfter = true;
+				continue;
+			}
+			const wire = refresh.updates.get(id);
+			if (wire?.author) byId.set(id, wire as WireMessage);
+		}
+		for (const [id, wire] of byId) {
+			if (refresh.deleted.has(id)) {
+				byId.delete(id);
+				continue;
+			}
+			const live = current.get(id);
+			const changed = live && live !== refresh.baseline?.get(id);
+			const update = refresh.updates.get(id);
+			// 同时保留反应变化，并优先使用更新版本的编辑内容
+			const candidate = changed ? live.toJSON() : wire;
+			const snapshotEdited = Date.parse(wire.edited_timestamp ?? '') || 0;
+			const liveEdited = Date.parse(candidate.edited_timestamp ?? '') || 0;
+			const base = snapshotEdited > liveEdited ? wire : candidate;
+			const updateEdited = Date.parse(update?.edited_timestamp ?? '') || 0;
+			const merged = update && updateEdited >= snapshotEdited ? {...base, ...update} : base;
+			byId.set(id, refresh.reactions.has(id) ? {...merged, reactions: refresh.reactions.get(id)} : merged);
+		}
+		const rows = [...byId.values()].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+		this.commitMessages(current.reconcileWatchWindow(rows, hasMoreBefore, hasMoreAfter));
+		this.notifyChange();
+		return true;
+	}
+
+	/** 请求结束后只释放自己的事件记录，不能清掉较新刷新 */
+	endWatchRefresh(channelId: string, refresh: WatchWindowRefresh): void {
+		if (this.watchRefreshes.get(channelId) === refresh) this.watchRefreshes.delete(channelId);
+	}
+
+	/** 只在恢复期间保留有界并发事件，避免高频帖子无限分配内存 */
+	private recordWatchEvent(
+		channelId: string,
+		update: Partial<WireMessage> | null,
+		deleted: Array<string>,
+		created = false,
+	): void {
+		const refresh = this.watchRefreshes.get(channelId);
+		if (!refresh || refresh.overflowed) return;
+		if (refresh.updates.size + refresh.deleted.size + deleted.length >= 1024) {
+			refresh.overflowed = true;
+			return;
+		}
+		for (const id of deleted) refresh.deleted.add(id);
+		if (update?.id) {
+			refresh.updates.set(update.id, {...refresh.updates.get(update.id), ...update});
+			if (created) refresh.created.add(update.id);
+		}
+	}
+
+	/** 单独保存反应变化，避免较新正文快照覆盖并发反应事件 */
+	private recordWatchReactions(channelId: string, messageId: string, messages: ChannelMessages): void {
+		const refresh = this.watchRefreshes.get(channelId);
+		const message = messages.get(messageId);
+		if (!refresh || !message || refresh.overflowed) return;
+		if (refresh.reactions.size >= 1024) {
+			refresh.overflowed = true;
+			return;
+		}
+		refresh.reactions.set(messageId, message.toJSON().reactions);
 	}
 
 	handleSendFailed(action: {channelId: string; nonce: string}): boolean {
@@ -547,7 +676,9 @@ class Messages {
 		return true;
 	}
 
+	/** 删除消息并保留恢复期间的删除标记 */
 	handleMessageDelete(action: {id: string; channelId: string}): boolean {
+		this.recordWatchEvent(action.channelId, null, [action.id]);
 		const existing = ChannelMessages.get(action.channelId);
 		if (!existing?.has(action.id)) {
 			return false;
@@ -563,7 +694,9 @@ class Messages {
 		return true;
 	}
 
+	/** 批量删除消息并阻止旧网络快照重新插入它们 */
 	handleMessageDeleteBulk(action: {ids: Array<string>; channelId: string}): boolean {
+		this.recordWatchEvent(action.channelId, null, action.ids);
 		const existing = ChannelMessages.get(action.channelId);
 		if (!existing) return false;
 		let messages = existing.removeIds(action.ids);
@@ -577,9 +710,11 @@ class Messages {
 		return true;
 	}
 
+	/** 应用实时编辑并为并发恢复保留最新字段 */
 	handleMessageUpdate(action: {message: WireMessage}): boolean {
 		const messageId = action.message.id;
 		const channelId = action.message.channel_id;
+		this.recordWatchEvent(channelId, action.message, []);
 		const existing = ChannelMessages.get(channelId);
 		if (!existing?.has(messageId)) return false;
 		const updated = existing.update(messageId, (message) => {
@@ -681,6 +816,7 @@ class Messages {
 		return false;
 	}
 
+	/** 更新反应状态并记录恢复期间的反应快照 */
 	handleReaction(action: {
 		type: 'MESSAGE_REACTION_ADD' | 'MESSAGE_REACTION_REMOVE';
 		channelId: string;
@@ -695,24 +831,29 @@ class Messages {
 		const isCurrentUser = currentUser?.id === action.userId;
 		if (action.optimistic && !isCurrentUser) return false;
 		const updated = existing.update(action.messageId, (message) => message.withUpdates({}));
+		this.recordWatchReactions(action.channelId, action.messageId, updated);
 		this.commitMessages(updated);
 		this.notifyChange();
 		return true;
 	}
 
+	/** 清空反应并防止恢复快照覆盖实时删除 */
 	handleRemoveAllReactions(action: {channelId: string; messageId: string}): boolean {
 		const existing = ChannelMessages.get(action.channelId);
 		if (!existing) return false;
 		const updated = existing.update(action.messageId, (message) => message.withUpdates({reactions: []}));
+		this.recordWatchReactions(action.channelId, action.messageId, updated);
 		this.commitMessages(updated);
 		this.notifyChange();
 		return true;
 	}
 
+	/** 删除指定反应并保留与窗口恢复并发的结果 */
 	handleRemoveReactionEmoji(action: {channelId: string; messageId: string; emoji: ReactionEmoji}): boolean {
 		const existing = ChannelMessages.get(action.channelId);
 		if (!existing) return false;
 		const updated = existing.update(action.messageId, (message) => message.withoutReactionEmoji(action.emoji));
+		this.recordWatchReactions(action.channelId, action.messageId, updated);
 		this.commitMessages(updated);
 		this.notifyChange();
 		return true;

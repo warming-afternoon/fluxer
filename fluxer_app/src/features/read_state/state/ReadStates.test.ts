@@ -96,6 +96,34 @@ beforeEach(() => {
 });
 
 describe('ReadStates unread invariant', () => {
+	it('未关注的论坛浏览只计直接提及，关注后恢复角色提及', async () => {
+		const {default: GuildMembers} = await import('@app/features/member/state/GuildMembers');
+		const {default: ThreadMemberships} = await import('@app/features/threads/state/ThreadMemberships');
+		const postId = 'watch-post';
+		const forumId = 'watch-forum';
+		channels.set(forumId, new Channel({id: forumId, type: ChannelTypes.GUILD_FORUM, guild_id: 'guild-1'}));
+		channels.set(
+			postId,
+			new Channel({id: postId, parent_id: forumId, type: ChannelTypes.PUBLIC_THREAD, guild_id: 'guild-1'}),
+		);
+		const member = {roles: new Set(['role'])} as unknown as NonNullable<ReturnType<typeof GuildMembers.getMember>>;
+		const spy = vi.spyOn(GuildMembers, 'getMember').mockReturnValue(member);
+		try {
+			const entry = ReadStates.get(postId);
+			const roleMention = wireMessage(ID.newer, postId, 'someone', {mention_roles: ['role']});
+			expect(entry.shouldMentionFor(roleMention, 'me', false)).toBe(false);
+			expect(entry.shouldMentionFor({...roleMention, mention_everyone: true}, 'me', false)).toBe(false);
+			expect(entry.shouldMentionFor({...roleMention, mentions: [user('me')]}, 'me', false)).toBe(true);
+			ThreadMemberships.set(postId, {join_timestamp: '2026-10-16T00:00:00.000Z', flags: 0});
+			expect(entry.shouldMentionFor(roleMention, 'me', false)).toBe(true);
+		} finally {
+			spy.mockRestore();
+			ThreadMemberships.remove(postId);
+			channels.delete(postId);
+			channels.delete(forumId);
+			ReadStates.clearAll();
+		}
+	});
 	it('never reports a positive unread count without an unread anchor after a passive update', () => {
 		const {channelId} = seedReadChannel();
 		ReadStates.handlePassiveLastMessageUpdates({[channelId]: ID.newer}, 'guild-1');

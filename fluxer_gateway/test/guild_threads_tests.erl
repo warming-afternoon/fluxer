@@ -584,6 +584,50 @@ archive_removes_thread_and_unarchive_orders_update_before_member_update_test() -
         ?assertNotEqual(undefined, guild_thread_gate:thread(?T1, State2))
     end).
 
+%% 论坛和媒体帖子恢复成员后必须通知关注者，无需建立临时浏览租约
+-spec forum_unarchive_reaches_members_without_watch_test() -> ok.
+forum_unarchive_reaches_members_without_watch_test() ->
+    lists:foreach(
+        fun(Type) ->
+            with_guild(fun(State0) ->
+                Data = maps:get(data, State0),
+                Index = guild_data_index_channels:channel_index(Data),
+                Parent = maps:get(?FORUM, Index),
+                State = State0#{
+                    data => Data#{
+                        <<"channel_index">> => Index#{?FORUM => Parent#{<<"type">> => Type}}
+                    }
+                },
+                Thread = (thread(?T1, ?FORUM, 11))#{
+                    <<"_fluxer_members">> => [thread_member(?T1, ?A)]
+                },
+                Created = dispatch(thread_create, Thread, State),
+                drain(),
+                Archived = dispatch(
+                    thread_update,
+                    Thread#{
+                        <<"thread_metadata">> => #{<<"archived">> => true, <<"locked">> => false}
+                    },
+                    Created
+                ),
+                ?assertMatch([_], received(a, thread_update, drain())),
+                ?assertEqual(undefined, guild_thread_gate:thread(?T1, Archived)),
+                ?assertEqual([], guild_thread_watches:sessions(?T1, Archived)),
+                Restored = dispatch(thread_update, Thread, Archived),
+                Events = drain(),
+                ?assertEqual(
+                    [thread_update, thread_member_update], [E || {a, E, _} <- Events]
+                ),
+                ?assertEqual([], received(v, thread_update, Events)),
+                ?assertEqual([], received(v, thread_member_update, Events)),
+                ?assert(
+                    guild_thread_store:is_member(guild_thread_gate:store(Restored), ?T1, ?A)
+                )
+            end)
+        end,
+        [15, 16]
+    ).
+
 message_create_in_thread_reaches_members_and_bots_only_test() ->
     with_guild(fun(State) ->
         Message = #{

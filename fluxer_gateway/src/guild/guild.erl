@@ -220,6 +220,8 @@ handle_cast_internal({thread_subscriptions, SessionId, Subscriptions}, State) wh
     is_binary(SessionId), is_map(Subscriptions)
 ->
     {noreply, guild_thread_subscriptions:update(SessionId, Subscriptions, State)};
+handle_cast_internal({thread_watch_update, Request}, State) when is_map(Request) ->
+    {noreply, guild_thread_watches:update(Request, State)};
 handle_cast_internal({patch_everyone_perms, Bit}, State) when is_integer(Bit), Bit > 0 ->
     {noreply, guild_maintenance:apply_everyone_perm_bit(Bit, State)};
 handle_cast_internal(Msg, State) when is_tuple(Msg) ->
@@ -292,6 +294,14 @@ handle_info_internal(thread_list_sync_drain, State) ->
     {noreply, guild_thread_subscriptions:handle_drain(State)};
 handle_info_internal(thread_member_list_flush, State) ->
     {noreply, guild_thread_subscriptions:handle_list_flush(State)};
+handle_info_internal({thread_watch_sweep, Token}, State) ->
+    {noreply, guild_thread_watches:sweep(Token, State)};
+handle_info_internal(thread_watch_fetch, State) ->
+    {noreply, guild_thread_watches:fetch(State)};
+handle_info_internal({thread_watch_fetched, Ref, Result}, State) ->
+    {noreply, guild_thread_watches:fetched(Ref, Result, State)};
+handle_info_internal({thread_watch_resolve, Ref, Ids, Outcome}, State) ->
+    {noreply, guild_thread_watches:resolve(Ref, Ids, Outcome, State)};
 handle_info_internal(thread_load_retry, State) ->
     {noreply, guild_thread_load:handle_retry(State)};
 handle_info_internal({thread_load_result, Ref, Result}, State) when is_reference(Ref) ->

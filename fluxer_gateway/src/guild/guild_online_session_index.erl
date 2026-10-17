@@ -9,6 +9,8 @@
 
 %% 按用户取得全部在线设备，会话映射变化后重新构建索引
 -spec for_users(map(), [integer()]) -> map().
+for_users(_Sessions, []) ->
+    #{};
 for_users(Sessions, UserIds) ->
     %% 社区进程持有不可变会话映射，身份不变时可复用用户索引
     Index = index(Sessions),

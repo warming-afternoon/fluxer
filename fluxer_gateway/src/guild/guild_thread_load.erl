@@ -496,7 +496,9 @@ deactivate(State) ->
             #{timer := Timer} when is_reference(Timer) -> erlang:cancel_timer(Timer);
             _ -> false
         end,
-    maps:remove(thread_load, State#{data => maps:remove(thread_store, Data)}).
+    guild_thread_watches:clear(
+        maps:remove(thread_load, State#{data => maps:remove(thread_store, Data)})
+    ).
 
 -spec list_field(binary(), map()) -> [map()].
 list_field(Key, Map) ->

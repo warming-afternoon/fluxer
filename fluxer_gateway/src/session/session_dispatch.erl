@@ -104,6 +104,7 @@ is_thread_event(thread_member_update) -> true;
 is_thread_event(thread_members_update) -> true;
 is_thread_event(thread_member_list_update) -> true;
 is_thread_event(forum_unreads) -> true;
+is_thread_event(thread_watch_ack) -> true;
 is_thread_event(<<"THREAD_", _/binary>>) -> true;
 is_thread_event(<<"FORUM_UNREADS">>) -> true;
 is_thread_event(_) -> false.

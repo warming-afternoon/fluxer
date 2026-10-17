@@ -59,7 +59,8 @@ init() ->
     ok = guild_thread_dispatch:init_counters(),
     ok = guild_thread_load:init_counters(),
     ok = guild_thread_flip:init_counters(),
-    ok = guild_thread_subscriptions:init_counters().
+    ok = guild_thread_subscriptions:init_counters(),
+    ok = guild_thread_watch_metrics:init().
 
 -spec ensure_counter(term(), pos_integer()) -> ok.
 ensure_counter(Key, Size) ->

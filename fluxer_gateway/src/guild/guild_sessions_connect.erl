@@ -424,7 +424,10 @@ cleanup_session_subscriptions(Session, State) ->
     SessionId = maps:get(session_id, Session),
     GuildId = require_guild_id(maps:get(id, State)),
     passive_sync_registry:delete(SessionId, GuildId),
-    State1 = guild_member_list_subscribe:unsubscribe_session(SessionId, State),
+    State1 = guild_thread_watches:remove_session(
+        SessionId,
+        guild_member_list_subscribe:unsubscribe_session(SessionId, State)
+    ),
     MemberSubs = maps:get(member_subscriptions, State1, guild_subscriptions:init_state()),
     NewMemberSubs = guild_subscriptions:unsubscribe_session(SessionId, MemberSubs),
     State2 = State1#{member_subscriptions => NewMemberSubs},

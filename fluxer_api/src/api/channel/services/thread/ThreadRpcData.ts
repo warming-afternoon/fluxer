@@ -38,6 +38,24 @@ export async function resolveThreadGateRpcData(guildId: GuildID): Promise<Thread
 	};
 }
 
+/** 批量读取活动或归档帖子的最小可信上下文，避免按浏览会话逐个查询 */
+export async function loadThreadWatchContexts(
+	repository: ChannelRepository,
+	guildId: GuildID,
+	threadIds: Array<ChannelID>,
+) {
+	// 批量状态读取已包含归属和类型，父频道访问权限由网关校验
+	const states = await repository.threads.getStates([...new Set(threadIds)]);
+	return states
+		.filter((state) => state.guildId === guildId && state.type === 11)
+		.map((state) => ({
+			id: state.threadId.toString(),
+			guild_id: state.guildId.toString(),
+			parent_id: state.parentId.toString(),
+			type: 11 as const,
+		}));
+}
+
 function mapParentSettingsToRpc(
 	parent: Channel,
 	config: ThreadParentConfig | null,

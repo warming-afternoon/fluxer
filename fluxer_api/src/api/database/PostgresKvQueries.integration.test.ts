@@ -8,8 +8,9 @@ import {
 	keyFromColumns,
 	PostgresKvQueryExecutor,
 } from '@app/api/database/PostgresKvQueryExecutor';
-import {GuildMembers} from '@app/api/Tables';
+import {GuildMembers, UserGuildSettings} from '@app/api/Tables';
 import {dockerAvailable, startPostgresKv, stopPostgresKv} from '@app/api/test/DockerTestContainer';
+import {UserSettingsRepository} from '@app/api/user/repositories/UserSettingsRepository';
 import {
 	getDefaultPostgresClient,
 	type IPostgresClient,
@@ -189,4 +190,68 @@ FROM generate_series(0, $4::int - 1) AS i`,
 		});
 	});
 
+	it('batches real settings reads and excludes expired, equal-now, missing and other-guild rows', async () => {
+		const settings = new UserSettingsRepository();
+		// 固定事务内的 now()，使等于当前时刻的 TTL 边界得到确定性验证。
+		await raw.transaction(async (connection) => {
+			const transactionalExecutor = new PostgresKvQueryExecutor({
+				kvTable: () => kvTable,
+				async query(text: string, values: Array<unknown> = [], name?: string) {
+					statements.push({text, values});
+					return connection.query(text, values, name);
+				},
+			} as IPostgresClient);
+			setCassandraQueryExecutorForTesting(transactionalExecutor);
+			try {
+				for (let index = 0; index < 205; index++) {
+					await transactionalExecutor.executeQuery(
+						UserGuildSettings.patchByPk(
+							{
+								user_id: createUserID(firstUserId + BigInt(index)),
+								guild_id: index === 203 ? otherGuildId : index === 204 ? createGuildID(0n) : guildId,
+							},
+							{muted: Db.set(true), version: Db.set(7)},
+						),
+					);
+				}
+				for (const [index, expression] of [
+					[200, "now() - interval '1 hour'"],
+					[201, 'now()'],
+					[202, "now() + interval '1 hour'"],
+				] as const) {
+					await connection.query(
+						`UPDATE ${kvTable} SET expires_at = ${expression} WHERE table_name = 'user_guild_settings' AND row_key = $1`,
+						[keyFromColumns(['user_id', 'guild_id'], {user_id: firstUserId + BigInt(index), guild_id: guildId})],
+					);
+				}
+				statements.length = 0;
+				const ids = [2, 200, 1, 203, 202, 201, 999, 2].map((index) => createUserID(firstUserId + BigInt(index)));
+				const result = await settings.findGuildSettingsBatch(ids, guildId);
+				expect(result.map((row) => row?.userId ?? null)).toEqual([
+					ids[0],
+					null,
+					ids[2],
+					null,
+					ids[4],
+					null,
+					null,
+					ids[0],
+				]);
+				expect(result[0]?.muted).toBe(true);
+				expect(result[0]?.version).toBe(7);
+				expect(statements).toHaveLength(1);
+				expect(
+					(await settings.findGuildSettingsBatch([createUserID(firstUserId + 203n)], otherGuildId))[0]?.guildId,
+				).toBe(otherGuildId);
+				expect((await settings.findGuildSettingsBatch([createUserID(firstUserId + 204n)], null))[0]?.guildId).toBe(0n);
+				statements.length = 0;
+				const batchIds = Array.from({length: 201}, (_, index) => createUserID(firstUserId + BigInt(index)));
+				expect(await settings.findGuildSettingsBatch(batchIds, guildId)).toHaveLength(201);
+				expect(statements.map((query) => (query.values[1] as Array<unknown>).length)).toEqual([200, 1]);
+				expect(statements.every((query) => query.text.includes('row_key = ANY('))).toBe(true);
+			} finally {
+				setCassandraQueryExecutorForTesting(null);
+			}
+		});
+	});
 });

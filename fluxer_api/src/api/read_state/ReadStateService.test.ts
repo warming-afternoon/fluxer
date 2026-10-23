@@ -8,12 +8,22 @@ import {
 	type MessageID,
 	type UserID,
 } from '@app/api/BrandedTypes';
+import {Config} from '@app/api/Config';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import {ReadState} from '@app/api/models/ReadState';
 import type {ReadStateRepository} from '@app/api/read_state/ReadStateRepository';
 import {ReadStateService} from '@app/api/read_state/ReadStateService';
 import {BadGatewayError} from '@fluxer/errors/src/domains/core/BadGatewayError';
-import {describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+
+let priorCombined = false;
+beforeEach(() => {
+	priorCombined = Config.readState!.combinedGatewayRpcEnabled;
+	Config.readState!.combinedGatewayRpcEnabled = false;
+});
+afterEach(() => {
+	Config.readState!.combinedGatewayRpcEnabled = priorCombined;
+});
 
 const USER_ID = createUserID(20n);
 const CHANNEL_ID = createChannelID(21n);
@@ -264,5 +274,84 @@ describe('ReadStateService implicit acknowledgements', () => {
 		});
 		expect(readState.lastMessageId).toBe(createMessageID(40n));
 		expect(clearPushChannelNotifications).toHaveBeenCalledTimes(1);
+	});
+});
+
+/** 合并调用只改变传输次数，保留权威游标、手动回退及写入后的副作用顺序。 */
+describe('combined read-state gateway RPC', () => {
+	it('uses one RPC after persistence and preserves the distinct clear and authoritative cursors', async () => {
+		const {Config} = await import('@app/api/Config');
+		const previous = Config.readState!.combinedGatewayRpcEnabled;
+		Config.readState!.combinedGatewayRpcEnabled = true;
+		try {
+			const repository = {
+				upsertReadState: vi.fn(async () => ({
+					readState: makeReadState(CHANNEL_ID, createMessageID(30n)),
+					previous: null,
+				})),
+			} as unknown as ReadStateRepository;
+			const gateway = {
+				acknowledgeReadState: vi.fn(async () => {}),
+				clearPushChannelNotifications: vi.fn(),
+				dispatchPresence: vi.fn(),
+			} as unknown as IGatewayService;
+			await new ReadStateService(repository, gateway).ackMessage({
+				userId: USER_ID,
+				channelId: CHANNEL_ID,
+				messageId: MESSAGE_ID,
+				mentionCount: 0,
+			});
+			expect(gateway.acknowledgeReadState).toHaveBeenCalledWith(
+				expect.objectContaining({
+					messageId: MESSAGE_ID,
+					data: expect.objectContaining({message_id: '30', version: '5'}),
+				}),
+			);
+			expect(gateway.clearPushChannelNotifications).not.toHaveBeenCalled();
+			expect(gateway.dispatchPresence).not.toHaveBeenCalled();
+			expect(vi.mocked(repository.upsertReadState).mock.invocationCallOrder[0]).toBeLessThan(
+				vi.mocked(gateway.acknowledgeReadState).mock.invocationCallOrder[0]!,
+			);
+		} finally {
+			Config.readState!.combinedGatewayRpcEnabled = previous;
+		}
+	});
+
+	it('preserves per-user/channel ordering and database success when combined RPC fails', async () => {
+		const {Config} = await import('@app/api/Config');
+		const previous = Config.readState!.combinedGatewayRpcEnabled;
+		Config.readState!.combinedGatewayRpcEnabled = true;
+		try {
+			const gate = Promise.withResolvers<void>();
+			const rpc = vi.fn().mockReturnValueOnce(gate.promise).mockRejectedValueOnce(new Error('gateway unavailable'));
+			const repository = {
+				upsertReadState: vi.fn(async (_user: UserID, channel: ChannelID, message: MessageID) => ({
+					readState: makeReadState(channel, message),
+					previous: null,
+				})),
+			} as unknown as ReadStateRepository;
+			const service = new ReadStateService(repository, {acknowledgeReadState: rpc} as unknown as IGatewayService);
+			const first = service.ackMessage({
+				userId: USER_ID,
+				channelId: CHANNEL_ID,
+				messageId: createMessageID(200n),
+				mentionCount: 0,
+			});
+			const rollback = service.ackMessage({
+				userId: USER_ID,
+				channelId: CHANNEL_ID,
+				messageId: createMessageID(150n),
+				mentionCount: 0,
+				manual: true,
+			});
+			await vi.waitFor(() => expect(rpc).toHaveBeenCalledTimes(1));
+			gate.resolve();
+			await expect(first).resolves.toBeDefined();
+			await expect(rollback).resolves.toBeDefined();
+			expect(rpc).toHaveBeenCalledTimes(2);
+			expect(rpc.mock.calls[1]![0].data).toMatchObject({message_id: '150', manual: true});
+		} finally {
+			Config.readState!.combinedGatewayRpcEnabled = previous;
+		}
 	});
 });

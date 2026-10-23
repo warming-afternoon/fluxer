@@ -96,6 +96,8 @@ export interface MasterConfig {
 			headers_timeout_ms: number;
 			request_timeout_ms: number;
 			max_inflight_requests: number;
+			/** 是否合并已读清通知与派发网关调用。 */
+			read_state_combined_gateway_rpc_enabled?: boolean;
 			automated_message_deletion_delay_days: number;
 			ip_ban_exempt_ips: Array<string>;
 			donation_proxy_key: string;

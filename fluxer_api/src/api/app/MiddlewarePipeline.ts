@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import {apiReady} from '@app/api/infrastructure/APIReadiness';
 
 import {ActivityContextMiddleware} from '@app/api/infrastructure/activity/ActivityMeta';
 import {AuditLogMiddleware} from '@app/api/middleware/AuditLogMiddleware';
@@ -75,6 +76,7 @@ export function configureMiddleware(routes: HonoApp, options: MiddlewarePipeline
 			exposedHeaders: [HttpHeaders.X_FLUXER_VERSION, HttpHeaders.ETAG],
 		},
 	});
+	routes.get('/_ready', (ctx) => ctx.text(apiReady() ? 'READY' : 'NOT_READY', apiReady() ? 200 : 503));
 	routes.use(ConcurrencyLimitMiddleware({maxInflightRequests}));
 	routes.get('/_health', async (ctx) => ctx.text('OK'));
 	routes.use(IpBanMiddleware);

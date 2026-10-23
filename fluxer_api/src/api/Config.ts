@@ -183,6 +183,7 @@ export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 		headersTimeoutMs: master.services.api.headers_timeout_ms,
 		requestTimeoutMs: master.services.api.request_timeout_ms,
 		maxInflightRequests: master.services.api.max_inflight_requests,
+		apiInstances: master.services.api.instances ?? 2,
 		readState: {
 			combinedGatewayRpcEnabled: master.services.api.read_state_combined_gateway_rpc_enabled ?? false,
 			narrowAuthEnabled: master.services.api.read_state_narrow_auth_enabled ?? false,

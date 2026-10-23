@@ -48,6 +48,7 @@ export interface APIConfig {
 	headersTimeoutMs: number;
 	requestTimeoutMs: number;
 	maxInflightRequests: number;
+	apiInstances?: number;
 	/** 单独控制两项已读优化，默认沿用旧链路。 */
 	readState?: {
 		/** 合并已读后的两次网关调用。 */

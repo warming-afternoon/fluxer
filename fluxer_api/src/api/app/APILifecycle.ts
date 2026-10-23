@@ -12,6 +12,7 @@ import {
 } from '@app/api/database/CassandraQueryExecution';
 import {ensurePostgresKvSchema, PostgresKvQueryExecutor} from '@app/api/database/PostgresKvQueryExecutor';
 import {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
+import {startAPIReadiness, stopAPIReadiness} from '@app/api/infrastructure/APIReadiness';
 import {
 	jetStreamActivityPublisher,
 	renderActivityMetrics,
@@ -41,8 +42,8 @@ import {
 	getInstanceConfigRepository,
 	getKVAccountDeletionQueue,
 	getReportRepository,
-	getUserRepository,
 	getUserActivityBuffer,
+	getUserRepository,
 	shutdownInstanceConfigRepository,
 	shutdownServiceSingletons,
 } from '@app/api/middleware/ServiceSingletons';
@@ -54,10 +55,15 @@ import {JetStreamWorkerQueue} from '@app/api/worker/JetStreamWorkerQueue';
 import {WorkerService} from '@app/api/worker/WorkerService';
 import {registerMetricsSection} from '@fluxer/hono/src/middleware/Metrics';
 import type {LoggerInterface} from '@fluxer/logger/src/LoggerInterface';
-import {initCassandra, shutdownCassandra} from '@pkgs/cassandra/src/Client';
+import {getClient, initCassandra, shutdownCassandra} from '@pkgs/cassandra/src/Client';
 import {ensureGeoipDatabaseOnStartup} from '@pkgs/geoip/src/GeoipStartup';
 import {JetStreamConnectionManager} from '@pkgs/nats/src/JetStreamConnectionManager';
-import {getDefaultPostgresClient, initPostgres, shutdownPostgres} from '@pkgs/postgres/src/Client';
+import {
+	checkPostgresReadiness,
+	getDefaultPostgresClient,
+	initPostgres,
+	shutdownPostgres,
+} from '@pkgs/postgres/src/Client';
 
 let jsConnectionManager: JetStreamConnectionManager | null = null;
 const unregisterMetricsSections: Array<() => void> = [];
@@ -276,6 +282,30 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 					logger.warn({error}, 'Failed to reset SSO config for test mode');
 				}
 			}
+			await startAPIReadiness(async () => {
+				await Promise.all([
+					kvClient.get('__fluxer_readiness_probe__'),
+					...(config.database.backend === 'postgres' ? [checkPostgresReadiness()] : []),
+					...(config.database.backend === 'cassandra' && !hasDatabaseQueryExecutor()
+						? [getClient().execute('SELECT release_version FROM system.local', [], {prepare: true, readTimeout: 1000})]
+						: []),
+				]);
+				if (jsConnectionManager) {
+					const connection = jsConnectionManager.getConnection();
+					if (connection.isClosed()) throw new Error('NATS closed');
+					let timeout: ReturnType<typeof setTimeout> | undefined;
+					try {
+						await Promise.race([
+							connection.flush(),
+							new Promise<never>((_, reject) => {
+								timeout = setTimeout(() => reject(new Error('NATS readiness timeout')), 1000);
+							}),
+						]);
+					} finally {
+						clearTimeout(timeout);
+					}
+				}
+			});
 			logger.info('API service initialization complete');
 		} catch (error) {
 			logger.error({error}, 'API service initialization failed');
@@ -287,6 +317,7 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 
 export function createShutdown(config: APIConfig, logger: LoggerInterface): () => Promise<void> {
 	return async (): Promise<void> => {
+		stopAPIReadiness();
 		logger.info('Shutting down API service...');
 		// 在网关、任务发布器和数据库连接关闭前结束已接收的读状态变更。
 		await shutdownDatabaseQueryExecutor();

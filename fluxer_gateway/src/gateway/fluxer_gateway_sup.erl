@@ -33,6 +33,7 @@ init([]) ->
 common_children() ->
     [
         child_spec(gateway_http_client, gateway_http_client),
+        child_spec(rpc_api_pool, rpc_client),
         child_spec(guild_ets_owner, guild_ets_owner),
         child_spec(gateway_nats_rpc, gateway_nats_rpc),
         child_spec(gateway_nats_pool, gateway_nats_pool),

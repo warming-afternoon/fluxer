@@ -91,6 +91,7 @@ pub struct NatsConfig {
 #[derive(Debug)]
 pub struct RpcConfig {
     pub url: String,
+    pub readonly_urls: Option<Vec<String>>,
     pub auth_token: SecretString,
 }
 
@@ -416,7 +417,33 @@ fn rpc_config(env: &Env) -> anyhow::Result<RpcConfig> {
         !api_endpoint.is_empty(),
         "FLUXER_INTERNAL_API_ENDPOINT must not be only slashes"
     );
+    let readonly_urls = if let Some(raw) = env.get("FLUXER_INTERNAL_API_RPC_URLS") {
+        let urls: Vec<String> = raw.split(',').map(|u| u.trim().to_owned()).collect();
+        anyhow::ensure!(
+            !urls.is_empty() && urls.len() <= 512,
+            "invalid RPC target count"
+        );
+        let distinct: std::collections::HashSet<_> = urls.iter().collect();
+        anyhow::ensure!(distinct.len() == urls.len(), "duplicate RPC targets");
+        for text in &urls {
+            let u = reqwest::Url::parse(text)?;
+            anyhow::ensure!(
+                (u.scheme() == "http" || u.scheme() == "https")
+                    && u.host_str().is_some()
+                    && u.username().is_empty()
+                    && u.password().is_none()
+                    && u.path() == "/internal/rpc"
+                    && u.query().is_none()
+                    && u.fragment().is_none(),
+                "invalid direct RPC target"
+            );
+        }
+        Some(urls)
+    } else {
+        None
+    };
     Ok(RpcConfig {
+        readonly_urls,
         url: format!("{api_endpoint}{RPC_PATH}"),
         auth_token: SecretString::new(env.require("FLUXER_GATEWAY_RPC_AUTH_TOKEN")?.to_owned()),
     })

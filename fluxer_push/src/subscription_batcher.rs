@@ -608,6 +608,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let rpc = Arc::new(RpcClient::new(
             &RpcConfig {
+                readonly_urls: None,
                 url: format!("http://{address}/rpc"),
                 auth_token: SecretString::new("test".to_owned()),
             },
@@ -649,6 +650,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let rpc = Arc::new(RpcClient::new(
             &RpcConfig {
+                readonly_urls: None,
                 url: format!("http://{address}/rpc"),
                 auth_token: SecretString::new("test".to_owned()),
             },

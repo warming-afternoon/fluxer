@@ -88,6 +88,7 @@ const NAMED_FLUXER_ENV_OVERRIDES: Record<string, NamedEnvOverride> = {
 	FLUXER_NATS_URL: {path: ['services', 'nats', 'core_url']},
 	FLUXER_NATS_JETSTREAM_URL: {path: ['services', 'nats', 'jetstream_url']},
 	FLUXER_NATS_AUTH_TOKEN: {path: ['services', 'nats', 'auth_token']},
+	FLUXER_API_INSTANCES: {path: ['services', 'api', 'instances'], parse: parseInteger},
 	FLUXER_API_PORT: {path: ['services', 'api', 'port'], parse: parseInteger},
 	FLUXER_API_HEADERS_TIMEOUT_MS: {path: ['services', 'api', 'headers_timeout_ms'], parse: parseInteger},
 	FLUXER_API_REQUEST_TIMEOUT_MS: {path: ['services', 'api', 'request_timeout_ms'], parse: parseInteger},

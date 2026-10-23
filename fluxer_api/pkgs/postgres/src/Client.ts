@@ -110,6 +110,7 @@ class PostgresClient implements IPostgresClient {
 	private connection: Promise<void> | null = null;
 	private disconnection: Promise<void> | null = null;
 	private activeOperations = 0;
+	private readinessAcquiring = false;
 	private resolveOperationsDrained: (() => void) | null = null;
 	private readonly acquiredConnections = new WeakMap<PoolClient, AcquiredPostgresConnection>();
 	private readonly listeners = new Set<PostgresNotificationListener>();
@@ -230,6 +231,51 @@ class PostgresClient implements IPostgresClient {
 
 	private statementName(name: string | undefined): string | undefined {
 		return this.config.preparedStatements === false ? undefined : name;
+	}
+
+	/** 在统一时限内验证连接池取连接和真实查询，超时后丢弃探测连接 */
+	async checkReadiness(): Promise<void> {
+		await this.withPool(async (pool) => {
+			// 超时后仍在等待的取连接操作不可取消，因此只允许保留一个排队探测。
+			if (this.readinessAcquiring) throw new Error('Postgres readiness connection acquisition pending');
+			this.readinessAcquiring = true;
+			let client: PoolClient | undefined;
+			let expired = false;
+			let healthy = false;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					Promise.resolve()
+						.then(() => pool.connect())
+						.finally(() => {
+							this.readinessAcquiring = false;
+						})
+						.then(async (connection) => {
+							// 连接池排队也计入时限；迟到的连接立即归还，避免泄漏。
+							if (expired) {
+								connection.release(true);
+								return;
+							}
+							client = connection;
+							const acquired = this.getAcquiredConnection(connection);
+							if (acquired.error) throw acquired.error;
+							await connection.query('SELECT 1');
+							if (acquired.error) throw acquired.error;
+							healthy = true;
+						}),
+					new Promise<never>((_, reject) => {
+						timeout = setTimeout(() => {
+							expired = true;
+							reject(new Error('Postgres readiness timeout'));
+						}, 1000);
+					}),
+				]);
+			} finally {
+				clearTimeout(timeout);
+				// 销毁超时连接会结束挂起查询，不影响池中的业务连接。
+				client?.release(!healthy || expired);
+			}
+		});
 	}
 
 	async transaction<T>(fn: (client: PostgresQueryable) => Promise<T>): Promise<T> {
@@ -404,4 +450,12 @@ export function getDefaultPostgresClient(): IPostgresClient {
 		throw new Error('Postgres client is not initialized. Call initPostgres() first.');
 	}
 	return defaultClientState.client;
+}
+
+/** 使用已初始化的真实数据库客户端探测就绪状态 */
+export async function checkPostgresReadiness(): Promise<void> {
+	getDefaultPostgresClient();
+	const client = defaultClientState.client;
+	assert(client, 'Default Postgres client is not initialized');
+	await client.checkReadiness();
 }

@@ -89,6 +89,7 @@ env_gateway_base_config() ->
         ),
         <<"logger_level">> => env_optional_binary("FLUXER_GATEWAY_LOGGER_LEVEL"),
         <<"api_rpc_endpoint">> => env_optional_binary("FLUXER_GATEWAY_API_RPC_ENDPOINT"),
+        <<"internal_api_rpc_urls">> => env_optional_binary("FLUXER_INTERNAL_API_RPC_URLS"),
         <<"cluster_enabled">> => env_bool("FLUXER_GATEWAY_CLUSTER_ENABLED", false),
         <<"cluster_discovery_dns_name">> => env_optional_binary(
             "FLUXER_GATEWAY_CLUSTER_DISCOVERY_DNS_NAME"
@@ -179,6 +180,7 @@ build_core_config(Service, Internal, Nats, Proxy) ->
         trust_client_ip_header => get_bool(Proxy, <<"trust_client_ip_header">>, false),
         api_internal_url => get_binary(Internal, <<"api">>, <<"http://127.0.0.1:8088">>),
         api_rpc_endpoint => get_optional_binary(Service, <<"api_rpc_endpoint">>),
+        internal_api_rpc_urls => internal_api_rpc_urls(Service),
         nats_core_url => get_string(Nats, <<"core_url">>, "nats://127.0.0.1:4222"),
         nats_auth_token => get_string(Nats, <<"auth_token">>, ""),
         rpc_auth_token => get_string(Service, <<"rpc_auth_token">>, ""),
@@ -600,4 +602,25 @@ positive_config(Service, Key, Default) ->
     case get_int(Service, Key, Default) of
         Value when Value > 0 -> Value;
         Value -> erlang:error({invalid_gateway_config, Key, Value})
+    end.
+
+internal_api_rpc_urls(Service) ->
+    case get_optional_binary(Service, <<"internal_api_rpc_urls">>) of
+        undefined ->
+            [];
+        Raw ->
+            Urls = [string:trim(U) || U <- binary:split(Raw, <<",">>, [global])],
+            true = length(Urls) > 0 andalso length(Urls) =< 512,
+            true = length(lists:usort(Urls)) =:= length(Urls),
+            true = lists:all(fun valid_internal_rpc_url/1, Urls),
+            Urls
+    end.
+valid_internal_rpc_url(Url) ->
+    case uri_string:parse(Url) of
+        #{scheme := Scheme, host := Host, path := <<"/internal/rpc">>} = M ->
+            (Scheme =:= <<"http">> orelse Scheme =:= <<"https">>) andalso byte_size(Host) > 0 andalso
+                not maps:is_key(userinfo, M) andalso not maps:is_key(query, M) andalso
+                not maps:is_key(fragment, M);
+        _ ->
+            false
     end.

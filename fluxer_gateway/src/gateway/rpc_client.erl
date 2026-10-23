@@ -1,6 +1,8 @@
 %% SPDX-License-Identifier: AGPL-3.0-or-later
 
 -module(rpc_client).
+-behaviour(gen_server).
+-export([start_link/0, init/1, handle_call/3, handle_cast/2, handle_info/2]).
 -typing([eqwalizer]).
 
 -export([
@@ -45,7 +47,8 @@ call(Request) ->
     call(Request, request_timeout_ms()).
 
 -spec call(rpc_request(), pos_integer()) -> rpc_response().
-call(Request, Timeout) ->
+call(Request0, Timeout) ->
+    Request = ensure_routing_id(Request0),
     Trace = build_request_trace(Request),
     maybe_log_voice_request_start(Trace),
     Result = do_request(Request, Timeout),
@@ -54,17 +57,35 @@ call(Request, Timeout) ->
 
 -spec call_with_retry(rpc_request(), retry_config()) -> rpc_response().
 call_with_retry(Request, {MaxAttempts, _BaseMs, _MaxMs, _JitterMs} = RetryConfig) ->
-    do_request_with_retry(Request, RetryConfig, 1, MaxAttempts).
+    Limit =
+        case readonly_type(request_type(Request)) of
+            true -> min(MaxAttempts, 3);
+            false -> 1
+        end,
+    do_request_with_retry(
+        ensure_routing_id(Request#{'$rpc_deadline' => erlang:monotonic_time(millisecond) + 5000}),
+        RetryConfig,
+        1,
+        Limit
+    ).
 
 -spec do_request_with_retry(
     rpc_request(), retry_config(), pos_integer(), pos_integer()
 ) -> rpc_response().
 do_request_with_retry(Request, RetryConfig, Attempt, MaxAttempts) ->
-    case call(Request) of
-        {ok, _Data} = Success ->
-            Success;
-        {error, Reason} = Error ->
-            handle_retry(Error, Reason, Request, RetryConfig, Attempt, MaxAttempts)
+    case
+        maps:get('$rpc_deadline', Request, erlang:monotonic_time(millisecond) + 5000) =<
+            erlang:monotonic_time(millisecond)
+    of
+        true ->
+            {error, timeout};
+        false ->
+            case call(Request) of
+                {ok, _Data} = Success ->
+                    Success;
+                {error, Reason} = Error ->
+                    handle_retry(Error, Reason, Request, RetryConfig, Attempt, MaxAttempts)
+            end
     end.
 
 -spec handle_retry(
@@ -76,17 +97,37 @@ do_request_with_retry(Request, RetryConfig, Attempt, MaxAttempts) ->
     pos_integer()
 ) -> rpc_response().
 handle_retry(Error, Reason, Request, RetryConfig, Attempt, MaxAttempts) ->
-    case {is_retryable(Reason), Attempt >= MaxAttempts} of
+    case
+        {
+            readonly_type(request_type(Request)) andalso is_retryable(Reason),
+            Attempt >= MaxAttempts
+        }
+    of
         {false, _} ->
             Error;
         {true, true} ->
             log_retries_exhausted(MaxAttempts, Reason, Request),
             {error, {retries_exhausted, Reason}};
         {true, false} ->
-            Delay = backoff_delay(Attempt, RetryConfig),
+            Delay = max(
+                1,
+                min(
+                    backoff_delay(Attempt, RetryConfig),
+                    maps:get(
+                        '$rpc_deadline', Request, erlang:monotonic_time(millisecond) + 5000
+                    ) - erlang:monotonic_time(millisecond)
+                )
+            ),
             log_retry_attempt(Attempt, MaxAttempts, Delay, Reason, Request),
             ok = gateway_retry_timer:wait(Delay),
-            do_request_with_retry(Request, RetryConfig, Attempt + 1, MaxAttempts)
+            do_request_with_retry(
+                ensure_routing_id(
+                    maps:without(['$rpc_route_url', '$rpc_route_unavailable'], Request)
+                ),
+                RetryConfig,
+                Attempt + 1,
+                MaxAttempts
+            )
     end.
 
 -spec log_retries_exhausted(pos_integer(), term(), rpc_request()) -> ok.
@@ -137,9 +178,26 @@ backoff_delay(Attempt, {_MaxAttempts, BaseMs, MaxMs, JitterMs}) ->
     trunc(CappedDelay + Jitter).
 
 -spec do_request(rpc_request(), pos_integer()) -> rpc_response().
-do_request(Request, Timeout) ->
-    {Url, HostKey, IsHttps} = rpc_url_meta(),
-    Payload = iolist_to_binary(json:encode(Request)),
+do_request(#{'$rpc_route_unavailable' := true}, _Timeout) ->
+    {error, no_responders};
+do_request(Request, Timeout0) ->
+    Timeout = max(
+        1,
+        min(
+            Timeout0,
+            maps:get('$rpc_deadline', Request, erlang:monotonic_time(millisecond) + Timeout0) -
+                erlang:monotonic_time(millisecond)
+        )
+    ),
+    {Url, HostKey, IsHttps} = request_url_meta(Request),
+    Payload = iolist_to_binary(
+        json:encode(
+            maps:without(
+                ['$rpc_route_id', '$rpc_route_url', '$rpc_deadline', '$rpc_route_unavailable'],
+                Request
+            )
+        )
+    ),
     Headers = rpc_headers(Request),
     RequestOpts = #{
         connect_timeout => min(Timeout, 5000),
@@ -209,14 +267,90 @@ trim_trailing_slash(Url) ->
     end.
 
 -spec rpc_headers(rpc_request()) -> [{binary(), binary()}].
-rpc_headers(Request) ->
+rpc_headers(Request0) ->
+    Request = ensure_routing_id(Request0),
     ClientIpHeader = normalize_client_ip_header(fluxer_gateway_env:get(client_ip_header)),
     AuthToken = ensure_binary(fluxer_gateway_env:get(rpc_auth_token)),
     [
         {<<"content-type">>, <<"application/json">>},
         {ClientIpHeader, rpc_client_ip_header_value(Request)},
-        {?RPC_AUTH_HEADER, AuthToken}
+        {?RPC_AUTH_HEADER, AuthToken},
+        {<<"x-fluxer-rpc-type">>, ensure_binary(maps:get(<<"type">>, Request, <<"unknown">>))},
+        {<<"x-fluxer-rpc-request-id">>, maps:get('$rpc_route_id', Request)}
     ].
+
+%% 每个逻辑调用只生成一次不含用户信息的标识。
+-spec ensure_routing_id(rpc_request()) -> rpc_request().
+ensure_routing_id(Request) ->
+    case maps:find('$rpc_route_id', Request) of
+        {ok, Id} when is_binary(Id), byte_size(Id) =:= 32 ->
+            pin_route(Request);
+        _ ->
+            Random = crypto:strong_rand_bytes(16),
+            Id = binary:encode_hex(Random, lowercase),
+            pin_route(Request#{'$rpc_route_id' => Id})
+    end.
+
+%% 新请求只选择健康实例；已发出的写请求不自动重放。
+pin_route(#{'$rpc_route_url' := _} = Request) ->
+    Request;
+pin_route(Request) ->
+    case fluxer_gateway_env:get_optional(internal_api_rpc_urls) of
+        [_ | _] = Urls ->
+            case healthy_urls(Urls) of
+                [] ->
+                    Request#{'$rpc_route_unavailable' => true};
+                Healthy ->
+                    Pick =
+                        case readonly_type(request_type(Request)) of
+                            true ->
+                                lists:nth(
+                                    1 +
+                                        (fnv1a(maps:get('$rpc_route_id', Request)) rem
+                                            length(Healthy)),
+                                    Healthy
+                                );
+                            false ->
+                                hd(Healthy)
+                        end,
+                    Request#{'$rpc_route_url' => Pick}
+            end;
+        _ ->
+            Request
+    end.
+readonly_type(Type) ->
+    lists:member(Type, [
+        <<"get_read_state">>,
+        <<"get_user_guild_settings">>,
+        <<"get_user_blocked_ids">>,
+        <<"get_push_subscriptions">>,
+        <<"get_badge_counts">>,
+        <<"list_thread_members">>,
+        <<"thread_watch_contexts">>,
+        <<"forum_unreads">>,
+        <<"guild_member_bounds">>,
+        <<"guild_member_range">>
+    ]).
+%% FNV-1a 32 位，与 Rust 共享固定测试向量。
+fnv1a(Bin) ->
+    lists:foldl(
+        fun(C, H) -> ((H bxor C) * 16777619) band 16#ffffffff end,
+        2166136261,
+        binary_to_list(Bin)
+    ).
+request_url_meta(#{'$rpc_route_url' := Url}) ->
+    Key = {?MODULE, rpc_url_meta, Url},
+    case persistent_term:get(Key, undefined) of
+        undefined ->
+            {HostKey, IsHttps} = gateway_http_client_request:url_metadata(Url),
+            Meta = {Url, HostKey, IsHttps},
+            persistent_term:put(Key, Meta),
+            Meta;
+        Meta ->
+            Meta
+    end;
+request_url_meta(_) ->
+    rpc_url_meta().
 
 -spec rpc_client_ip_header_value(rpc_request()) -> binary().
 rpc_client_ip_header_value(Request) ->
@@ -373,4 +507,77 @@ unicode_binary_or_default(Value, Default) ->
     case type_conv:unicode_to_binary(Value) of
         Binary when is_binary(Binary) -> Binary;
         undefined -> Default
+    end.
+
+start_link() -> gen_server:start_link({local, rpc_api_pool}, ?MODULE, [], []).
+init([]) ->
+    _ = ets:new(rpc_api_health, [named_table, protected, set, {read_concurrency, true}]),
+    Urls =
+        case fluxer_gateway_env:get_optional(internal_api_rpc_urls) of
+            L when is_list(L) -> L;
+            _ -> []
+        end,
+    lists:foreach(fun(U) -> ets:insert(rpc_api_health, {U, true, 0, 0}) end, Urls),
+    self() ! health_tick,
+    {ok, #{}}.
+healthy_urls(Urls) ->
+    try
+        [
+            U
+         || U <- Urls,
+            case ets:lookup(rpc_api_health, U) of
+                [{_, true, _, _}] -> true;
+                _ -> false
+            end
+        ]
+    catch
+        error:badarg -> Urls
+    end.
+handle_call(_Request, _From, State) -> {reply, ok, State}.
+handle_cast(_Request, State) -> {noreply, State}.
+handle_info(health_tick, State) ->
+    Urls =
+        case fluxer_gateway_env:get_optional(internal_api_rpc_urls) of
+            L when is_list(L) -> L;
+            _ -> []
+        end,
+    Owner = self(),
+    lists:foreach(
+        fun(U) -> spawn(fun() -> Owner ! {api_health, U, probe_api(U)} end) end, Urls
+    ),
+    erlang:send_after(2000, self(), health_tick),
+    {noreply, State};
+handle_info({api_health, U, Good}, State) ->
+    {Healthy, Fails, Passes} =
+        case ets:lookup(rpc_api_health, U) of
+            [{_, H, F, P}] -> {H, F, P};
+            _ -> {false, 0, 0}
+        end,
+    Entry =
+        case Good of
+            true -> {U, Healthy orelse Passes + 1 >= 2, 0, Passes + 1};
+            false -> {U, Healthy andalso Fails + 1 < 2, Fails + 1, 0}
+        end,
+    ets:insert(rpc_api_health, Entry),
+    {noreply, State};
+handle_info(_, State) ->
+    {noreply, State}.
+probe_api(Url) ->
+    try
+        Root = binary:part(Url, 0, byte_size(Url) - byte_size(<<"/internal/rpc">>)),
+        Ready = <<Root/binary, "/_ready">>,
+        {HostKey, IsHttps} = gateway_http_client_request:url_metadata(Ready),
+        case
+            gateway_http_client:request(rpc, get, Ready, [], undefined, #{
+                connect_timeout => 1000,
+                recv_timeout => 1000,
+                host_key => HostKey,
+                is_https => IsHttps
+            })
+        of
+            {ok, 200, _, _} -> true;
+            _ -> false
+        end
+    catch
+        _:_ -> false
     end.

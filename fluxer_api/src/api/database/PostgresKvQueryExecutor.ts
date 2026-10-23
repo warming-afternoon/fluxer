@@ -118,6 +118,50 @@ function numericRowKeyExpr(column: string): string {
 
 const NUMERIC_ROW_KEY = numericRowKeyExpr('kv.row_key');
 
+/** 复用索引与分页查询的数值表达式，避免 bigint 用户 ID 经 Number 转换丢失精度 */
+function guildMemberUserIdExpr(prefix: string): string {
+	// 仅转换带 bigint 类型标记的整数，避免其他逻辑表的数据影响索引创建。
+	return `(CASE WHEN ${prefix}row_data -> 'user_id' ->> '__fluxer_type' = 'bigint' AND ${prefix}row_data -> 'user_id' ->> 'value' ~ '^-?[0-9]+$' THEN (${prefix}row_data -> 'user_id' ->> 'value')::numeric END)`;
+}
+
+interface GuildMemberPageBounds {
+	/** 固定查询的社区 ID */
+	guildId: bigint;
+
+	/** 可选的排他用户 ID 游标 */
+	after?: bigint;
+
+	/** 数据库最多返回的成员数量 */
+	limit: number;
+}
+
+/** 仅为明确支持的成员升序分页提取边界，其余查询保留通用执行路径 */
+function guildMemberPageBounds(meta: KvQueryMeta, params: CassandraParams): GuildMemberPageBounds | null {
+	// 限制表、主键、排序和条数，避免专用 SQL 改变其他查询的语义。
+	if (
+		meta.action !== 'select' ||
+		meta.table.name !== 'guild_members' ||
+		meta.unordered ||
+		meta.table.primaryKey.length !== 2 ||
+		meta.table.primaryKey[0] !== 'guild_id' ||
+		meta.table.primaryKey[1] !== 'user_id' ||
+		typeof meta.limit !== 'number' ||
+		!Number.isSafeInteger(meta.limit) ||
+		meta.limit < 0 ||
+		(meta.orderBy && (meta.orderBy.col !== 'user_id' || meta.orderBy.direction !== 'ASC'))
+	)
+		return null;
+	// 只接受社区等值条件及可选的用户 ID 严格大于游标条件。
+	const where = whereClauses(meta);
+	const guild = where.find((clause) => clause.kind === 'eq' && clause.col === 'guild_id');
+	const after = where.find((clause) => clause.kind === 'gt' && clause.col === 'user_id');
+	if (!guild || where.length !== (after ? 2 : 1)) return null;
+	const guildId = params[guild.param];
+	const afterId = after ? params[after.param] : undefined;
+	if (typeof guildId !== 'bigint' || (after && typeof afterId !== 'bigint')) return null;
+	return {guildId, after: afterId as bigint | undefined, limit: meta.limit};
+}
+
 function planStatementName(prefix: string, plan: CandidatePlan): string | undefined {
 	switch (plan.kind) {
 		case 'rowKeys':
@@ -890,6 +934,13 @@ CREATE TABLE IF NOT EXISTS ${table} (
 		await db.query(
 			`CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`${kvTable}_message_reactions_message_idx`)} ON ${table} (partition_key, ((CASE WHEN row_data -> 'message_id' ->> 'value' ~ '^-?[0-9]+$' THEN (row_data -> 'message_id' ->> 'value')::bigint END))) WHERE table_name = 'message_reactions'`,
 		);
+		// 成员分页与精确计数使用专用部分索引，沿用当前事务和迁移锁。
+		await db.query(
+			`CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`${kvTable}_guild_members_user_numeric_idx`)} ON ${table} ((row_data -> 'guild_id'), ${guildMemberUserIdExpr('')}) WHERE table_name = 'guild_members'`,
+		);
+		await db.query(
+			`CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`${kvTable}_guild_members_count_cover_idx`)} ON ${table} (row_key COLLATE "C") INCLUDE (expires_at) WHERE table_name = 'guild_members'`,
+		);
 		await repairInvalidPostgresKvIndexes(db, kvTable);
 		const migrated = await db.query(`SELECT 1 FROM ${table} WHERE table_name = $1 AND row_key = $2 LIMIT 1`, [
 			POSTGRES_KV_MIGRATION_TABLE,
@@ -1171,12 +1222,32 @@ export class PostgresKvQueryExecutor {
 		);
 	}
 
+	/** 优先下推明确的成员分页，其余查询沿用候选行过滤与排序 */
 	private async select(
 		meta: KvQueryMeta,
 		params: CassandraParams,
 		plan: QueryPlan,
 		db: PostgresQueryable,
 	): Promise<Array<Row>> {
+		// 将排序和条数限制交给数据库，避免每页读取整个成员分区。
+		const memberPage = guildMemberPageBounds(meta, params);
+		if (memberPage) {
+			const userId = guildMemberUserIdExpr('kv.');
+			const bindings: Array<unknown> = [JSON.stringify(encodeValue(memberPage.guildId))];
+			let cursor = '';
+			if (memberPage.after !== undefined) {
+				bindings.push(memberPage.after.toString());
+				cursor = ` AND ${userId} > $2::numeric`;
+			}
+			bindings.push(memberPage.limit);
+			const result = await db.query<StoredRow>(
+				`SELECT kv.row_key, kv.row_data FROM ${this.table} kv WHERE kv.table_name = 'guild_members' AND kv.row_data -> 'guild_id' = $1::jsonb${cursor} AND (kv.expires_at IS NULL OR kv.expires_at > now()) ORDER BY ${userId} ASC LIMIT $${bindings.length}`,
+				bindings,
+			);
+			return this.matchingRows(meta, result.rows, params).map((row) =>
+				projectRow(row, meta.columns as ReadonlyArray<string> | undefined),
+			);
+		}
 		if (
 			meta.unordered &&
 			typeof meta.limit === 'number' &&
@@ -1191,6 +1262,7 @@ export class PostgresKvQueryExecutor {
 		return rows.map((row) => projectRow(row, meta.columns as ReadonlyArray<string> | undefined));
 	}
 
+	/** 保留精确计数语义，并使成员计数的通用计划可识别覆盖索引 */
 	private async count(meta: KvQueryMeta, params: CassandraParams, db: PostgresQueryable): Promise<Array<Row>> {
 		const plan = buildCandidatePlan(meta, params);
 		if (!plan.exact) {
@@ -1198,12 +1270,15 @@ export class PostgresKvQueryExecutor {
 		}
 		if (plan.candidates.kind === 'none') return [{count: 0}];
 		if (plan.candidates.kind === 'scan') logFullScan(meta);
+		// 保留原参数及过滤条件，额外的固定表谓词让通用计划识别部分覆盖索引。
+		const guildMemberCount = meta.table.name === 'guild_members';
+		const tablePredicate = guildMemberCount ? " AND kv.table_name = 'guild_members'" : '';
 		let total = 0;
 		for (const fragments of planFragmentGroups(plan.candidates)) {
 			const result = await db.query<{count: string}>(
-				`SELECT count(*) AS count FROM ${this.table} kv WHERE kv.table_name = $1${fragments.predicate} AND (kv.expires_at IS NULL OR kv.expires_at > now())`,
+				`SELECT count(*) AS count FROM ${this.table} kv WHERE kv.table_name = $1${fragments.predicate}${tablePredicate} AND (kv.expires_at IS NULL OR kv.expires_at > now())`,
 				[meta.table.name, ...fragments.params],
-				planStatementName('kv_count', plan.candidates),
+				planStatementName(guildMemberCount ? 'kv_count_guild_members' : 'kv_count', plan.candidates),
 			);
 			total += Number(result.rows[0]?.count ?? 0);
 		}

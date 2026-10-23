@@ -9,7 +9,7 @@ use crate::metrics::{JobKind, JobRejection, Provider, elapsed_ms};
 use crate::payload;
 use crate::providers::{self, SendOutcome};
 use crate::retry::{self, RETRY_DEADLINE};
-use crate::rpc::RpcError;
+use crate::rpc::{RpcClient, RpcError};
 use crate::server::AppState;
 use crate::subscription::{Platform, Subscription};
 use crate::unix_millis;
@@ -353,13 +353,13 @@ async fn run_message_job(
 ) -> anyhow::Result<()> {
     let started_ms = now_ms();
     let deadline = Instant::now() + RETRY_DEADLINE;
-    let (badges, subscriptions) = lookup(deadline, || async {
-        tokio::try_join!(
-            state.rpc.badge_counts(&job.user_ids),
-            state.rpc.push_subscriptions(&job.user_ids)
-        )
-    })
-    .await?;
+    let audience = if job.is_thread() {
+        Audience::Thread
+    } else {
+        Audience::Standard
+    };
+    let (badges, subscriptions) =
+        lookup_delivery_context(&state.rpc, &job.user_ids, audience, deadline).await?;
     state.metrics.record_recipients(job.user_ids.len() as u64);
 
     let envelopes = job
@@ -373,19 +373,7 @@ async fn run_message_job(
             )
         })
         .collect();
-    let summary = deliver(
-        state,
-        sends,
-        &subscriptions,
-        envelopes,
-        deadline,
-        if job.is_thread() {
-            Audience::Thread
-        } else {
-            Audience::Standard
-        },
-    )
-    .await;
+    let summary = deliver(state, sends, &subscriptions, envelopes, deadline, audience).await;
     let duration_ms = elapsed_ms(started_ms);
 
     info!(
@@ -410,13 +398,8 @@ async fn run_clear_job(state: &AppState, sends: &Semaphore, job: ClearJob) -> an
     let started_ms = now_ms();
     let deadline = Instant::now() + RETRY_DEADLINE;
     let user_ids = std::slice::from_ref(&job.user_id);
-    let (badges, subscriptions) = lookup(deadline, || async {
-        tokio::try_join!(
-            state.rpc.badge_counts(user_ids),
-            state.rpc.push_subscriptions(user_ids)
-        )
-    })
-    .await?;
+    let (badges, subscriptions) =
+        lookup_delivery_context(&state.rpc, user_ids, Audience::Standard, deadline).await?;
     state.metrics.record_recipients(1);
 
     let envelope = payload::web_push_clear(&job, badge_of(&badges, &job.user_id));
@@ -448,6 +431,44 @@ async fn run_clear_job(state: &AppState, sends: &Semaphore, job: ClearJob) -> an
         .metrics
         .record_job_completed(JobKind::Clear, duration_ms);
     Ok(())
+}
+
+/// 先确定实际接收设备，只为存在适用订阅的用户查询角标，避免已读清理放大无效读取。
+async fn lookup_delivery_context(
+    rpc: &RpcClient,
+    user_ids: &[String],
+    audience: Audience,
+    deadline: Instant,
+) -> Result<(HashMap<String, u32>, HashMap<String, Vec<Subscription>>), RpcError> {
+    // 分开重试两个阶段，角标查询失败时不重复查询已取得的订阅。
+    let subscriptions = lookup(deadline, || rpc.push_subscriptions(user_ids)).await?;
+    let badges = lookup_badges(rpc, user_ids, &subscriptions, audience, deadline).await?;
+    Ok((badges, subscriptions))
+}
+
+/// 只为有适用设备的用户读取角标，组批和直接查询共用相同资格判断。
+async fn lookup_badges(
+    rpc: &RpcClient,
+    user_ids: &[String],
+    subscriptions: &HashMap<String, Vec<Subscription>>,
+    audience: Audience,
+    deadline: Instant,
+) -> Result<HashMap<String, u32>, RpcError> {
+    let recipients: Vec<String> = user_ids
+        .iter()
+        .filter(|user_id| {
+            subscriptions
+                .get(*user_id)
+                .is_some_and(|devices| devices.iter().any(|device| audience.admits(device)))
+        })
+        .cloned()
+        .collect();
+    let badges = if recipients.is_empty() {
+        HashMap::new()
+    } else {
+        lookup(deadline, || rpc.badge_counts(&recipients)).await?
+    };
+    Ok(badges)
 }
 
 async fn run_ring_job(state: &AppState, sends: &Semaphore, job: RingJob) -> anyhow::Result<()> {
@@ -682,6 +703,12 @@ fn reap(result: Result<(), tokio::task::JoinError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RpcConfig;
+    use crate::metrics::Metrics;
+    use axum::{Router, routing::post};
+    use fluxer_common::secret::SecretString;
+    use serde_json::json;
+    use std::sync::Mutex;
 
     fn subscription(platform: &str, thread_channels: bool) -> Subscription {
         Subscription {
@@ -707,5 +734,73 @@ mod tests {
     fn a_standard_push_ignores_the_capability() {
         assert!(Audience::Standard.admits(&subscription("ios_apns", false)));
         assert!(Audience::Standard.admits(&subscription("ios_apns", true)));
+    }
+
+    /// 用本地 RPC 服务记录真实调用，验证没有订阅时不会读取角标。
+    async fn lookup_fixture(devices: Value, audience: Audience) -> Vec<Value> {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let received = Arc::clone(&calls);
+        let router = Router::new().route(
+            "/rpc",
+            post(move |body: axum::body::Bytes| {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                let calls = Arc::clone(&received);
+                let devices = devices.clone();
+                async move {
+                    calls.lock().unwrap().push(body.clone());
+                    json!({"data": if body["type"] == "get_push_subscriptions" {
+                    devices
+                } else { json!({"badge_counts": {"subscribed": 3}}) }})
+                    .to_string()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let rpc = RpcClient::new(
+            &RpcConfig {
+                url: format!("http://{address}/rpc"),
+                auth_token: SecretString::new("test".to_owned()),
+            },
+            reqwest::Client::new(),
+            Arc::new(Metrics::new()),
+        );
+        let users = vec!["empty".to_owned(), "subscribed".to_owned()];
+        lookup_delivery_context(
+            &rpc,
+            &users,
+            audience,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        let result = calls.lock().unwrap().clone();
+        result
+    }
+
+    #[tokio::test]
+    async fn empty_subscriptions_skip_badge_rpc() {
+        let calls = lookup_fixture(json!({}), Audience::Standard).await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["type"], "get_push_subscriptions");
+    }
+
+    #[tokio::test]
+    async fn thread_ineligible_subscriptions_skip_badge_rpc() {
+        let devices = json!({"subscribed": [{"subscription_id":"sub", "endpoint":"token", "platform":"android_fcm"}]});
+        let calls = lookup_fixture(devices, Audience::Thread).await;
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn badges_are_queried_only_for_actual_recipients() {
+        let devices = json!({"subscribed": [{"subscription_id":"sub", "endpoint":"token", "platform":"android_fcm"}]});
+        let calls = lookup_fixture(devices, Audience::Standard).await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1]["user_ids"], json!(["subscribed"]));
     }
 }

@@ -6,6 +6,7 @@ import os from 'node:os';
 import {monitorEventLoopDelay, performance} from 'node:perf_hooks';
 import {setTimeout as sleep} from 'node:timers/promises';
 import {loadForumLoadFixture} from './ForumLoadFixture.mjs';
+import {FrontendAckQueue} from './FrontendAckQueue.mjs';
 
 const argv = process.argv.slice(2);
 const opt = Object.fromEntries(
@@ -37,6 +38,11 @@ const rate = Number(opt.rate || 20),
 	seconds = Number(opt.seconds || 10);
 const burst = Number(opt.burst || 0),
 	concurrency = Number(opt.concurrency || 16);
+const ackMode = opt['ack-mode'] || 'strict';
+if (!['strict', 'frontend-batched'].includes(ackMode)) throw Error('Unknown ACK mode');
+const frontendBatched = ackMode === 'frontend-batched';
+for (const flag of ['warm-debug', 'warm-reset', 'startup-pipeline', 'startup-only'])
+	if (opt[flag]) throw Error('Unsupported experimental option: ' + flag);
 const plan = opt.plan
 	? JSON.parse(fs.readFileSync(opt.plan, 'utf8'))
 	: [{name: 'single', rate, seconds, burst, concurrency}];
@@ -168,13 +174,10 @@ function percentiles() {
 }
 /** 流式记录结果，磁盘积压超限时显式停止。 */
 function write(stream, obj) {
-	if (
-		!streams[stream].write(
-			JSON.stringify({utc: new Date().toISOString(), phase, stage: activeStage, targetOnline: onlineTarget, ...obj}) +
-				'\n',
-		) &&
-		streams[stream].writableLength > 64 * 1024 * 1024
-	)
+	const line =
+		JSON.stringify({utc: new Date().toISOString(), phase, stage: activeStage, targetOnline: onlineTarget, ...obj}) +
+		'\n';
+	if (!streams[stream].write(line) && streams[stream].writableLength > 64 * 1024 * 1024)
 		abortReason ??= 'Output disk backpressure exceeded 64 MiB';
 }
 function setPhase(p) {
@@ -289,12 +292,38 @@ const sample = setInterval(() => {
 	eld.reset();
 }, 1000);
 const ackReady = [];
+const frontendAckQueue = frontendBatched
+	? new FrontendAckQueue({
+			send: (state, entries) => request('/read-states/ack', state.token, {read_states: entries}, 'ack'),
+			queued: (change) => {
+				ackQueued += change;
+			},
+			active: (change) => {
+				ackActive += change;
+			},
+			failed: (error) => fail('Frontend ACK queue: ' + error.message),
+			concurrency: ackConcurrency,
+			started: (job) => record('ackQueueWaitMs', performance.now() - job.enqueued),
+			covered: (state, job) => {
+				totals.ackSuccess++;
+				job.m.acked.add(state.account.index);
+				record('endToEndAckMs', performance.now() - job.m.started);
+				job.m.ackFinished++;
+				maybeFinish(job.m);
+			},
+		})
+	: null;
+
 /** 待确认任务只保留消息ID和共享状态，逐条确认语义不变。 */
 function enqueueAck(s, m, msg) {
 	if (ackQueued >= maxAckBacklog) {
 		totals.ackQueueRejected++;
 		m.ackRejected.add(s.account.index);
 		fail('Bounded ACK backlog exceeded; workload cannot be sustained');
+		return;
+	}
+	if (frontendAckQueue) {
+		frontendAckQueue.enqueue(s, {m, messageId: msg.id, enqueued: performance.now()});
 		return;
 	}
 	s.ackQueue.push({m, messageId: msg.id, enqueued: performance.now()});
@@ -698,6 +727,7 @@ try {
 				burst = workload.burst || 0,
 				concurrency = workload.concurrency || 16;
 			ackConcurrency = Number(workload.ackConcurrency || opt['ack-concurrency'] || 128);
+			if (frontendAckQueue) frontendAckQueue.concurrency = ackConcurrency;
 			activeStage = `online${onlineTarget}-${workload.name}`;
 			const startedAt = new Date().toISOString();
 			const before = structuredClone(totals);
@@ -865,8 +895,9 @@ try {
 						warmWithOnlineReaders: warm.length,
 						hotShare,
 					},
-					ackMode:
-						'one real HTTP acknowledgement per message per recipient, serialized per user; 204 success, no retries',
+					ackMode: frontendBatched
+						? 'frontend-batched: first deadline 3000ms, latest cursor per channel, max100 channels, authoritative response coverage'
+						: 'one real HTTP acknowledgement per message per recipient, serialized per user; 204 success, no retries',
 					totals: structuredClone(totals),
 					httpStatuses: structuredClone(httpStatuses),
 					latencies: percentiles(),
@@ -939,6 +970,7 @@ try {
 } finally {
 	clearTimeout(loginPhaseTimer);
 	setPhase('exit');
+	frontendAckQueue?.close();
 	shuttingDown = true;
 	ackReady.length = 0;
 	for (const st of states.values()) st.ackQueue.length = 0;
@@ -950,11 +982,29 @@ try {
 	const ackExitDeadline = performance.now() + Number(opt['http-timeout-ms'] || 30000) + 2000;
 	while (ackActive && performance.now() < ackExitDeadline) await sleep(100);
 	await sleep(1000);
+	if (frontendAckQueue) {
+		const cursorManifest = JSON.stringify([...frontendAckQueue.cursors.values()]);
+		if (Buffer.byteLength(cursorManifest) > 8 * 1024 * 1024) fail('Cursor manifest exceeded 8MiB cap');
+		else fs.writeFileSync(opt.out + '/expected-ack-cursors.json', cursorManifest, {mode: 0o600});
+	}
 	clearInterval(sample);
 	eld.disable();
 	summary = {
 		...summary,
 		sequenceBase,
+		...(abortReason ? {passed: false, allRequestedTiersPassed: false, abortReason} : {}),
+		measurementMode: frontendBatched ? 'frontend-batched-auto-view-scenario' : 'strict-benchmark',
+		finalTotals: structuredClone(totals),
+		frontendAck: frontendAckQueue
+			? {
+					...frontendAckQueue.stats,
+					finalCursorCount: frontendAckQueue.cursors.size,
+					delayMs: 3000,
+					maxChannels: 100,
+					allRecipientsAutomaticallyView: true,
+					durableCursorProofRequired: true,
+				}
+			: null,
 		operatorCancelled,
 		operatorCancelReason,
 		loginPhaseTimeoutSeconds,
@@ -971,7 +1021,7 @@ try {
 		measurementCaveats: [
 			'Single generator host shares resources with application; generator metrics are separately logged.',
 			'HTTP ACK 204 and received WS MESSAGE_ACK counts are distinct.',
-			'A timed-out HTTP send can have committed; raw delivered recipients are retained but excluded from success denominator.',
+			'A timed-out HTTP send can have committed; aggregate accounting remains complete while raw detail retention is byte-bounded.',
 			'Resource JSONL reports host/cgroup and generator only; server API/DB wait and gateway mailbox metrics require separate sampler.',
 			'No extrapolation to production capacity.',
 		],

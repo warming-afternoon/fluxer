@@ -4,7 +4,7 @@
 -typing([eqwalizer]).
 
 -export([publish_message/8, publish_clear/3, clear_job/4]).
--export([publish_ring/6, request/3]).
+-export([publish_ring/6, request/3, request_batch/3]).
 
 -define(SUBJECT_MESSAGE, <<"push.job.message">>).
 -define(SUBJECT_CLEAR, <<"push.job.clear">>).
@@ -200,6 +200,30 @@ request(Subject, Body, Timeout) ->
     case gateway_nats_pool_conn:get_pool_conn() of
         {ok, Conn} -> reply_result(nats:request(Conn, Subject, Body, #{timeout => Timeout}));
         {error, Reason} -> {error, Reason}
+    end.
+
+%% 请求批清理结果并拒绝缺少版本或逐项结果的回复。
+-spec request_batch(binary(), binary(), pos_integer()) ->
+    {batch_results, [map()]} | {error, term()}.
+request_batch(Subject, Body, Timeout) ->
+    case gateway_nats_pool_conn:get_pool_conn() of
+        {ok, Conn} ->
+            case nats:request(Conn, Subject, Body, #{timeout => Timeout}) of
+                {ok, {Payload, _}} ->
+                    %% 只有带批协议版本的逐项回复才可进入后续结算。
+                    try json:decode(iolist_to_binary(Payload)) of
+                        #{<<"v">> := 2, <<"results">> := Results} when is_list(Results) ->
+                            {batch_results, Results};
+                        _ ->
+                            {error, invalid_batch_reply}
+                    catch
+                        _:_ -> {error, invalid_batch_reply}
+                    end;
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 -spec reply_result({ok, {iodata(), map()}} | {error, term()}) -> ok | {error, term()}.

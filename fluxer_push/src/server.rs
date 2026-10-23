@@ -97,15 +97,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// 初始化 Push 服务状态，并按批处理配置创建共享订阅查询器。
     pub(crate) fn try_new(cfg: DeliveryConfig) -> anyhow::Result<Self> {
         let metrics = Arc::new(Metrics::new());
         let relay_consent = RelayConsentStore::new(cfg.relay_consent_accepted);
         metrics.record_relay_consent_accepted(relay_consent.accepted());
         let http = vendor::http_client()?;
         let rpc = Arc::new(RpcClient::new(&cfg.rpc, http.clone(), Arc::clone(&metrics)));
-        let subscription_batcher = cfg.subscription_batching_enabled.then(|| {
-            SubscriptionBatcher::new(cfg.queue_capacity, Arc::clone(&rpc), Arc::clone(&metrics))
-        });
+        let subscription_batcher = (cfg.subscription_batching_enabled || cfg.clear_batch_enabled)
+            .then(|| {
+                SubscriptionBatcher::new(cfg.queue_capacity, Arc::clone(&rpc), Arc::clone(&metrics))
+            });
         Ok(Self {
             rpc,
             subscription_batcher,

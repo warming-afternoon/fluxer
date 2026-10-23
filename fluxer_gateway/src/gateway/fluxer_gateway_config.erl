@@ -69,12 +69,16 @@ env_services_config() ->
 env_gateway_config() ->
     env_gateway_base_config().
 
+%% 从环境变量读取网关基础配置与批传输开关。
 -spec env_gateway_base_config() -> map().
 env_gateway_base_config() ->
     #{
         <<"port">> => env_int("FLUXER_GATEWAY_PORT", 8771),
         <<"gateway_role">> => env_optional_binary("FLUXER_GATEWAY_ROLE"),
         <<"rpc_auth_token">> => env_binary("FLUXER_GATEWAY_RPC_AUTH_TOKEN", <<>>),
+        %% 控制推送清理发送端的批传输能力。
+        <<"clear_batch_enabled">> => env_bool("FLUXER_GATEWAY_CLEAR_BATCH_ENABLED", false),
+
         <<"push_enabled">> => env_bool("FLUXER_GATEWAY_PUSH_ENABLED", true),
         <<"push_enrolled_clear_notifications_enabled">> => env_bool(
             "FLUXER_GATEWAY_PUSH_ENROLLED_CLEAR_NOTIFICATIONS_ENABLED", true
@@ -188,6 +192,7 @@ build_core_config(Service, Internal, Nats, Proxy) ->
             get_int(Service, <<"gateway_nats_rpc_max_handlers">>, 512)
     }.
 
+%% 构造推送资源限制和批传输配置。
 -spec build_push_config(map(), map(), map()) -> config().
 build_push_config(Service, Public, Instance) ->
     #{
@@ -199,6 +204,9 @@ build_push_config(Service, Public, Instance) ->
         push_enrolled_clear_notifications_enabled => get_bool(
             Service, <<"push_enrolled_clear_notifications_enabled">>, true
         ),
+        %% 在发送端进程启动时确定批清理开关。
+        push_clear_batch_enabled => get_bool(Service, <<"clear_batch_enabled">>, false),
+
         push_outbox_max_queue => get_int(Service, <<"push_outbox_max_queue">>, 10000),
         push_outbox_max_inflight => get_int(Service, <<"push_outbox_max_inflight">>, 96),
         push_outbox_request_timeout_ms => get_int(
@@ -594,6 +602,7 @@ public_endpoint(Url, Public) ->
 -spec optional_string(binary() | undefined) -> string() | undefined.
 optional_string(undefined) -> undefined;
 optional_string(Bin) when is_binary(Bin) -> binary_to_list(Bin).
+
 
 
 

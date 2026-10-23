@@ -919,6 +919,14 @@ describe('FLUXER_PUBLIC_ORIGIN', () => {
 		);
 	});
 
+	test('clear batch sender defaults false and supports an explicit formal environment switch', async () => {
+		stubMinimalEnv();
+		expect((await loadConfig()).services.gateway.clear_batch_enabled).toBe(false);
+		resetConfig();
+		stubMinimalEnv({FLUXER_GATEWAY_CLEAR_BATCH_ENABLED: 'true'});
+		expect((await loadConfig()).services.gateway.clear_batch_enabled).toBe(true);
+	});
+
 	test('leaves the derived origin canonical when nothing is set', async () => {
 		stubMinimalEnv();
 		expect((await loadConfig()).domain.public_origin).toBe('http://localhost:8088');

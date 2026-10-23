@@ -181,6 +181,7 @@ pub async fn run_job_subscribers<T: Transport>(transport: T, state: Arc<AppState
     );
 }
 
+/// 消费单个 NATS subject，并按配置处理旧版任务或版本二清除批次。
 async fn run_subject<T: Transport>(
     transport: T,
     state: Arc<AppState>,
@@ -240,6 +241,55 @@ async fn run_subject<T: Transport>(
             }
             state.metrics.record_job_received(kind);
             let reply_to = message.reply_subject().map(str::to_owned);
+
+            // 旧版任务与版本二批次共存；关闭接收开关时沿用旧版单任务处理路径。
+            let is_batch = state.cfg.clear_batch_enabled
+                && kind == JobKind::Clear
+                && serde_json::from_slice::<Value>(message.payload())
+                    .ok()
+                    .and_then(|v| v.get("v").and_then(Value::as_u64))
+                    == Some(2);
+            if is_batch {
+                let batch = job::decode_clear_batch(message.payload());
+                if !state.cfg.clear_batch_enabled || batch.is_err() {
+                    state.metrics.record_job_rejected(JobRejection::Decode);
+                    answer(&transport, reply_to, Answer::NotDone(INVALID_JOB)).await;
+                    continue;
+                }
+                let batch = batch.expect("validated clear batch");
+                for _ in 1..batch.items.len() {
+                    state.metrics.record_job_received(kind);
+                }
+                let permit = match Arc::clone(&admission)
+                    .try_acquire_many_owned(batch.items.len() as u32)
+                {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        for _ in &batch.items {
+                            state.metrics.record_job_rejected(JobRejection::QueueFull);
+                        }
+                        answer_clear_batch(&transport, reply_to, &batch.items, OVERLOADED).await;
+                        continue;
+                    }
+                };
+                let job_state = Arc::clone(&state);
+                let job_sends = Arc::clone(&sends);
+                let job_transport = transport.clone();
+                let done = done.clone();
+                running.spawn(async move {
+                    let _permit = permit;
+                    let results = run_clear_batch(&job_state, &job_sends, &done, batch.items).await;
+                    if let Some(reply_to) = reply_to {
+                        let body = serde_json::json!({"v":2,"results":results}).to_string();
+                        if let Err(error) = job_transport.publish(&reply_to, body.as_bytes()).await
+                        {
+                            warn!(error = %error, "clear batch answer failed");
+                        }
+                    }
+                });
+                record_depth(&state, &admission, capacity);
+                continue;
+            }
 
             let job = match decode(kind, message.payload()) {
                 Ok(job) => job,
@@ -416,6 +466,28 @@ async fn run_clear_job(state: &AppState, sends: &Semaphore, job: ClearJob) -> an
     } else {
         lookup_delivery_context(&state.rpc, user_ids, Audience::Standard, deadline).await?
     };
+    run_clear_with_context(
+        state,
+        sends,
+        job,
+        &badges,
+        &subscriptions,
+        deadline,
+        started_ms,
+    )
+    .await
+}
+
+/// 使用已取得的角标和订阅信息发送单个清除通知。
+async fn run_clear_with_context(
+    state: &AppState,
+    sends: &Semaphore,
+    job: ClearJob,
+    badges: &HashMap<String, u32>,
+    subscriptions: &HashMap<String, Vec<Subscription>>,
+    deadline: Instant,
+    started_ms: i64,
+) -> anyhow::Result<()> {
     state.metrics.record_recipients(1);
 
     let envelope = payload::web_push_clear(&job, badge_of(&badges, &job.user_id));
@@ -447,6 +519,151 @@ async fn run_clear_job(state: &AppState, sends: &Semaphore, job: ClearJob) -> an
         .metrics
         .record_job_completed(JobKind::Clear, duration_ms);
     Ok(())
+}
+
+/// 将单个批次项目的处理结果编码为协议响应。
+fn clear_item_result(id: String, answer: Answer) -> Value {
+    match answer {
+        Answer::Done => serde_json::json!({"item_id":id,"ok":true}),
+        Answer::NotDone(error) => serde_json::json!({"item_id":id,"ok":false,"error":error}),
+    }
+}
+
+/// 对批次接收或排队失败的每个项目返回相同错误。
+async fn answer_clear_batch<T: Transport>(
+    transport: &T,
+    reply_to: Option<String>,
+    items: &[job::ClearBatchItem],
+    error: &'static str,
+) {
+    if let Some(reply_to) = reply_to {
+        let results: Vec<_> = items
+            .iter()
+            .map(|item| clear_item_result(item.item_id.clone(), Answer::NotDone(error)))
+            .collect();
+        let body = serde_json::json!({"v":2,"results":results}).to_string();
+        let _ = transport.publish(&reply_to, body.as_bytes()).await;
+    }
+}
+
+/// 独立认领并完成批次项目，即使响应丢失也保留已成功项目的完成状态。
+async fn run_clear_batch(
+    state: &AppState,
+    sends: &Semaphore,
+    done: &DoneJobs,
+    items: Vec<job::ClearBatchItem>,
+) -> Vec<Value> {
+    let mut results = Vec::new();
+    let mut pending = Vec::new();
+    for item in items {
+        match done.claim(JobKey::of_clear(&item.job)) {
+            Seen::Done => results.push(clear_item_result(item.item_id, Answer::Done)),
+            Seen::Running => {
+                results.push(clear_item_result(item.item_id, Answer::NotDone(RUNNING)))
+            }
+            Seen::New(claim) => pending.push((item, claim)),
+        }
+    }
+    // 仅合并设备订阅查询，保留每个清理任务独立的频道、消息和游标边界。
+    let mut users: Vec<String> = pending
+        .iter()
+        .map(|(item, _)| item.job.user_id.clone())
+        .collect();
+    users.sort();
+    users.dedup();
+    if pending.is_empty() {
+        return results;
+    }
+    // 为批次共享订阅和角标查询设置统一截止时间。
+    let job_deadline = Instant::now() + JOB_REPLY_DEADLINE;
+    let deadline = Instant::now() + RETRY_DEADLINE;
+    let context = async {
+        let Some(batcher) = &state.subscription_batcher else {
+            return Err(anyhow::anyhow!(
+                "clear batch requires bounded subscription batcher"
+            ));
+        };
+        let fetched =
+            join_all(users.iter().map(|user| async move {
+                (user.clone(), batcher.get(user.clone(), deadline).await)
+            }))
+            .await;
+        let mut subscriptions = HashMap::new();
+        let mut failed = std::collections::HashSet::new();
+        for (user, result) in fetched {
+            match result {
+                Ok(devices) => {
+                    subscriptions.insert(user, devices);
+                }
+                Err(_) => {
+                    failed.insert(user);
+                }
+            }
+        }
+        let badges = lookup_badges(
+            &state.rpc,
+            &users,
+            &subscriptions,
+            Audience::Standard,
+            deadline,
+        )
+        .await?;
+        Ok::<_, anyhow::Error>((badges, subscriptions, failed))
+    };
+    let context = tokio::time::timeout_at(job_deadline.into(), context).await;
+    let (badges, subscriptions, failed) = match context {
+        Ok(Ok(context)) => context,
+        other => {
+            let error = if other.is_err() {
+                DEADLINE_EXCEEDED
+            } else {
+                RPC_UNAVAILABLE
+            };
+            results.extend(
+                pending
+                    .into_iter()
+                    .map(|(item, _)| clear_item_result(item.item_id, Answer::NotDone(error))),
+            );
+            return results;
+        }
+    };
+    // 并发发送仍逐项处理，分别记录成功、重试错误和截止超时。
+    let replies = join_all(pending.into_iter().map(|(item, claim)| {
+        let badges = &badges;
+        let subscriptions = &subscriptions;
+        let failed = &failed;
+        async move {
+            let answer = if failed.contains(&item.job.user_id) {
+                Answer::NotDone(RPC_UNAVAILABLE)
+            } else {
+                match tokio::time::timeout_at(
+                    job_deadline.into(),
+                    run_clear_with_context(
+                        state,
+                        sends,
+                        item.job,
+                        badges,
+                        subscriptions,
+                        deadline,
+                        now_ms(),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        claim.done();
+                        Answer::Done
+                    }
+                    Ok(Err(_)) => Answer::NotDone(RPC_UNAVAILABLE),
+                    Err(_) => Answer::NotDone(DEADLINE_EXCEEDED),
+                }
+            };
+            clear_item_result(item.item_id, answer)
+        }
+    }))
+    .await;
+    results.extend(replies);
+    results
 }
 
 /// 先确定实际接收设备，只为存在适用订阅的用户查询角标，避免已读清理放大无效读取。
@@ -819,5 +1036,290 @@ mod tests {
         let calls = lookup_fixture(devices, Audience::Standard).await;
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1]["user_ids"], json!(["subscribed"]));
+    }
+    /// 使用已订阅的 APNs 设备和本地 HTTP/2 provider 验证批次边界与重试保留。
+    #[tokio::test]
+    async fn clear_batch_real_subscribed_device_preserves_boundaries_and_completed_siblings() {
+        clear_batch_device_fixture(None, true).await;
+    }
+
+    /// 通过隔离 NATS 验证已启用接收端的设备通知往返。
+    #[tokio::test]
+    #[ignore = "requires an isolated NATS fixture and FLUXER_TEST_NATS_URL"]
+    async fn clear_batch_real_nats_subscribed_device_roundtrip() {
+        let url = std::env::var("FLUXER_TEST_NATS_URL").expect("isolated test NATS URL");
+        assert_eq!(
+            std::env::var("FLUXER_PUSH_CLEAR_BATCH_ENABLED").as_deref(),
+            Ok("true")
+        );
+        clear_batch_device_fixture(Some(&url), true).await;
+    }
+
+    /// 验证关闭接收端时拒绝版本二批次并保留旧版任务路径。
+    #[tokio::test]
+    #[ignore = "requires isolated NATS fixture; run serially with the other NATS gate"]
+    async fn clear_batch_real_nats_disabled_receiver_rejects_v2_and_retains_v1() {
+        let url = std::env::var("FLUXER_TEST_NATS_URL").expect("isolated test NATS URL");
+        clear_batch_device_fixture(Some(&url), false).await;
+    }
+
+    /// 通过 NATS 或本地调用运行清除批次并返回逐项响应。
+    async fn test_clear_roundtrip(
+        state: &AppState,
+        sends: &Semaphore,
+        done: &DoneJobs,
+        items: Vec<job::ClearBatchItem>,
+        transport: Option<&fluxer_svc::transport::NatsTransport>,
+    ) -> Vec<Value> {
+        if let Some(transport) = transport {
+            let items: Vec<_> = items
+                .into_iter()
+                .map(|item| {
+                    json!({
+                        "item_id":item.item_id,"job":{"v":item.job.v,"user_id":item.job.user_id,
+                        "channel_id":item.job.channel_id,"message_id":item.job.message_id,
+                        "after_message_id":item.job.after_message_id}
+                    })
+                })
+                .collect();
+            let bytes = json!({"v":2,"items":items}).to_string().into_bytes();
+            let reply = transport
+                .request(SUBJECT_CLEAR, &bytes, Duration::from_secs(5))
+                .await
+                .unwrap();
+            let reply: Value = serde_json::from_slice(&reply).unwrap();
+            assert_eq!(reply["v"], 2);
+            reply["results"].as_array().unwrap().clone()
+        } else {
+            run_clear_batch(state, sends, done, items).await
+        }
+    }
+
+    /// 构造本地 RPC、APNs 与可选 NATS 环境以验证清除批次行为。
+    async fn clear_batch_device_fixture(nats_url: Option<&str>, receiver_enabled: bool) {
+        use crate::config::{ApnsConfig, DeliveryConfig, ProviderApp, ProviderEnvironment};
+        use p256::pkcs8::{EncodePrivateKey, LineEnding};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let calls = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let delivered = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let query_count = Arc::new(AtomicU64::new(0));
+        let rpc_calls = Arc::clone(&calls);
+        let provider_calls = Arc::clone(&delivered);
+        let queries = Arc::clone(&query_count);
+        let router = Router::new()
+            .route(
+                "/internal/rpc",
+                post(move |body: axum::body::Bytes| {
+                    let body: Value = serde_json::from_slice(&body).unwrap();
+                    rpc_calls.lock().unwrap().push(body.clone());
+                    let queries = Arc::clone(&queries);
+                    async move {
+                        let data = if body["type"] == "get_push_subscriptions" {
+                            queries.fetch_add(1, Ordering::Relaxed);
+                            json!({"7":[{"subscription_id":"local-device","endpoint":"local-token",
+                        "platform":"ios_apns","app_id":"stable"}]})
+                        } else {
+                            json!({"badge_counts":{"7":4}})
+                        };
+                        json!({"data":data}).to_string()
+                    }
+                }),
+            )
+            .route(
+                "/3/device/local-token",
+                post(move |body: axum::body::Bytes| {
+                    provider_calls
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&body).unwrap());
+                    async { axum::http::StatusCode::OK }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let endpoint = format!("http://{address}");
+        let mut cfg = DeliveryConfig::load_from_iter([
+            ("FLUXER_INTERNAL_API_ENDPOINT", endpoint.as_str()),
+            ("FLUXER_GATEWAY_RPC_AUTH_TOKEN", "local-test"),
+            ("FLUXER_VAPID_EMAIL", "local@example.test"),
+            ("FLUXER_VAPID_PUBLIC_KEY", "unused"),
+            ("FLUXER_VAPID_PRIVATE_KEY", "unused"),
+        ])
+        .unwrap();
+        let secret = p256::SecretKey::from_slice(&[7; 32]).unwrap();
+        cfg.clear_batch_enabled = receiver_enabled;
+        cfg.apns = Some(ApnsConfig {
+            team_id: "LOCALTEAM".into(),
+            key_id: "LOCALKEY".into(),
+            private_key: SecretString::new(
+                secret.to_pkcs8_pem(LineEnding::LF).unwrap().to_string(),
+            ),
+            default_environment: ProviderEnvironment::Production,
+            apps: vec![ProviderApp {
+                app_id: "stable".into(),
+                topic: Some("local.test".into()),
+                voip_topic: None,
+                environment: Some(ProviderEnvironment::Production),
+                project_id: None,
+            }],
+            base_url_override: Some(endpoint),
+        });
+        let state = Arc::new(AppState::try_new(cfg).unwrap());
+        let done = DoneJobs::default();
+        let sends = Arc::new(Semaphore::new(8));
+        let transport = if let Some(url) = nats_url {
+            Some(
+                fluxer_svc::transport::NatsTransport::connect(url, None)
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let subscriber = transport.as_ref().map(|transport| {
+            tokio::spawn(run_subject(
+                transport.clone(),
+                Arc::clone(&state),
+                Arc::new(Semaphore::new(10000)),
+                Arc::clone(&sends),
+                done.clone(),
+                JobKind::Clear,
+            ))
+        });
+        if subscriber.is_some() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let make_item = |id: &str, message: &str, after: &str| job::ClearBatchItem {
+            item_id: id.into(),
+            job: ClearJob {
+                v: 1,
+                user_id: "7".into(),
+                channel_id: "20".into(),
+                message_id: message.into(),
+                after_message_id: Some(after.into()),
+            },
+        };
+        if !receiver_enabled {
+            let transport = transport
+                .as_ref()
+                .expect("receiver gate requires actual NATS");
+            let job = json!({"v":1,"user_id":"7","channel_id":"20","message_id":"30","after_message_id":"29"});
+            let batch = json!({"v":2,"items":[{"item_id":"stable-a","job":job.clone()}]});
+            let reply = transport
+                .request(
+                    SUBJECT_CLEAR,
+                    batch.to_string().as_bytes(),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+            let reply: Value = serde_json::from_slice(&reply).unwrap();
+            assert_eq!(reply, json!({"ok":false,"error":"invalid_job"}));
+            assert!(delivered.lock().unwrap().is_empty());
+            let reply = transport
+                .request(
+                    SUBJECT_CLEAR,
+                    job.to_string().as_bytes(),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+            let reply: Value = serde_json::from_slice(&reply).unwrap();
+            assert_eq!(reply, json!({"ok":true}));
+            assert_eq!(delivered.lock().unwrap().len(), 1);
+            state.draining.send_replace(true);
+            if let Some(subscriber) = subscriber {
+                subscriber.await.unwrap();
+            }
+            state
+                .subscription_batcher
+                .as_ref()
+                .unwrap()
+                .shutdown()
+                .await;
+            server.abort();
+            return;
+        }
+        let a = make_item("stable-a", "30", "29");
+        let b = make_item("stable-b", "28", "27");
+        let c = make_item("stable-c", "31", "26");
+        // Mimic an independently running sibling; it must be retried, while A completes.
+        let blocker = match done.claim(JobKey::of_clear(&b.job)) {
+            Seen::New(c) => c,
+            _ => panic!(),
+        };
+        let first = test_clear_roundtrip(
+            &state,
+            &sends,
+            &done,
+            vec![a.clone(), b.clone(), c.clone()],
+            transport.as_ref(),
+        )
+        .await;
+        assert!(
+            first
+                .iter()
+                .any(|r| r["item_id"] == "stable-a" && r["ok"] == true)
+        );
+        assert!(
+            first
+                .iter()
+                .any(|r| r["item_id"] == "stable-b" && r["ok"] == false)
+        );
+        assert_eq!(delivered.lock().unwrap().len(), 2);
+        drop(blocker);
+        let second = test_clear_roundtrip(
+            &state,
+            &sends,
+            &done,
+            vec![a.clone(), b.clone(), c.clone()],
+            transport.as_ref(),
+        )
+        .await;
+        assert!(second.iter().all(|r| r["ok"] == true));
+        assert_eq!(
+            delivered.lock().unwrap().len(),
+            3,
+            "completed siblings are not replayed"
+        );
+        // No coalescing: provider sees both original manual-unread clear frontiers.
+        let bodies = delivered.lock().unwrap().clone();
+        let mut frontiers: Vec<_> = bodies
+            .iter()
+            .map(|body| body["message_id"].as_str().unwrap())
+            .collect();
+        frontiers.sort();
+        assert_eq!(frontiers, vec!["28", "30", "31"]);
+        let again =
+            test_clear_roundtrip(&state, &sends, &done, vec![a, b, c], transport.as_ref()).await;
+        assert!(again.iter().all(|r| r["ok"] == true));
+        assert_eq!(delivered.lock().unwrap().len(), 3);
+        assert_eq!(
+            query_count.load(Ordering::Relaxed),
+            2,
+            "one bounded subscription query per pending cohort"
+        );
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c["type"] == "get_push_subscriptions")
+                .all(|c| c["user_ids"] == json!(["7"]))
+        );
+        state.draining.send_replace(true);
+        if let Some(subscriber) = subscriber {
+            subscriber.await.unwrap();
+        }
+        state
+            .subscription_batcher
+            .as_ref()
+            .unwrap()
+            .shutdown()
+            .await;
+        server.abort();
     }
 }

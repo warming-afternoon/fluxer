@@ -101,7 +101,6 @@ export interface MasterConfig {
 			/** 是否合并频道上下文、成员及权限的网关查询。 */
 			combined_channel_auth_enabled?: boolean;
 
-
 			/** 是否合并单节点的全局与路由限流往返。 */
 			combined_rate_limit_enabled?: boolean;
 
@@ -160,6 +159,9 @@ export interface MasterConfig {
 			};
 		};
 		gateway: {
+			/** 是否发送逐项保留结果的清理批次；升级前先启用全部接收端。 */
+			clear_batch_enabled?: boolean;
+
 			rpc_auth_token?: string;
 		};
 		admin: {

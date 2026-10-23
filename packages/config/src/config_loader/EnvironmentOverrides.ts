@@ -14,6 +14,7 @@ interface NamedEnvOverride {
 }
 
 const NAMED_FLUXER_ENV_OVERRIDES: Record<string, NamedEnvOverride> = {
+	FLUXER_GATEWAY_CLEAR_BATCH_ENABLED: {path: ['services', 'gateway', 'clear_batch_enabled'], parse: parseBoolean},
 	FLUXER_ENV: {path: ['env']},
 	FLUXER_BASE_DOMAIN: {path: ['domain', 'base_domain']},
 	FLUXER_PUBLIC_ORIGIN: {path: ['domain', 'public_origin']},

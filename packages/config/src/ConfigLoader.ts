@@ -144,6 +144,7 @@ function defaultConfig(): MasterConfig {
 				},
 			},
 			gateway: {
+				clear_batch_enabled: false,
 				rpc_auth_token: '',
 			},
 			admin: {
@@ -640,6 +641,7 @@ function normalizeConfig(config: MasterConfig): MasterConfig {
 		config.services.api.read_state_combined_gateway_rpc_enabled ?? false,
 		'FLUXER_READ_STATE_COMBINED_GATEWAY_RPC_ENABLED',
 	);
+	assertBoolean(config.services.gateway.clear_batch_enabled ?? false, 'FLUXER_GATEWAY_CLEAR_BATCH_ENABLED');
 	assertBoolean(config.services.api.combined_channel_auth_enabled ?? false, 'FLUXER_COMBINED_CHANNEL_AUTH_ENABLED');
 	assertBoolean(config.services.api.combined_rate_limit_enabled ?? false, 'FLUXER_COMBINED_RATE_LIMIT_ENABLED');
 	assertBoolean(config.services.api.read_state_narrow_auth_enabled ?? false, 'FLUXER_READ_STATE_NARROW_AUTH_ENABLED');

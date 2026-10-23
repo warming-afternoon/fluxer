@@ -55,6 +55,46 @@ pub struct ClearJob {
     pub after_message_id: Option<String>,
 }
 
+/// 版本二清除批次协议；每个原始清理任务保留完整游标边界。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearBatch {
+    /// 批次协议版本。
+    pub v: u8,
+
+    /// 批次中的清除通知项目。
+    pub items: Vec<ClearBatchItem>,
+}
+
+/// 单个清除任务及其在批次响应中的稳定标识。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClearBatchItem {
+    /// 用于关联逐项响应的唯一标识。
+    pub item_id: String,
+
+    /// 保留原始游标边界的清除任务。
+    pub job: ClearJob,
+}
+
+/// 解码并验证版本二清除批次及其项目边界。
+pub fn decode_clear_batch(bytes: &[u8]) -> Result<ClearBatch, JobError> {
+    let batch: ClearBatch = serde_json::from_slice(bytes)?;
+    if batch.v != 2 {
+        return Err(JobError::UnsupportedVersion(batch.v));
+    }
+    let mut ids = std::collections::HashSet::new();
+    if batch.items.is_empty()
+        || batch.items.len() > 32
+        || batch.items.iter().any(|item| {
+            item.item_id.is_empty() || !ids.insert(&item.item_id) || item.job.v != SUPPORTED_VERSION
+        })
+    {
+        return Err(JobError::InvalidBatch);
+    }
+    Ok(batch)
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct RingJob {
     pub v: u8,
@@ -73,6 +113,8 @@ pub struct RingJob {
 
 #[derive(Debug, Error)]
 pub enum JobError {
+    #[error("invalid clear batch size, identity or item version")]
+    InvalidBatch,
     #[error("push job version {0} is not supported")]
     UnsupportedVersion(u8),
     #[error("push job is not a valid job document: {0}")]
@@ -224,5 +266,37 @@ mod tests {
         .expect("the job decodes");
         assert!(!job.is_thread());
         assert_eq!(job.parent_id, None);
+    }
+    /// 验证批次项目边界、版本、数量上限和标识唯一性。
+    #[test]
+    fn clear_batch_validates_size_identity_version_and_preserves_frontiers() {
+        let item = json!({"item_id":"stable-1","job":{
+            "v":1,"user_id":"7","channel_id":"20","message_id":"30","after_message_id":"29"
+        }});
+        let mut item2 = item.clone();
+        item2["item_id"] = json!("stable-2");
+        item2["job"]["message_id"] = json!("28");
+        item2["job"]["after_message_id"] = json!("27");
+        let batch = decode_clear_batch(
+            json!({"v":2,"items":[item.clone(),item2]})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(batch.items[0].job.after_message_id.as_deref(), Some("29"));
+        assert_eq!(batch.items[1].job.after_message_id.as_deref(), Some("27"));
+        assert!(decode_clear_batch(json!({"v":2,"items":[]}).to_string().as_bytes()).is_err());
+        assert!(
+            decode_clear_batch(
+                json!({"v":2,"items":[item.clone(),item.clone()]})
+                    .to_string()
+                    .as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            decode_clear_batch(json!({"v":2,"items":vec![item;33]}).to_string().as_bytes())
+                .is_err()
+        );
     }
 }

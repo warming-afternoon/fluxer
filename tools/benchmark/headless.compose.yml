@@ -1,0 +1,14 @@
+# 压测专用：页面服务只在显式启用 benchmark-ui profile 时启动。
+# 叠加在 self-hosting 和压测配置之后，保留现有 API/WebSocket 入口。
+services:
+  app-proxy:
+    profiles: !override [benchmark-ui]
+  static-proxy:
+    profiles: !override [benchmark-ui]
+  admin:
+    profiles: !override [benchmark-ui]
+  edge:
+    depends_on: !override
+      api: {condition: service_started}
+      gateway: {condition: service_healthy}
+      media-proxy: {condition: service_started}

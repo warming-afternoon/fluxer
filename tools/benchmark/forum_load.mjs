@@ -41,11 +41,18 @@ const burst = Number(opt.burst || 0),
 const ackMode = opt['ack-mode'] || 'strict';
 if (!['strict', 'frontend-batched'].includes(ackMode)) throw Error('Unknown ACK mode');
 const frontendBatched = ackMode === 'frontend-batched';
-for (const flag of ['warm-debug', 'warm-reset', 'startup-pipeline', 'startup-only'])
+for (const flag of ['warm-debug', 'warm-reset', 'startup-pipeline'])
 	if (opt[flag]) throw Error('Unsupported experimental option: ' + flag);
-const plan = opt.plan
-	? JSON.parse(fs.readFileSync(opt.plan, 'utf8'))
-	: [{name: 'single', rate, seconds, burst, concurrency}];
+if (opt['startup-only'] !== undefined && !['true', 'false'].includes(opt['startup-only']))
+	throw Error('startup-only must be true or false');
+// startup-only 只执行连接和稳定就绪阶段，不读取消息计划。
+const startupOnly = opt['startup-only'] === 'true';
+if (startupOnly && opt.plan) throw Error('startup-only cannot be combined with a message plan');
+const plan = startupOnly
+	? []
+	: opt.plan
+		? JSON.parse(fs.readFileSync(opt.plan, 'utf8'))
+		: [{name: 'single', rate, seconds, burst, concurrency}];
 const sequenceBase = Number(opt['sequence-base'] ?? 0),
 	plannedSequenceCount = plan.reduce((n, p) => n + (p.burst || Math.floor(p.rate * p.seconds)), 0) * onlineSteps.length;
 if (!Number.isSafeInteger(sequenceBase) || sequenceBase < 0 || sequenceBase + plannedSequenceCount > 100000000)
@@ -715,6 +722,14 @@ try {
 		await sleep(Number(opt['stable-seconds'] || 10) * 1000);
 		if (online() !== onlineTarget || abortReason || [...states.values()].some((s) => s.heartbeatAcks < 1))
 			throw Error(abortReason || 'Stable online/heartbeat barrier failed');
+		if (startupOnly)
+			// 留下启动准备完成的观测点，消息数应保持为零。
+			write('events', {
+				type: 'startup_preparation_complete',
+				monoNs: process.hrtime.bigint().toString(),
+				online: online(),
+				workloadMessages: totals.submitted,
+			});
 		const candidates = fixture.threads
 			.filter((t) => t.active !== false && !t.archived)
 			.map((t) => ({...t, onlineMembers: t.memberIndexes.filter((index) => index < onlineTarget)}))
@@ -931,11 +946,13 @@ try {
 			loginLatencies,
 			totals: structuredClone(totals),
 		};
-		summary.capacityPassed =
-			summary.passed && summary.stages.every((s) => s.burst || s.completeSeconds <= s.scheduledWindowSeconds * 1.2);
+		// 启动准备没有吞吐测量，容量字段必须保持未判定。
+		summary.capacityPassed = startupOnly
+			? null
+			: summary.passed && summary.stages.every((s) => s.burst || s.completeSeconds <= s.scheduledWindowSeconds * 1.2);
 		tiers.push(summary);
 		fs.writeFileSync(opt.out + '/tiers.json', JSON.stringify(tiers, null, 2));
-		if (summary.passed && !summary.capacityPassed) {
+		if (!startupOnly && summary.passed && !summary.capacityPassed) {
 			if (opt['continue-after-capacity-failure'] === 'true') {
 				write('events', {type: 'capacity_failed_continue_requested', online: onlineTarget});
 			} else {
@@ -951,7 +968,9 @@ try {
 		stages,
 		requestedSteps: onlineSteps,
 		highestPassedOnline: Math.max(0, ...tiers.filter((t) => t.passed).map((t) => t.requestedOnline)),
-		highestCapacityPassedOnline: Math.max(0, ...tiers.filter((t) => t.capacityPassed).map((t) => t.requestedOnline)),
+		highestCapacityPassedOnline: startupOnly
+			? null
+			: Math.max(0, ...tiers.filter((t) => t.capacityPassed).map((t) => t.requestedOnline)),
 		allRequestedTiersPassed: tiers.length === onlineSteps.length && tiers.every((t) => t.passed),
 	};
 } catch (e) {
@@ -993,7 +1012,11 @@ try {
 		...summary,
 		sequenceBase,
 		...(abortReason ? {passed: false, allRequestedTiersPassed: false, abortReason} : {}),
-		measurementMode: frontendBatched ? 'frontend-batched-auto-view-scenario' : 'strict-benchmark',
+		measurementMode: startupOnly
+			? 'startup-preparation-only'
+			: frontendBatched
+				? 'frontend-batched-auto-view-scenario'
+				: 'strict-benchmark',
 		finalTotals: structuredClone(totals),
 		frontendAck: frontendAckQueue
 			? {
@@ -1028,6 +1051,7 @@ try {
 		runOptions: Object.fromEntries(Object.entries(opt).filter(([k]) => !['fixture'].includes(k))),
 	};
 	fs.writeFileSync(`${opt.out}/summary.json`, JSON.stringify(summary, null, 2), {mode: 0o600});
+	if (startupOnly && (!summary.completed || abortReason)) process.exitCode = 2;
 	for (const stream of Object.values(streams)) stream.end();
 	console.log(JSON.stringify(summary, null, 2));
 }

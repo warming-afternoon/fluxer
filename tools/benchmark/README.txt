@@ -30,6 +30,12 @@ node --max-old-space-size=512 --expose-gc tools/benchmark/forum_load.mjs --fixtu
 固定速率阶段的完整排空耗时超过计划窗口的1.2倍，或出现错误，就停止增加人数。
 最高完整通过人数和单纯成功连接数含义不同，不能把未通过全部压力阶段解释成无法同时在线。
 
+只验证启动准备（不发送预热或正式负载）：
+node tools/benchmark/forum_load.mjs --fixture /绝对路径/compact.private.json --out /绝对路径/新结果目录 --online-steps 3000 --connect-concurrency 128 --startup-only true
+保留逐用户READY、完整帖子目录、稳定心跳与异常断连检查；默认仍等待10秒稳定。
+该模式不能与--plan组合，summary.measurementMode为startup-preparation-only，stages为空，容量结果为null。
+已有token会复用；缺少token时仍正常登录。准备失败返回退出码2，成功只证明接入准备，不证明业务容量。
+
 离线正确性验证：
 node --test tools/benchmark/ForumLoadFixture.test.mjs tools/benchmark/ForumLoadTool.test.mjs tools/benchmark/FrontendAckQueue.test.mjs
 

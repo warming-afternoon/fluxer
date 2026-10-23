@@ -75,6 +75,9 @@ let n = 0;
 globalThis.fetch = async (url, options) => {
 	const path = new URL(url).pathname,
 		body = JSON.parse(options.body);
+	// startup-only 的单测会对任何消息或 ACK 请求立即失败。
+	if (process.env.BENCH_TEST_NO_WORKLOAD && /\/(?:messages|ack)$/.test(path))
+		throw Error('Startup-only run attempted a workload request');
 	if (path.endsWith('/auth/login'))
 		return new Response(JSON.stringify({token: users.get(body.email || body.login).id}), {status: 200});
 	if (path.endsWith('/read-states/ack'))

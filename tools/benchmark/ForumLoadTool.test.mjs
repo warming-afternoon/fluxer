@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {promisify} from 'node:util';
 import {compactForumFixture} from './ForumLoadFixture.mjs';
 
@@ -15,6 +15,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 
 /** 离线模拟传输验证递增上线、逐人确认及失败检测，不作为性能结果。 */
 for (const mode of ['success', 'duplicate', 'ackFailure', 'missing']) {
+	/** 验证离线负载模拟仍检查唯一投递、ACK 与遗漏消息。 */
 	test(`compact load tool preserves correctness checks: ${mode}`, async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fluxer-load-tool-'));
 		try {
@@ -42,7 +43,7 @@ for (const mode of ['success', 'duplicate', 'ackFailure', 'missing']) {
 					'--max-old-space-size=128',
 					'--expose-gc',
 					'--import',
-					path.join(root, 'mock_forum_transport.mjs'),
+					pathToFileURL(path.join(root, 'mock_forum_transport.mjs')).href,
 					path.join(root, 'forum_load.mjs'),
 					'--fixture',
 					fixture,
@@ -120,7 +121,7 @@ test('capacity continuation stays opt-in and never labels a slow tier as capacit
 				[
 					'--max-old-space-size=128',
 					'--import',
-					path.join(root, 'mock_forum_transport.mjs'),
+					pathToFileURL(path.join(root, 'mock_forum_transport.mjs')).href,
 					path.join(root, 'forum_load.mjs'),
 					'--fixture',
 					fixture,

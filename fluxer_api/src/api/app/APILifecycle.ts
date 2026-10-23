@@ -42,6 +42,7 @@ import {
 	getKVAccountDeletionQueue,
 	getReportRepository,
 	getUserRepository,
+	getUserActivityBuffer,
 	shutdownInstanceConfigRepository,
 	shutdownServiceSingletons,
 } from '@app/api/middleware/ServiceSingletons';
@@ -209,6 +210,7 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 					registerMetricsSection(renderActivityMetrics),
 					registerMetricsSection(renderSharedListMetrics),
 					registerMetricsSection(renderReadStateMetrics),
+					registerMetricsSection(() => getUserActivityBuffer().renderActivityDeduperMetrics()),
 				);
 				logger.info('Activity events initialized');
 			}

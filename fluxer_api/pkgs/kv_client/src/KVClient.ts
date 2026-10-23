@@ -245,6 +245,7 @@ export class KVClient implements IKVProvider {
 			this.client = this.createClusterClient(resolvedConfig);
 		} else {
 			this.client = new Redis(this.url, {
+				enableAutoPipelining: true,
 				connectTimeout: this.timeoutMs,
 				...(resolvedConfig.enableOfflineQueue === undefined
 					? {}
@@ -260,6 +261,7 @@ export class KVClient implements IKVProvider {
 	private createClusterClient(clusterConfig: ResolvedKVClientConfig): Cluster {
 		const {node, redisOptions} = resolveKVClusterConnection(clusterConfig.url);
 		return new Cluster([node], {
+			enableAutoPipelining: true,
 			...(clusterConfig.enableOfflineQueue === undefined ? {} : {enableOfflineQueue: clusterConfig.enableOfflineQueue}),
 			clusterRetryStrategy: createRetryStrategy(),
 			redisOptions: {

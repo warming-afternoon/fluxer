@@ -3,6 +3,7 @@
 import type {UserID} from '@app/api/BrandedTypes';
 import {fetchMany, upsertOne} from '@app/api/database/CassandraQueryExecution';
 import {Db} from '@app/api/database/CassandraTypes';
+import {SessionActivityDeduper} from '@app/api/infrastructure/SessionActivityDeduper';
 import {Logger} from '@app/api/Logger';
 import {AuthSessions} from '@app/api/Tables';
 import {UserAccountRepository} from '@app/api/user/repositories/account/UserAccountRepository';
@@ -90,6 +91,7 @@ async function flushActivityEntries<T>(
 }
 
 export class UserActivityBuffer {
+	private readonly activityDeduper = new SessionActivityDeduper();
 	private readonly kv: IKVProvider;
 	private readonly writer: ActivityWriter;
 	private readonly accounts: UserActivityAccountWriter;
@@ -112,6 +114,13 @@ export class UserActivityBuffer {
 	}
 
 	async recordAuthSessionActivity(sessionIdHash: Buffer, timestamp: Date): Promise<boolean> {
+		return this.activityDeduper.run(this.encodeSessionIdHash(sessionIdHash), () =>
+			this.writeAuthSessionActivity(sessionIdHash, timestamp),
+		);
+	}
+
+	/** 共享去重成功且活动入队后才允许本地记住成功期限。 */
+	private async writeAuthSessionActivity(sessionIdHash: Buffer, timestamp: Date): Promise<boolean> {
 		const encodedSessionIdHash = this.encodeSessionIdHash(sessionIdHash);
 		const touchKey = `${AUTH_SESSION_TOUCH_KEY_PREFIX}${encodedSessionIdHash}`;
 		let touched: string | null;
@@ -141,8 +150,14 @@ export class UserActivityBuffer {
 		}
 	}
 
+	/** 导出固定维度的会话活动缓存计数。 */
+	renderActivityDeduperMetrics(): string {
+		return this.activityDeduper.renderMetrics();
+	}
+
 	async forgetAuthSessions(sessionIdHashes: ReadonlyArray<Buffer>): Promise<void> {
 		if (sessionIdHashes.length === 0) return;
+		this.activityDeduper.forget(sessionIdHashes.map((hash) => this.encodeSessionIdHash(hash)));
 		const encoded = sessionIdHashes.map((sessionIdHash) => this.encodeSessionIdHash(sessionIdHash));
 		await this.kv.hdel(PENDING_AUTH_SESSION_HASH_KEY, ...encoded);
 		await this.kv.del(...encoded.map((value) => `${AUTH_SESSION_TOUCH_KEY_PREFIX}${value}`));

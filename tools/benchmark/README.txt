@@ -44,6 +44,16 @@ FLUXER_PUSH_SUBSCRIPTION_BATCHING_ENABLED=true：清除通知任务的设备查�
 设备列表不跨批缓存，任务仍分别完成；队列容量沿用FLUXER_PUSH_SERVICE_QUEUE_CAPACITY，排队最长5秒。
 两个开关均默认开启，通过关闭对应开关并重启相关服务回退。数据库触发器会保留，关闭缓存不删除数据库设施。
 
+本机后续压测选型与已迁入的云端改进：
+后续选用单节点 Cassandra；候选参数见 cassandra-1536.env.example，堆为1536MiB。
+该文件是参数示例，不是可直接叠加的Compose覆盖层。现有self-hosting Compose仍明确使用PostgreSQL，不能仅给它传 --env-file 就认为已切换。
+正式切换时必须统一修改API、worker和Rust数据服务的后端、主机和端口；Rust用户/消息服务必须包含scylla构建特性。
+只运行一套测试栈，停用测试PostgreSQL而不删除原卷。保留原应用停止状态，前端服务仍关闭。
+持久性沿用commitlog_sync=batch；1.5GiB仅为堆，不是数据库总内存额度，保护线不随堆调整放宽。
+原有Mac整体内存压力、Docker额度及测试实例总资源保护均继续执行；外部发生器和服务端资源分别记录。
+语料继续为20万成员、3万帖子、5000活跃/800热门，历史消息按云端同一比例；迁入工具见 seed/cassandra_fixture.README.md。
+导入前在独立空库建表，导入后全量计数、摘要和样本核验；不重新随机生成一套不同语料来比较数据库。
+
 元数据缓存开关已统一支持两种后端。PostgreSQL默认频道开、社区关；Cassandra两项默认关。
 FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED=true开启社区窄快照，默认容量10000、固定有效期1秒，只存可用性标记，不缓存权限结论。
 帖子缓存仍为50000条、LRU、固定5分钟。Cassandra opt-in使用Valkey尽力广播和本地固定TTL；启用前必须阅读：

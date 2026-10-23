@@ -295,20 +295,20 @@ describe('ConfigLoader', () => {
 		expect(config.auth.passkeys.additional_allowed_origins).toEqual(['https://example.com', 'https://app.example.com']);
 	});
 
-	test('channel authorization RPC is opt-in through the formal configuration', async () => {
+	test('channel authorization RPC defaults on and supports explicit rollback', async () => {
 		stubMinimalEnv();
-		expect((await loadConfig()).services.api.combined_channel_auth_enabled).toBe(false);
-		resetConfig();
-		vi.stubEnv('FLUXER_COMBINED_CHANNEL_AUTH_ENABLED', 'true');
 		expect((await loadConfig()).services.api.combined_channel_auth_enabled).toBe(true);
+		resetConfig();
+		vi.stubEnv('FLUXER_COMBINED_CHANNEL_AUTH_ENABLED', 'false');
+		expect((await loadConfig()).services.api.combined_channel_auth_enabled).toBe(false);
 	});
 
-	test('combined rate limiting is opt-in through the formal configuration', async () => {
+	test('combined rate limiting defaults on and supports explicit rollback', async () => {
 		stubMinimalEnv();
-		expect((await loadConfig()).services.api.combined_rate_limit_enabled).toBe(false);
-		resetConfig();
-		vi.stubEnv('FLUXER_COMBINED_RATE_LIMIT_ENABLED', 'true');
 		expect((await loadConfig()).services.api.combined_rate_limit_enabled).toBe(true);
+		resetConfig();
+		vi.stubEnv('FLUXER_COMBINED_RATE_LIMIT_ENABLED', 'false');
+		expect((await loadConfig()).services.api.combined_rate_limit_enabled).toBe(false);
 	});
 
 	test('parses typed named environment variables', async () => {
@@ -919,12 +919,12 @@ describe('FLUXER_PUBLIC_ORIGIN', () => {
 		);
 	});
 
-	test('clear batch sender defaults false and supports an explicit formal environment switch', async () => {
+	test('clear batch sender defaults on and supports explicit rollback', async () => {
 		stubMinimalEnv();
-		expect((await loadConfig()).services.gateway.clear_batch_enabled).toBe(false);
-		resetConfig();
-		stubMinimalEnv({FLUXER_GATEWAY_CLEAR_BATCH_ENABLED: 'true'});
 		expect((await loadConfig()).services.gateway.clear_batch_enabled).toBe(true);
+		resetConfig();
+		stubMinimalEnv({FLUXER_GATEWAY_CLEAR_BATCH_ENABLED: 'false'});
+		expect((await loadConfig()).services.gateway.clear_batch_enabled).toBe(false);
 	});
 
 	test('leaves the derived origin canonical when nothing is set', async () => {

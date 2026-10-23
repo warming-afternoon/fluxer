@@ -37,38 +37,38 @@ afterAll(async () => {
 });
 
 describe('combined channel authorization configuration', () => {
-	it('maps the master setting and preserves the opt-in default', async () => {
+	it('defaults on and maps explicit rollback without treating false as missing', async () => {
 		const master = await loadConfig();
 		expect(
 			buildAPIConfigFromMaster({
 				...master,
 				services: {...master.services, api: {...master.services.api, combined_channel_auth_enabled: undefined}},
 			}).combinedChannelAuthEnabled,
-		).toBe(false);
+		).toBe(true);
 		expect(
 			buildAPIConfigFromMaster({
 				...master,
-				services: {...master.services, api: {...master.services.api, combined_channel_auth_enabled: true}},
+				services: {...master.services, api: {...master.services.api, combined_channel_auth_enabled: false}},
 			}).combinedChannelAuthEnabled,
-		).toBe(true);
+		).toBe(false);
 	});
 });
 
 describe('combined rate limiting configuration', () => {
-	it('maps the master setting and preserves the opt-in default', async () => {
+	it('defaults on and maps explicit rollback without treating false as missing', async () => {
 		const master = await loadConfig();
 		expect(
 			buildAPIConfigFromMaster({
 				...master,
 				services: {...master.services, api: {...master.services.api, combined_rate_limit_enabled: undefined}},
 			}).combinedRateLimitEnabled,
-		).toBe(false);
+		).toBe(true);
 		expect(
 			buildAPIConfigFromMaster({
 				...master,
-				services: {...master.services, api: {...master.services.api, combined_rate_limit_enabled: true}},
+				services: {...master.services, api: {...master.services.api, combined_rate_limit_enabled: false}},
 			}).combinedRateLimitEnabled,
-		).toBe(true);
+		).toBe(false);
 	});
 });
 

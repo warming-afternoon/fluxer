@@ -108,8 +108,8 @@ function defaultConfig(): MasterConfig {
 				request_timeout_ms: 120_000,
 				max_inflight_requests: 512,
 				instances: 2,
-				combined_channel_auth_enabled: false,
-				combined_rate_limit_enabled: false,
+				combined_channel_auth_enabled: true,
+				combined_rate_limit_enabled: true,
 				read_state_combined_gateway_rpc_enabled: false,
 				read_state_narrow_auth_enabled: false,
 				automated_message_deletion_delay_days: 7,
@@ -144,7 +144,7 @@ function defaultConfig(): MasterConfig {
 				},
 			},
 			gateway: {
-				clear_batch_enabled: false,
+				clear_batch_enabled: true,
 				rpc_auth_token: '',
 			},
 			admin: {
@@ -641,9 +641,9 @@ function normalizeConfig(config: MasterConfig): MasterConfig {
 		config.services.api.read_state_combined_gateway_rpc_enabled ?? false,
 		'FLUXER_READ_STATE_COMBINED_GATEWAY_RPC_ENABLED',
 	);
-	assertBoolean(config.services.gateway.clear_batch_enabled ?? false, 'FLUXER_GATEWAY_CLEAR_BATCH_ENABLED');
-	assertBoolean(config.services.api.combined_channel_auth_enabled ?? false, 'FLUXER_COMBINED_CHANNEL_AUTH_ENABLED');
-	assertBoolean(config.services.api.combined_rate_limit_enabled ?? false, 'FLUXER_COMBINED_RATE_LIMIT_ENABLED');
+	assertBoolean(config.services.gateway.clear_batch_enabled ?? true, 'FLUXER_GATEWAY_CLEAR_BATCH_ENABLED');
+	assertBoolean(config.services.api.combined_channel_auth_enabled ?? true, 'FLUXER_COMBINED_CHANNEL_AUTH_ENABLED');
+	assertBoolean(config.services.api.combined_rate_limit_enabled ?? true, 'FLUXER_COMBINED_RATE_LIMIT_ENABLED');
 	assertBoolean(config.services.api.read_state_narrow_auth_enabled ?? false, 'FLUXER_READ_STATE_NARROW_AUTH_ENABLED');
 	assertIntegerInRange(config.services.api.instances ?? 2, 'FLUXER_API_INSTANCES', 1, 512);
 	assertIntegerInRange(config.services.api.max_inflight_requests, 'FLUXER_API_MAX_INFLIGHT_REQUESTS', 1, 100_000);

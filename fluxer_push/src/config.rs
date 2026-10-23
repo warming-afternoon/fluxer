@@ -185,7 +185,7 @@ pub struct DeliveryConfig {
     pub queue_capacity: usize,
     /// 是否合并清除通知任务的设备查询。
     pub subscription_batching_enabled: bool,
-    /// 是否接收版本二清除通知批次；默认关闭，可通过环境变量显式开启。
+    /// 是否接收版本二清除通知批次；默认开启，可通过环境变量显式关闭。
     pub clear_batch_enabled: bool,
 
     pub send_concurrency: usize,
@@ -275,7 +275,7 @@ impl DeliveryConfig {
                 "FLUXER_PUSH_CLEAR_BATCH_ENABLED",
                 env.get("FLUXER_PUSH_CLEAR_BATCH_ENABLED"),
             )?
-            .unwrap_or(false),
+            .unwrap_or(true),
             send_concurrency: parse_number(
                 "FLUXER_PUSH_SERVICE_SEND_CONCURRENCY",
                 env.get("FLUXER_PUSH_SERVICE_SEND_CONCURRENCY"),
@@ -747,9 +747,9 @@ impl Env {
 mod clear_batch_config_tests {
     use super::DeliveryConfig;
 
-    /// 验证清理批次默认关闭、可显式开启且拒绝畸形环境值。
+    /// 验证 clear batch 默认开启、可显式覆盖且拒绝畸形环境值。
     #[test]
-    fn clear_batch_requires_explicit_valid_opt_in() {
+    fn clear_batch_defaults_on_and_accepts_explicit_override() {
         let base = vec![
             ("FLUXER_INTERNAL_API_ENDPOINT", "http://127.0.0.1:1"),
             ("FLUXER_GATEWAY_RPC_AUTH_TOKEN", "test"),
@@ -758,7 +758,14 @@ mod clear_batch_config_tests {
             ("FLUXER_VAPID_PRIVATE_KEY", "unused"),
         ];
         assert!(
-            !DeliveryConfig::load_from_iter(base.clone())
+            DeliveryConfig::load_from_iter(base.clone())
+                .unwrap()
+                .clear_batch_enabled
+        );
+        let mut disabled = base.clone();
+        disabled.push(("FLUXER_PUSH_CLEAR_BATCH_ENABLED", "false"));
+        assert!(
+            !DeliveryConfig::load_from_iter(disabled)
                 .unwrap()
                 .clear_batch_enabled
         );

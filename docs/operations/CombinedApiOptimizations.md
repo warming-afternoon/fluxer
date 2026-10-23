@@ -1,6 +1,8 @@
-# Opt-in combined API operations
+# Combined channel authorization and ordered rate limiting
 
-Both settings default to `false` in master configuration, environment loading and the self-hosted Compose template. They are independent and can be disabled without a schema migration.
+[中文版](CombinedApiOptimizations.zh-CN.md)
+
+Both settings default to `true` in master configuration, environment loading and the self-hosted Compose template. Explicit `false` disables either setting without a schema migration. Existing installations must use the capability-first transition in [deployment guide](../../deploy/self-hosting/REQUEST_AND_PUSH_OPTIMIZATIONS.md); new defaults are not a safe uncoordinated rolling upgrade against old Gateway or Push versions.
 
 | Environment | Master configuration | Operation |
 | --- | --- | --- |

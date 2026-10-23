@@ -1,0 +1,31 @@
+# Build the API/worker, Gateway and Push from this exact checkout.
+# Existing unrelated service image pins remain unchanged.
+x-product-api-build: &product-api-build
+  context: ../..
+  dockerfile: fluxer_api/Dockerfile
+  args:
+    BUILD_VERSION: ${FLUXER_PRODUCT_BUILD_TAG:-${FLUXER_BCD_IMAGE_TAG:?set FLUXER_PRODUCT_BUILD_TAG to an immutable product image tag}}
+    SOURCE_SHA: ${FLUXER_SOURCE_SHA:?set FLUXER_SOURCE_SHA to this checkout commit}
+services:
+  api:
+    image: fluxer-local/fluxer-api:${FLUXER_PRODUCT_BUILD_TAG:-${FLUXER_BCD_IMAGE_TAG:?set FLUXER_PRODUCT_BUILD_TAG to an immutable product image tag}}
+    build: *product-api-build
+  worker:
+    image: fluxer-local/fluxer-api:${FLUXER_PRODUCT_BUILD_TAG:-${FLUXER_BCD_IMAGE_TAG:?set FLUXER_PRODUCT_BUILD_TAG to an immutable product image tag}}
+    build: *product-api-build
+  gateway:
+    image: fluxer-local/fluxer-gateway:${FLUXER_PRODUCT_BUILD_TAG:-${FLUXER_BCD_IMAGE_TAG:?set FLUXER_PRODUCT_BUILD_TAG to an immutable product image tag}}
+    build:
+      context: ../..
+      dockerfile: fluxer_gateway/Dockerfile
+      args:
+        BUILD_VERSION: ${FLUXER_PRODUCT_BUILD_TAG:-${FLUXER_BCD_IMAGE_TAG:?set FLUXER_PRODUCT_BUILD_TAG to an immutable product image tag}}
+        SOURCE_SHA: ${FLUXER_SOURCE_SHA:?set FLUXER_SOURCE_SHA}
+  push:
+    image: fluxer-local/fluxer-push:${FLUXER_PRODUCT_BUILD_TAG:-${FLUXER_BCD_IMAGE_TAG:?set FLUXER_PRODUCT_BUILD_TAG to an immutable product image tag}}
+    build:
+      context: ../..
+      dockerfile: fluxer_push/Dockerfile
+      args:
+        BUILD_VERSION: ${FLUXER_PRODUCT_BUILD_TAG:-${FLUXER_BCD_IMAGE_TAG:?set FLUXER_PRODUCT_BUILD_TAG to an immutable product image tag}}
+        SOURCE_SHA: ${FLUXER_SOURCE_SHA:?set FLUXER_SOURCE_SHA}

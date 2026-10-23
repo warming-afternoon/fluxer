@@ -77,7 +77,9 @@ env_gateway_base_config() ->
         <<"gateway_role">> => env_optional_binary("FLUXER_GATEWAY_ROLE"),
         <<"rpc_auth_token">> => env_binary("FLUXER_GATEWAY_RPC_AUTH_TOKEN", <<>>),
         %% 控制推送清理发送端的批传输能力。
-        <<"clear_batch_enabled">> => env_bool("FLUXER_GATEWAY_CLEAR_BATCH_ENABLED", false),
+        <<"clear_batch_enabled">> => env_bool_strict(
+            "FLUXER_GATEWAY_CLEAR_BATCH_ENABLED", true
+        ),
 
         <<"push_enabled">> => env_bool("FLUXER_GATEWAY_PUSH_ENABLED", true),
         <<"push_enrolled_clear_notifications_enabled">> => env_bool(
@@ -205,7 +207,7 @@ build_push_config(Service, Public, Instance) ->
             Service, <<"push_enrolled_clear_notifications_enabled">>, true
         ),
         %% 在发送端进程启动时确定批清理开关。
-        push_clear_batch_enabled => get_bool(Service, <<"clear_batch_enabled">>, false),
+        push_clear_batch_enabled => get_bool(Service, <<"clear_batch_enabled">>, true),
 
         push_outbox_max_queue => get_int(Service, <<"push_outbox_max_queue">>, 10000),
         push_outbox_max_inflight => get_int(Service, <<"push_outbox_max_inflight">>, 96),
@@ -437,6 +439,26 @@ env_bool(Name, Default) ->
         _ -> Default
     end.
 
+%% 严格读取布尔环境配置，避免非法输入静默改变批传输能力。
+-spec env_bool_strict(string(), boolean()) -> boolean().
+env_bool_strict(Name, Default) ->
+    parse_env_bool_strict(Name, env_string(Name, ""), Default).
+
+%% 规范化受支持的布尔值并拒绝其他非空输入。
+-spec parse_env_bool_strict(string(), string(), boolean()) -> boolean().
+parse_env_bool_strict(Name, RawValue, Default) ->
+    Value = string:trim(string:lowercase(RawValue)),
+    case Value of
+        "1" -> true;
+        "true" -> true;
+        "yes" -> true;
+        "0" -> false;
+        "false" -> false;
+        "no" -> false;
+        "" -> Default;
+        _ -> erlang:error({invalid_boolean_env, Name, Value})
+    end.
+
 -spec get_int(map(), binary(), integer()) -> integer().
 get_int(Map, Key, Default) when is_integer(Default) -> to_int(get_value(Map, Key), Default).
 -spec get_optional_int(map(), binary()) -> integer() | undefined.
@@ -603,8 +625,28 @@ public_endpoint(Url, Public) ->
 optional_string(undefined) -> undefined;
 optional_string(Bin) when is_binary(Bin) -> binary_to_list(Bin).
 
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
 
 
+%% 验证批传输默认值、显式覆盖及非法环境配置。
+-spec clear_batch_default_override_and_env_validation_test() -> term().
+clear_batch_default_override_and_env_validation_test() ->
+    ?assertEqual(true, maps:get(push_clear_batch_enabled, build_config(#{}))),
+    FalseRaw = #{<<"services">> => #{<<"gateway">> => #{<<"clear_batch_enabled">> => false}}},
+    TrueRaw = #{<<"services">> => #{<<"gateway">> => #{<<"clear_batch_enabled">> => true}}},
+    ?assertEqual(false, maps:get(push_clear_batch_enabled, build_config(FalseRaw))),
+    ?assertEqual(true, maps:get(push_clear_batch_enabled, build_config(TrueRaw))),
+    ?assertEqual(true, parse_env_bool_strict("TEST", "", true)),
+    ?assertEqual(false, parse_env_bool_strict("TEST", "false", true)),
+    ?assertEqual(true, parse_env_bool_strict("TEST", "true", true)),
+    ?assertEqual(false, parse_env_bool_strict("TEST", "  No  ", true)),
+    ?assertEqual(true, parse_env_bool_strict("TEST", " YES ", false)),
+    ?assertError(
+        {invalid_boolean_env, "TEST", "maybe"},
+        parse_env_bool_strict("TEST", "maybe", true)
+    ).
+-endif.
 
 %% 受控重启更新地址列表，拒绝凭据、重复地址及非 RPC 路径。
 positive_config(Service, Key, Default) ->

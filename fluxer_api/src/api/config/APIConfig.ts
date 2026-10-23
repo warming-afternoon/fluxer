@@ -50,8 +50,10 @@ export interface APIConfig {
 	maxInflightRequests: number;
 	apiInstances?: number;
 	/** Combine channel authorization context, member and permissions in one Gateway RPC. */
+	/** 默认启用合并授权，显式关闭时恢复旧网关调用链。 */
 	combinedChannelAuthEnabled?: boolean;
 	/** Combine global and route limits on standalone KV; Cluster retains sequential checks. */
+	/** 默认启用有序联合限流，集群保留原有单键语义。 */
 	combinedRateLimitEnabled?: boolean;
 	/** 单独控制两项已读优化，默认沿用旧链路。 */
 	readState?: {

@@ -142,6 +142,7 @@ function resolveSetupToken(master: MasterConfig): string | null {
 	return token;
 }
 
+/** 将主配置映射到 API，并保留显式关闭优化的设置。 */
 export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 	if (!master.internal) {
 		throw new Error('internal configuration is required for the API');
@@ -184,8 +185,8 @@ export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 		requestTimeoutMs: master.services.api.request_timeout_ms,
 		maxInflightRequests: master.services.api.max_inflight_requests,
 		apiInstances: master.services.api.instances ?? 2,
-		combinedChannelAuthEnabled: master.services.api.combined_channel_auth_enabled ?? false,
-		combinedRateLimitEnabled: master.services.api.combined_rate_limit_enabled ?? false,
+		combinedChannelAuthEnabled: master.services.api.combined_channel_auth_enabled ?? true,
+		combinedRateLimitEnabled: master.services.api.combined_rate_limit_enabled ?? true,
 		readState: {
 			combinedGatewayRpcEnabled: master.services.api.read_state_combined_gateway_rpc_enabled ?? false,
 			narrowAuthEnabled: master.services.api.read_state_narrow_auth_enabled ?? false,

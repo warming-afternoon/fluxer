@@ -17,6 +17,7 @@ import {NewMessagesBar} from '@app/features/channel/components/NewMessagesBar';
 import {usePresentableTypingUsers} from '@app/features/channel/components/TypingUsers';
 import {UploadManager} from '@app/features/channel/components/UploadManager';
 import type {Channel} from '@app/features/channel/models/Channel';
+import Channels from '@app/features/channel/state/Channels';
 import GatewaySessions from '@app/features/gateway/transport/GatewaySessionPool';
 import GuildVerification from '@app/features/guild/state/GuildVerification';
 import {TRY_AGAIN_DESCRIPTOR} from '@app/features/i18n/utils/CommonMessageDescriptors';
@@ -52,6 +53,8 @@ import ReadStates from '@app/features/read_state/state/ReadStates';
 import {shouldAutoAck} from '@app/features/read_state/utils/AutoAckPredicate';
 import {remFromPx} from '@app/features/theme/layout/RemFromPx';
 import ActiveComposer from '@app/features/threads/state/ActiveComposer';
+import ThreadMemberships from '@app/features/threads/state/ThreadMemberships';
+import ThreadWatches from '@app/features/threads/state/ThreadWatches';
 import {Button} from '@app/features/ui/button/Button';
 import {Scroller} from '@app/features/ui/components/Scroller';
 import FocusRingScope from '@app/features/ui/focus_ring/FocusRingScope';
@@ -161,6 +164,7 @@ function shallowEqual<T extends object>(a: T, b: T): boolean {
 	return true;
 }
 
+/** 呈现消息窗口并为实际打开的帖子持有浏览订阅 */
 const CachedMessages = observer(function CachedMessages({channel, allowAutoAck = true}: MessagesProps) {
 	const {i18n} = useLingui();
 	const scrollerInnerRef = useRef<HTMLDivElement | null>(null);
@@ -186,6 +190,17 @@ const CachedMessages = observer(function CachedMessages({channel, allowAutoAck =
 	const isGatewayConnected = GatewaySessions.foregroundConnection.isConnected;
 	const selectedChannelId = SelectedChannel.currentChannelId;
 	const openThreadPanelId = Navigation.threadId;
+	const browsingPost =
+		channel.isThread() &&
+		!ThreadMemberships.isMember(channel.id) &&
+		channel.parentId != null &&
+		Channels.getChannel(channel.parentId)?.isThreadOnly() === true &&
+		(selectedChannelId === channel.id || openThreadPanelId === channel.id);
+	useEffect(() => {
+		// 仅实际显示的帖子持有引用，组件预加载不建立订阅
+		if (!browsingPost) return;
+		return ThreadWatches.retain({id: channel.id, guildId: channel.guildId});
+	}, [browsingPost, channel.id, channel.guildId]);
 	const placeholderSpecs = useMessageListPlaceholderSpecs({
 		channelId: channel.id,
 		compact: state.messageDisplayCompact,

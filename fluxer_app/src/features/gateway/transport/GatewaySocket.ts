@@ -658,7 +658,11 @@ export class GatewaySocket extends EventEmitter<GatewaySocketEvents> {
 		});
 	}
 
+	/** 合并发送社区订阅及独立帖子浏览请求 */
 	updateGuildSubscriptions(params: {
+		// 浏览订阅的连接内请求标识
+		thread_watch_nonce?: string;
+
 		subscriptions: Record<
 			string,
 			{
@@ -669,6 +673,8 @@ export class GatewaySocket extends EventEmitter<GatewaySocketEvents> {
 				sync?: boolean;
 				threads?: boolean;
 				thread_member_lists?: Array<string>;
+				// 当前会话实际浏览的完整帖子集合
+				thread_watches?: Array<string>;
 			}
 		>;
 	}): void {

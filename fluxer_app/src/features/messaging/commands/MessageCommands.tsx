@@ -67,6 +67,7 @@ import * as ModalCommands from '@app/features/ui/commands/ModalCommands';
 import {modal} from '@app/features/ui/commands/ModalCommands';
 import * as ToastCommands from '@app/features/ui/commands/ToastCommands';
 import {Switch} from '@app/features/ui/components/form/FormSwitch';
+import Dimension from '@app/features/ui/state/Dimension';
 import {blockIfAccountLimited, handleAccountLimitedError} from '@app/features/user/utils/AccountLimitUtils';
 import {APIErrorCodes} from '@fluxer/constants/src/ApiErrorCodes';
 import {MessageFlags, Permissions} from '@fluxer/constants/src/ChannelConstants';
@@ -168,6 +169,7 @@ const MESSAGE_EDIT_MAX_RETRIES = 5;
 const MESSAGE_EDIT_TIMEOUT_MS = 30_000;
 const pendingDeletePromises = new Map<string, Promise<void>>();
 const pendingFetchPromises = new Map<string, Promise<Array<WireMessage>>>();
+const MESSAGE_FETCH_KEY_SEPARATOR = '\x1f';
 
 export interface ForwardMediaSelection {
 	attachmentIds?: ReadonlyArray<string>;
@@ -224,7 +226,7 @@ function makeFetchKey(
 	jump?: JumpOptions,
 	options?: FetchMessagesOptions,
 ): string {
-	const SEP = '\x1f';
+	const SEP = MESSAGE_FETCH_KEY_SEPARATOR;
 	const throwOnError = options?.throwOnError ? '1' : '0';
 	const staleRefetch = options?.staleRefetch ? '1' : '0';
 	if (!jump) {
@@ -463,6 +465,49 @@ function applyMessageFetchCacheHit(
 		case 'after':
 			Messages.handleLoadMessagesSuccessCached({channelId, after: after ?? undefined, limit});
 			return;
+	}
+}
+
+/** 订阅生效后从服务端恢复正在阅读的窗口，并保留并发实时变化 */
+export async function refreshThreadWatchWindow(channelId: string, isCurrent: () => boolean): Promise<void> {
+	while (isCurrent()) {
+		// 每轮等待普通加载收敛，翻页接管后以新的阅读窗口重新补拉
+		const earlier = [...pendingFetchPromises].filter(([key]) =>
+			key.startsWith(`${channelId}${MESSAGE_FETCH_KEY_SEPARATOR}`),
+		);
+		await Promise.allSettled(earlier.map(([, promise]) => promise));
+		if (!isCurrent()) return;
+		const refresh = Messages.beginWatchRefresh(channelId);
+		const baseline = refresh.baseline;
+		const readingHistory = baseline?.ready && baseline.length > 0 && !Dimension.channelPinnedToEnd(channelId);
+		const firstId = readingHistory ? baseline.first()!.id : null;
+		const lastId = readingHistory ? baseline.last()!.id : null;
+		try {
+			// 最新窗口用于恢复新消息，历史阅读窗口按原边界分页刷新
+			const latest = await requestChannelMessages(channelId, null, null, MAX_MESSAGES_PER_CHANNEL);
+			let snapshot = latest;
+			let hasMoreBefore = latest.length === MAX_MESSAGES_PER_CHANNEL;
+			let hasMoreAfter = false;
+			if (firstId && lastId) {
+				snapshot = [];
+				let before = (BigInt(lastId) + 1n).toString();
+				for (let page = 0; page < 3 && isCurrent(); page += 1) {
+					const rows = await requestChannelMessages(channelId, before, null, 100);
+					snapshot.push(
+						...rows.filter((wire) => BigInt(wire.id) >= BigInt(firstId) && BigInt(wire.id) <= BigInt(lastId)),
+					);
+					const oldest = rows.at(-1)?.id;
+					if (!oldest || BigInt(oldest) <= BigInt(firstId) || rows.length < 100) break;
+					before = oldest;
+				}
+				hasMoreBefore = baseline?.hasMoreBefore ?? false;
+				hasMoreAfter = latest.some((wire) => BigInt(wire.id) > BigInt(lastId));
+			}
+			if (!isCurrent()) return;
+			if (Messages.completeWatchRefresh(channelId, refresh, snapshot, hasMoreBefore, hasMoreAfter, lastId)) return;
+		} finally {
+			Messages.endWatchRefresh(channelId, refresh);
+		}
 	}
 }
 

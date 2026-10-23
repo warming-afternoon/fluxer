@@ -297,6 +297,7 @@ export class ReadStateEntry {
 		return null;
 	}
 
+	/** 计算提及资格，未关注的论坛浏览不会扩大角色提及范围 */
 	shouldMentionFor(message: MessageModel | WireMessage, userId: string, isPrivate: boolean): boolean {
 		const authorBlocked = Relationships.isBlocked(message.author.id);
 		const suppressEveryone = UserGuildSettings.isEveryoneMentionSuppressed(this.guildId);
@@ -306,7 +307,12 @@ export class ReadStateEntry {
 		const mentionRoles = 'mentionRoles' in message ? message.mentionRoles : message.mention_roles;
 		const hasUserMention = mentions?.some((m) => m.id === userId) ?? false;
 		const hasEveryoneMention = !suppressEveryone && !!mentionEveryone && !this.isNonMemberThread();
-		const hasRoleMention = !suppressRoles && this.hasMatchingMemberRoleMention(userId, mentionRoles);
+		const channel = Channels.getChannel(this.channelId);
+		const browsingOnly =
+			this.isNonMemberThread() &&
+			channel?.parentId != null &&
+			Channels.getChannel(channel.parentId)?.isThreadOnly() === true;
+		const hasRoleMention = !suppressRoles && !browsingOnly && this.hasMatchingMemberRoleMention(userId, mentionRoles);
 		const isMuted = UserGuildSettings.isGuildOrChannelMuted(this.guildId, this.channelId);
 		return resolveReadStateMention({
 			authorBlocked,

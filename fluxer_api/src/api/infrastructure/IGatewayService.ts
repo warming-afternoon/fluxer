@@ -114,9 +114,28 @@ export interface GatewayVoiceStateEntry {
 	serverId?: string;
 }
 
+/** 网关返回的频道上下文及可选合并授权结果。 */
 export interface GuildChannelAuthContext {
+	/** 当前请求对应的公会信息。 */
 	guild: GuildResponse;
+
+	/** 内容分级判断所需的父频道。 */
 	parentChannel: ChannelResponse | null;
+
+	/** 合并协议验证通过后提供的成员与权限快照。 */
+	authorization?: {
+		/** 成员查询结果，缺失成员仍交由调用方执行原有拒绝。 */
+		memberResult: {
+			/** 是否查询到目标成员。 */
+			success: boolean;
+
+			/** 查询成功时的成员资料。 */
+			memberData?: import('@fluxer/schema/src/domains/guild/GuildMemberSchemas').GuildMemberResponse;
+		};
+
+		/** 指定权限目标的位集合。 */
+		permissions: bigint;
+	};
 }
 
 export interface GatewayChannelMention {

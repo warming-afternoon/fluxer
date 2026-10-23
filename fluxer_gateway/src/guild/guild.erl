@@ -119,6 +119,7 @@ route_call(Tag, Msg, From, State) ->
 -spec call_handler(atom()) -> query | voice | subscription | undefined.
 call_handler(Tag) -> query_call_handler(Tag).
 
+%% 将服务器只读调用交给查询处理器。
 -spec query_call_handler(atom()) -> query | voice | subscription | undefined.
 query_call_handler(resolve_mention_sources_page) -> query;
 query_call_handler(get_counts) -> query;
@@ -134,6 +135,7 @@ query_call_handler(can_manage_roles) -> query;
 query_call_handler(can_manage_role) -> query;
 query_call_handler(get_guild_data) -> query;
 query_call_handler(get_guild_auth_context) -> query;
+query_call_handler(get_guild_channel_authorization) -> query;
 query_call_handler(get_assignable_roles) -> query;
 query_call_handler(get_user_max_role_position) -> query;
 query_call_handler(check_target_member) -> query;

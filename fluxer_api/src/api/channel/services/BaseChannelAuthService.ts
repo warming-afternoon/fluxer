@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {ChannelID, GuildID, UserID} from '@app/api/BrandedTypes';
+import {Config} from '@app/api/Config';
 import type {ChannelRepository} from '@app/api/channel/ChannelRepository';
 import type {AuthenticatedChannel, AuthenticatedThread} from '@app/api/channel/services/AuthenticatedChannel';
 import {DMPermissionValidator} from '@app/api/channel/services/DMPermissionValidator';
@@ -193,6 +194,7 @@ export abstract class BaseChannelAuthService {
 		await this.dmPermissionValidator.validate({senderId: userId, recipientId: recipientIds[0]});
 	}
 
+	/** 校验频道鉴权结果并保留成员、权限与内容分级约束。 */
 	protected async getGuildChannelAuth({
 		channel,
 		userId,
@@ -206,10 +208,19 @@ export abstract class BaseChannelAuthService {
 			return this.getThreadChannelAuth({channel, userId, skipNsfwValidation});
 		}
 		const guildId = channel.guildId!;
-		const [authContextResult, guildMemberResult] = await Promise.all([
-			this.fetchGuildAuthContextOrThrow({guildId, userId, channelId: this.parentLookupChannelId(channel)}),
-			this.fetchGuildMemberOrThrow({guildId, userId}),
-		]);
+		const combined = await this.fetchCombinedAuthorization({
+			guildId,
+			userId,
+			channelId: this.parentLookupChannelId(channel),
+			permissionTargetChannelId: channel.id,
+			mode: 'channel',
+		});
+		const [authContextResult, guildMemberResult] = combined
+			? [combined, combined.memberResult]
+			: await Promise.all([
+					this.fetchGuildAuthContextOrThrow({guildId, userId, channelId: this.parentLookupChannelId(channel)}),
+					this.fetchGuildMemberOrThrow({guildId, userId}),
+				]);
 		if (!authContextResult) {
 			this.throwGuildAccessError();
 		}
@@ -227,11 +238,13 @@ export abstract class BaseChannelAuthService {
 			guildData: guildDataResult,
 			userId,
 		});
-		const channelPermissions = await this.gatewayService.getUserPermissions({
-			guildId,
-			userId,
-			channelId: channel.id,
-		});
+		const channelPermissions =
+			combined?.permissions ??
+			(await this.gatewayService.getUserPermissions({
+				guildId,
+				userId,
+				channelId: channel.id,
+			}));
 		const hasPermission = async (permission: bigint): Promise<boolean> => {
 			const allowed = (channelPermissions & permission) === permission;
 			if (allowed) enforceGuildMfa(permission);
@@ -276,6 +289,7 @@ export abstract class BaseChannelAuthService {
 		};
 	}
 
+	/** 在父频道校验后重叠独立查询与授权，并保留原有错误优先级。 */
 	async resolveThreadPermissionContext({
 		thread,
 		userId,
@@ -286,26 +300,68 @@ export abstract class BaseChannelAuthService {
 		const guildId = thread.guildId;
 		const parentId = thread.parentId;
 		if (guildId === null || parentId === null) throw new UnknownChannelError();
-		const [parent, state, threadMember, guildMemberResult] = await Promise.all([
-			this.channelRepository.channelData.findUnique(parentId),
+		const parentPromise = this.channelRepository.channelData.findUnique(parentId);
+		let readsFailed = false;
+		// 立即观察授权成败，等待原有仓储读取与父频道、帖子状态校验后再返回授权错误。
+		const combinedPromise =
+			Config.combinedChannelAuthEnabled === true
+				? parentPromise
+						.then((parent) => {
+							if (
+								readsFailed ||
+								!parent ||
+								parent.guildId !== guildId ||
+								!THREAD_PARENT_CHANNEL_TYPES.has(parent.type)
+							) {
+								return null;
+							}
+							return this.fetchCombinedAuthorization({
+								guildId,
+								userId,
+								channelId: this.parentLookupChannelId(parent),
+								permissionTargetChannelId: parent.id,
+								mode: 'thread',
+							});
+						})
+						.then(
+							(value) => ({value}),
+							(error: unknown) => ({error}),
+						)
+				: null;
+		const reads = Promise.all([
+			parentPromise,
 			this.channelRepository.threads.getState(thread.id),
 			this.channelRepository.threads.getMember(thread.id, userId),
-			this.fetchGuildMemberOrThrow({guildId, userId}),
+			Config.combinedChannelAuthEnabled === true
+				? Promise.resolve(null)
+				: this.fetchGuildMemberOrThrow({guildId, userId}),
 		]);
+		const [parent, state, threadMember, guildMemberResult] = combinedPromise
+			? await reads.catch(async (error: unknown) => {
+					readsFailed = true;
+					await combinedPromise;
+					throw error;
+				})
+			: await reads;
 		if (!parent || !state || parent.guildId !== guildId || !THREAD_PARENT_CHANNEL_TYPES.has(parent.type)) {
+			await combinedPromise;
 			throw new UnknownChannelError();
 		}
-		if (!guildMemberResult.success || !guildMemberResult.memberData) {
-			this.throwGuildAccessError();
-		}
-		const [authContextResult, parentPermissions] = await Promise.all([
-			this.fetchGuildAuthContextOrThrow({guildId, userId, channelId: this.parentLookupChannelId(parent)}),
-			this.gatewayService.getUserPermissions({guildId, userId, channelId: parent.id}),
-		]);
+		const combinedOutcome = await combinedPromise;
+		if (combinedOutcome && 'error' in combinedOutcome) throw combinedOutcome.error;
+		const combined = combinedOutcome?.value ?? null;
+		const resolvedMember = combined?.memberResult ?? guildMemberResult;
+		if (!resolvedMember?.success || !resolvedMember.memberData) this.throwGuildAccessError();
+		const [authContextResult, parentPermissions] = combined
+			? [combined, combined.permissions]
+			: await Promise.all([
+					this.fetchGuildAuthContextOrThrow({guildId, userId, channelId: this.parentLookupChannelId(parent)}),
+					this.gatewayService.getUserPermissions({guildId, userId, channelId: parent.id}),
+				]);
 		if (!authContextResult) {
 			this.throwGuildAccessError();
 		}
-		const member = await this.fillMissingMemberTimeout({guildId, userId, memberData: guildMemberResult.memberData});
+		const member = await this.fillMissingMemberTimeout({guildId, userId, memberData: resolvedMember.memberData});
 		const guild = authContextResult.guild;
 		const enforceMfa = await createGuildMfaEnforcer({userRepository: this.userRepository, guildData: guild, userId});
 		const isOwner = guild.owner_id === userId.toString();
@@ -379,6 +435,32 @@ export abstract class BaseChannelAuthService {
 			}
 		}
 		return {channel, guild, member, hasPermission, checkPermission, thread};
+	}
+
+	/** 读取合并授权结果并保留网关错误映射，关闭时沿用旧链路。 */
+	private async fetchCombinedAuthorization(params: {
+		/** 授权目标公会。 */
+		guildId: GuildID;
+
+		/** 请求授权的用户。 */
+		userId: UserID;
+
+		/** 内容分级判断使用的上下文频道。 */
+		channelId?: ChannelID;
+
+		/** 实际计算权限的目标频道。 */
+		permissionTargetChannelId: ChannelID;
+
+		/** 普通频道或帖子授权模式。 */
+		mode: 'channel' | 'thread';
+	}) {
+		if (Config.combinedChannelAuthEnabled !== true) return null;
+		try {
+			return await this.gatewayService.getGuildChannelAuthorization(params);
+		} catch (error) {
+			await this.handleGuildAccessError(error, params.guildId);
+			throw error;
+		}
 	}
 
 	private parentLookupChannelId(channel: Channel): ChannelID | undefined {

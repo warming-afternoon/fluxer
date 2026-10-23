@@ -67,6 +67,10 @@ const NAMED_FLUXER_ENV_OVERRIDES: Record<string, NamedEnvOverride> = {
 		path: ['services', 'api', 'read_state_combined_gateway_rpc_enabled'],
 		parse: parseBoolean,
 	},
+	FLUXER_COMBINED_CHANNEL_AUTH_ENABLED: {
+		path: ['services', 'api', 'combined_channel_auth_enabled'],
+		parse: parseBoolean,
+	},
 	FLUXER_READ_STATE_NARROW_AUTH_ENABLED: {
 		path: ['services', 'api', 'read_state_narrow_auth_enabled'],
 		parse: parseBoolean,

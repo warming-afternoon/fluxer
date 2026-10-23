@@ -509,6 +509,31 @@ export class NoopGatewayService implements IGatewayService {
 		return {guild, parentChannel};
 	}
 
+	/** 为未连接真实网关的测试返回明确的空授权上下文。 */
+	async getGuildChannelAuthorization(params: {
+		/** 授权目标公会。 */
+		guildId: GuildID;
+
+		/** 请求授权的用户。 */
+		userId: UserID;
+
+		/** 内容分级判断使用的上下文频道。 */
+		channelId?: ChannelID;
+
+		/** 实际计算权限的目标频道。 */
+		permissionTargetChannelId: ChannelID;
+
+		/** 普通频道或帖子授权模式。 */
+		mode: 'channel' | 'thread';
+	}) {
+		const [context, memberResult, permissions] = await Promise.all([
+			this.getGuildAuthContext(params),
+			this.getGuildMember(params),
+			this.getUserPermissions({...params, channelId: params.permissionTargetChannelId}),
+		]);
+		return {...context, memberResult, permissions};
+	}
+
 	async getGuildMember(params: {guildId: GuildID; userId: UserID}): Promise<{
 		success: boolean;
 		memberData?: GuildMemberResponse;

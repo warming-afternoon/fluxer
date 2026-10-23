@@ -4,7 +4,7 @@
 -typing([eqwalizer]).
 
 -export([get_guild_data/2]).
--export([get_auth_context/2]).
+-export([get_auth_context/2, get_channel_authorization/2]).
 
 -export([get_first_viewable_text_channel/1]).
 -export([get_guild_state/2, get_guild_state/3]).
@@ -46,6 +46,64 @@ get_auth_context(#{user_id := UserId, channel_id := ChannelId}, State) ->
             {reply, #{auth_context => build_auth_context(ChannelId, Data, State)}, State};
         _ ->
             get_auth_context_for_member(UserId, ChannelId, Data, State)
+    end.
+
+%% 使用同一服务器快照返回上下文、成员及权限位。
+-spec get_channel_authorization(map(), guild_state()) -> guild_reply(map()).
+get_channel_authorization(
+    #{
+        user_id := UserId,
+        channel_id := ContextId,
+        permission_target_channel_id := TargetId,
+        mode := Mode
+    },
+    State
+) ->
+    %% 先复用上下文成员门，避免对无权成员返回权限快照。
+    {reply, ContextReply, _} = get_auth_context(
+        #{user_id => UserId, channel_id => ContextId}, State
+    ),
+    case ContextReply of
+        #{auth_context := null} ->
+            {reply, ContextReply, State};
+        #{auth_context := Context} ->
+            {reply, MemberReply, _} = guild_data_members:get_guild_member(
+                #{user_id => UserId}, State
+            ),
+            Permissions = guild_permissions:get_member_permissions(UserId, TargetId, State),
+            %% 成员与权限均来自同一份状态，不跨请求保留授权决定。
+            Result = Context#{
+                %% 联合鉴权响应的协议版本。
+                <<"response_version">> => 1,
+
+                %% 当前用户的服务器成员快照。
+                <<"member">> => #{
+                    %% 标识当前用户是否为服务器成员。
+                    <<"success">> => maps:get(success, MemberReply),
+
+                    %% 按传输格式编码成员状态。
+                    <<"member_data">> => guild_data_wire:payload(
+                        maps:get(member_data, MemberReply, null)
+                    )
+                },
+
+                %% 目标频道的完整权限位。
+                <<"permissions">> => integer_to_binary(Permissions),
+
+                %% 用于父频道上下文校验的频道标识。
+                <<"context_channel_id">> =>
+                    case ContextId of
+                        null -> null;
+                        _ -> integer_to_binary(ContextId)
+                    end,
+
+                %% 权限计算所使用的目标频道标识。
+                <<"permission_target_channel_id">> => integer_to_binary(TargetId),
+
+                %% 区分普通频道与子频道鉴权请求。
+                <<"mode">> => Mode
+            },
+            {reply, #{auth_context => Result}, State}
     end.
 
 -spec get_auth_context_for_member(user_id(), integer() | null, map(), guild_state()) ->

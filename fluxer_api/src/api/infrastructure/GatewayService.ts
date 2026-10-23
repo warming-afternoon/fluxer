@@ -87,6 +87,15 @@ interface GuildAuthContextParams {
 	channelId?: ChannelID;
 }
 
+/** 合并授权的上下文与实际权限目标。 */
+interface GuildChannelAuthorizationParams extends GuildAuthContextParams {
+	/** 实际计算权限的频道，帖子请求使用父频道。 */
+	permissionTargetChannelId: ChannelID;
+
+	/** 区分普通频道与帖子所需的授权上下文。 */
+	mode: 'channel' | 'thread';
+}
+
 interface GuildMemberParams {
 	guildId: GuildID;
 	userId: UserID;
@@ -596,11 +605,31 @@ export class GatewayService {
 		string,
 		Array<PendingRequest<GuildChannelAuthContext>>,
 	]): Promise<void> {
-		const [guildIdStr, userIdStr, channelIdStr] = key.split('-');
+		const [guildIdStr, userIdStr, channelIdStr, permissionTarget, mode] = key.split('-');
 		const guildId = BigInt(guildIdStr) as GuildID;
 		const userId = BigInt(userIdStr) as UserID;
 		const channelId = channelIdStr !== '0' ? (BigInt(channelIdStr) as ChannelID) : undefined;
 		try {
+			if (permissionTarget) {
+				const result = await this.call<unknown>('guild.get_channel_authorization', {
+					guild_id: guildIdStr,
+					user_id: userIdStr,
+					context_channel_id: channelId?.toString() ?? null,
+					permission_target_channel_id: permissionTarget,
+					mode,
+				});
+				this.resolvePendingRequests(
+					pending,
+					await this.decodeChannelAuthorization(result, {
+						guildId,
+						userId,
+						channelId,
+						permissionTargetChannelId: BigInt(permissionTarget) as ChannelID,
+						mode: mode as 'channel' | 'thread',
+					}),
+				);
+				return;
+			}
 			const result = await this.call<GuildAuthContextRpcResponse>('guild.get_auth_context', {
 				guild_id: guildId.toString(),
 				user_id: userId.toString(),
@@ -612,7 +641,7 @@ export class GatewayService {
 			});
 		} catch (error) {
 			const transformedError = this.transformGatewayError(error);
-			if (!this.isAuthContextUnsupportedError(transformedError)) {
+			if (permissionTarget || !this.isAuthContextUnsupportedError(transformedError)) {
 				this.rejectPendingRequests(pending, transformedError);
 				this.logBatchFailures('guild.get_auth_context', [{status: 'rejected', reason: error}]);
 				return;
@@ -819,6 +848,21 @@ export class GatewayService {
 			return await this.getGuildAuthContextFromGuildData({guildId, userId, channelId});
 		}
 		const key = `${guildId.toString()}-${userId.toString()}-${channelId ? channelId.toString() : '0'}`;
+		return this.queueAuthContext(key);
+	}
+
+	/** 批量请求同一上下文的成员、权限与频道授权数据。 */
+	async getGuildChannelAuthorization(
+		params: GuildChannelAuthorizationParams,
+	): Promise<GuildChannelAuthContext & NonNullable<GuildChannelAuthContext['authorization']>> {
+		const key = `${params.guildId}-${params.userId}-${params.channelId ?? 0}-${params.permissionTargetChannelId}-${params.mode}`;
+		const result = await this.queueAuthContext(key);
+		if (!result.authorization) throw new BadGatewayError();
+		return {...result, ...result.authorization};
+	}
+
+	/** 将授权上下文请求加入有界队列，并为每个等待者维护超时。 */
+	private queueAuthContext(key: string): Promise<GuildChannelAuthContext> {
 		return new Promise<GuildChannelAuthContext>((resolve, reject) => {
 			if (this.pendingBatchRequestCount >= this.MAX_PENDING_BATCH_REQUESTS) {
 				reject(new ServiceUnavailableError());
@@ -841,6 +885,83 @@ export class GatewayService {
 			this.pendingBatchRequestCount += 1;
 			this.scheduleAuthContextBatch();
 		});
+	}
+
+	/** 校验响应版本及权限目标，仅对成功的旧格式响应补齐字段。 */
+	private async decodeChannelAuthorization(
+		value: unknown,
+		params: GuildChannelAuthorizationParams,
+	): Promise<GuildChannelAuthContext> {
+		if (!value || typeof value !== 'object') throw new BadGatewayError();
+		const row = value as Record<string, unknown>;
+		const versioned = row.response_version !== undefined;
+		const guild = row.guild as GuildResponse | undefined;
+		if (
+			!guild ||
+			guild.id !== params.guildId.toString() ||
+			!/^[0-9]+$/.test(guild.owner_id) ||
+			![0, 1].includes(guild.mfa_level)
+		)
+			throw new BadGatewayError();
+		if (
+			versioned &&
+			((guild.nsfw !== undefined && typeof guild.nsfw !== 'boolean') ||
+				(guild.nsfw_level !== undefined && ![0, 1, 2, 3].includes(guild.nsfw_level)))
+		)
+			throw new BadGatewayError();
+		if (
+			versioned &&
+			(row.response_version !== 1 ||
+				row.context_channel_id !== (params.channelId?.toString() ?? null) ||
+				row.permission_target_channel_id !== params.permissionTargetChannelId.toString() ||
+				row.mode !== params.mode ||
+				row.member === undefined ||
+				row.permissions === undefined)
+		)
+			throw new BadGatewayError();
+		const parentChannel = row.parent_channel as GuildChannelAuthContext['parentChannel'];
+		if (
+			parentChannel != null &&
+			(typeof parentChannel !== 'object' ||
+				parentChannel.id !== params.channelId?.toString() ||
+				!Number.isInteger(parentChannel.type) ||
+				(versioned &&
+					parentChannel.nsfw_override !== undefined &&
+					parentChannel.nsfw_override !== null &&
+					typeof parentChannel.nsfw_override !== 'boolean'))
+		)
+			throw new BadGatewayError();
+		let memberResult: {success: boolean; memberData?: GuildMemberResponse};
+		if (row.member === undefined && !versioned)
+			memberResult = await this.getGuildMember({guildId: params.guildId, userId: params.userId});
+		else {
+			const member = row.member as {success?: unknown; member_data?: GuildMemberResponse} | null;
+			if (
+				!member ||
+				typeof member.success !== 'boolean' ||
+				(member.success && (!member.member_data || member.member_data.user?.id !== params.userId.toString()))
+			)
+				throw new BadGatewayError();
+			if (
+				member.member_data?.communication_disabled_until != null &&
+				!Number.isFinite(Date.parse(member.member_data.communication_disabled_until))
+			)
+				throw new BadGatewayError();
+			memberResult = {success: member.success, ...(member.success ? {memberData: member.member_data} : {})};
+		}
+		let permissions: bigint;
+		if (row.permissions === undefined && !versioned)
+			permissions = await this.getUserPermissions({
+				guildId: params.guildId,
+				userId: params.userId,
+				channelId: params.permissionTargetChannelId,
+			});
+		else {
+			if (typeof row.permissions !== 'string' || !/^(0|[1-9][0-9]*)$/.test(row.permissions))
+				throw new BadGatewayError();
+			permissions = BigInt(row.permissions);
+		}
+		return {guild, parentChannel: parentChannel ?? null, authorization: {memberResult, permissions}};
 	}
 
 	private removePendingAuthContextRequest(key: string, request: PendingRequest<GuildChannelAuthContext>): void {

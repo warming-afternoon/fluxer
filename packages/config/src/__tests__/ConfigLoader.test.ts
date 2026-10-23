@@ -295,6 +295,14 @@ describe('ConfigLoader', () => {
 		expect(config.auth.passkeys.additional_allowed_origins).toEqual(['https://example.com', 'https://app.example.com']);
 	});
 
+	test('channel authorization RPC is opt-in through the formal configuration', async () => {
+		stubMinimalEnv();
+		expect((await loadConfig()).services.api.combined_channel_auth_enabled).toBe(false);
+		resetConfig();
+		vi.stubEnv('FLUXER_COMBINED_CHANNEL_AUTH_ENABLED', 'true');
+		expect((await loadConfig()).services.api.combined_channel_auth_enabled).toBe(true);
+	});
+
 	test('parses typed named environment variables', async () => {
 		stubMinimalEnv({
 			FLUXER_API_PORT: '9090',

@@ -39,6 +39,10 @@ route(M, P) ->
     <<"guild.dispatch_many">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.get_data">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.get_auth_context">> => fun gateway_rpc_guild_lifecycle:handle/2,
+
+    %% 将联合鉴权请求交给服务器生命周期入口。
+    <<"guild.get_channel_authorization">> => fun gateway_rpc_guild_lifecycle:handle/2,
+
     <<"guild.start">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.stop">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.reload">> => fun gateway_rpc_guild_lifecycle:handle/2,
@@ -74,6 +78,7 @@ route(M, P) ->
     <<"guild.switch_voice_region">> => fun gateway_rpc_guild_voice:handle/2
 }).
 
+%% 按方法名称选择频道与服务器请求处理器。
 -spec route_handler(binary()) -> fun((binary(), map()) -> term()).
 route_handler(Method) -> maps:get(Method, ?HANDLER_MAP).
 

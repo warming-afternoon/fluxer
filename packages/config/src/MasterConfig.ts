@@ -97,6 +97,10 @@ export interface MasterConfig {
 			request_timeout_ms: number;
 			max_inflight_requests: number;
 			instances?: number;
+
+			/** 是否合并频道上下文、成员及权限的网关查询。 */
+			combined_channel_auth_enabled?: boolean;
+
 			/** 是否合并已读清通知与派发网关调用。 */
 			read_state_combined_gateway_rpc_enabled?: boolean;
 			/** 是否为会话已读请求只读取认证所需用户字段。 */

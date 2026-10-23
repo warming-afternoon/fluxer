@@ -8,11 +8,13 @@
 -define(GUILD_CALL_TIMEOUT, 4000).
 -define(RELOAD_ALL_TIMEOUT, 15000).
 
+%% 分派服务器生命周期与联合鉴权请求。
 -spec handle(binary(), map()) -> term().
 handle(<<"guild.dispatch">>, P) -> handle_dispatch(P);
 handle(<<"guild.dispatch_many">>, P) -> handle_dispatch_many(P);
 handle(<<"guild.get_data">>, P) -> handle_get_data(P);
 handle(<<"guild.get_auth_context">>, P) -> handle_get_auth_context(P);
+handle(<<"guild.get_channel_authorization">>, P) -> handle_get_channel_authorization(P);
 handle(<<"guild.start">>, P) -> handle_start(P);
 handle(<<"guild.stop">>, P) -> handle_stop(P);
 handle(<<"guild.reload">>, P) -> handle_reload(P);
@@ -64,6 +66,46 @@ handle_get_auth_context(#{<<"guild_id">> := GuildIdBin, <<"user_id">> := UserIdB
     UserId = optional_user_id(UserIdBin),
     ChannelId = optional_channel_id(maps:get(<<"channel_id">>, Params, null)),
     get_auth_context_from_guild(GuildId, UserId, ChannelId).
+
+%% 校验联合鉴权参数并读取所属服务器的权限快照。
+-spec handle_get_channel_authorization(map()) -> term().
+handle_get_channel_authorization(
+    #{
+        <<"guild_id">> := GuildBin,
+        <<"user_id">> := UserBin,
+        <<"permission_target_channel_id">> := TargetBin,
+        <<"mode">> := Mode
+    } = Params
+) when Mode =:= <<"channel">>; Mode =:= <<"thread">> ->
+    %% 校验传输参数后才访问实际服务器所属进程。
+    GuildId = validation:snowflake_or_throw(<<"guild_id">>, GuildBin),
+    UserId = validation:snowflake_or_throw(<<"user_id">>, UserBin),
+    Target = validation:snowflake_or_throw(<<"permission_target_channel_id">>, TargetBin),
+    Context = optional_channel_id(maps:get(<<"context_channel_id">>, Params, null)),
+    Request =
+        {get_guild_channel_authorization, #{
+            %% 发起鉴权的用户标识。
+            user_id => UserId,
+
+            %% 需要读取的父频道上下文。
+            channel_id => Context,
+
+            %% 权限计算所针对的频道。
+            permission_target_channel_id => Target,
+
+            %% 普通频道或子频道鉴权模式。
+            mode => Mode
+        }},
+    case read_guild(GuildId, Request) of
+        #{auth_context := null} ->
+            gateway_rpc_error:raise(<<"forbidden">>);
+        #{auth_context := Result} ->
+            guild_data_wire:payload(Result);
+        _ ->
+            gateway_rpc_error:raise(<<"guild_data_error">>)
+    end;
+handle_get_channel_authorization(_) ->
+    gateway_rpc_error:raise(validation_invalid_params).
 
 -spec optional_channel_id(term()) -> integer() | null.
 optional_channel_id(Value) ->

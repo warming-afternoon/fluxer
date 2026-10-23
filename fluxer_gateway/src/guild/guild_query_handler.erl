@@ -82,6 +82,7 @@ caller_timeout_ms(list_guild_members) -> 10000;
 caller_timeout_ms(search_guild_members) -> 10000;
 caller_timeout_ms(Tag) -> rpc_caller_timeout_ms(Tag).
 
+%% 为服务器只读请求选择调用超时。
 -spec rpc_caller_timeout_ms(term()) -> pos_integer() | undefined.
 rpc_caller_timeout_ms(resolve_mention_sources_page) -> 4000;
 rpc_caller_timeout_ms(get_user_permissions) -> 4000;
@@ -91,6 +92,7 @@ rpc_caller_timeout_ms(get_assignable_roles) -> 4000;
 rpc_caller_timeout_ms(get_user_max_role_position) -> 4000;
 rpc_caller_timeout_ms(get_guild_data) -> 4000;
 rpc_caller_timeout_ms(get_guild_auth_context) -> 4000;
+rpc_caller_timeout_ms(get_guild_channel_authorization) -> 4000;
 rpc_caller_timeout_ms(get_guild_member) -> 4000;
 rpc_caller_timeout_ms(has_member) -> 4000;
 rpc_caller_timeout_ms(get_members_with_role) -> 4000;
@@ -364,9 +366,12 @@ handle_max_role_position(#{user_id := UserId}, State) ->
     Position = guild_permissions_check:get_max_role_position(UserId, State),
     {reply, #{position => Position}, State}.
 
+%% 将只读请求交给对应的数据查询实现。
 -spec handle_call_data(term(), guild_state()) -> {reply, term(), guild_state()}.
 handle_call_data({get_guild_data, Req}, State) ->
     guild_data:get_guild_data(request_map(Req), State);
+handle_call_data({get_guild_channel_authorization, Req}, State) ->
+    guild_data:get_channel_authorization(request_map(Req), State);
 handle_call_data({get_guild_auth_context, Req}, State) ->
     guild_data:get_auth_context(request_map(Req), State);
 handle_call_data({get_guild_member, Req}, State) ->

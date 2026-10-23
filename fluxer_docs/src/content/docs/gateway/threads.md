@@ -97,9 +97,9 @@ The session's active threads were replaced for a guild or for some of its channe
 
 <sup>1</sup> Absent when the event replaces every thread in the guild
 
-<sup>2</sup> With `channel_ids`, every active thread in those channels. Without it, every active thread in the guild for a bot session and for a session that set `threads`
+<sup>2</sup> Every viewable non-forum thread in the scope, plus active forum and media posts the user joined. The same directory policy applies to initial guild snapshots, bots, full subscriptions and channel-specific syncs.
 
-Without `channel_ids`, a user session that did not set `threads` receives the active threads it joined.
+Forum and media post discovery is provided externally. Setting `threads` or `member_lists` does not subscribe a nonmember to a post's messages, metadata or member list. Ordinary message creates, edits, deletes and reactions are delivered only to joined users who still have permission. A direct user mention can deliver its message to a permitted nonmember; the existing mention flow joins that user first when the post has capacity. Leaving stops ordinary delivery, while the user's own removal event is still delivered.
 
 - Fluxer sends it when [Lazy Request](#lazy-request-thread-options) sets `threads` to true for a session that had not set it. The event follows after a random delay below 5,000 ms.
 - Fluxer sends it when the guild reloads its thread state. A bot session, a session that set `threads`, and a user session that joined an active thread each receive one.

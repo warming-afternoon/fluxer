@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type {KVRateLimitResult} from '@pkgs/kv_client/src/IKVProvider';
+import type {KVGlobalAndBucketLimitResult, KVRateLimitResult} from '@pkgs/kv_client/src/IKVProvider';
 import type {
 	BucketConfig,
+	GlobalAndBucketLimitResult,
 	IRateLimitService,
 	RateLimitConfig,
 	RateLimitResult,
@@ -22,6 +23,14 @@ function getGlobalKey(identifier: string): string {
 }
 
 interface IRateLimitStore {
+	checkGlobalAndBucketLimit?(
+		globalKey: string,
+		globalLimit: number,
+		globalWindowMs: number,
+		bucketKey: string,
+		bucketLimit: number,
+		bucketWindowMs: number,
+	): Promise<KVGlobalAndBucketLimitResult>;
 	checkLeakyBucketLimit(key: string, limit: number, windowMs: number, cost: number): Promise<KVRateLimitResult>;
 	del(...keys: Array<string>): Promise<number>;
 	scan(pattern: string, count: number): Promise<Array<string>>;
@@ -102,6 +111,34 @@ export class RateLimitService implements IRateLimitService {
 		const key = getGlobalKey(identifier);
 		const result = await this.store.checkLeakyBucketLimit(key, limit, this.globalWindowMs, 1);
 		return createRateLimitResult(result, true);
+	}
+
+	/** 将有序全局与路由扣额映射为原有响应，保留不支持合并的存储路径。 */
+	async checkGlobalAndBucketLimit(
+		identifier: string,
+		globalLimit: number,
+		bucket: string,
+		config: BucketConfig,
+	): Promise<GlobalAndBucketLimitResult> {
+		const globalKey = getGlobalKey(identifier);
+		const bucketKey = getBucketKey(bucket);
+		if (this.store.checkGlobalAndBucketLimit) {
+			const result = await this.store.checkGlobalAndBucketLimit(
+				globalKey,
+				globalLimit,
+				this.globalWindowMs,
+				bucketKey,
+				config.limit,
+				config.windowMs,
+			);
+			return {
+				global: createRateLimitResult(result.global, true),
+				...(result.bucket && {bucket: createRateLimitResult(result.bucket)}),
+			};
+		}
+		const global = await this.checkGlobalLimit(identifier, globalLimit);
+		if (!global.allowed) return {global};
+		return {global, bucket: await this.checkBucketLimit(bucket, config)};
 	}
 
 	async resetLimit(identifier: string): Promise<void> {

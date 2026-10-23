@@ -54,6 +54,24 @@ describe('combined channel authorization configuration', () => {
 	});
 });
 
+describe('combined rate limiting configuration', () => {
+	it('maps the master setting and preserves the opt-in default', async () => {
+		const master = await loadConfig();
+		expect(
+			buildAPIConfigFromMaster({
+				...master,
+				services: {...master.services, api: {...master.services.api, combined_rate_limit_enabled: undefined}},
+			}).combinedRateLimitEnabled,
+		).toBe(false);
+		expect(
+			buildAPIConfigFromMaster({
+				...master,
+				services: {...master.services, api: {...master.services.api, combined_rate_limit_enabled: true}},
+			}).combinedRateLimitEnabled,
+		).toBe(true);
+	});
+});
+
 describe('buildAPIServerOptions', () => {
 	test('clamps a header timeout set above the request timeout', async () => {
 		const server = await listenWithEnv({

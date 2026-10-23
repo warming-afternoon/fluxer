@@ -303,6 +303,14 @@ describe('ConfigLoader', () => {
 		expect((await loadConfig()).services.api.combined_channel_auth_enabled).toBe(true);
 	});
 
+	test('combined rate limiting is opt-in through the formal configuration', async () => {
+		stubMinimalEnv();
+		expect((await loadConfig()).services.api.combined_rate_limit_enabled).toBe(false);
+		resetConfig();
+		vi.stubEnv('FLUXER_COMBINED_RATE_LIMIT_ENABLED', 'true');
+		expect((await loadConfig()).services.api.combined_rate_limit_enabled).toBe(true);
+	});
+
 	test('parses typed named environment variables', async () => {
 		stubMinimalEnv({
 			FLUXER_API_PORT: '9090',

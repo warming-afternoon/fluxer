@@ -5,6 +5,7 @@ import type {
 	IKVPipeline,
 	IKVProvider,
 	IKVSubscription,
+	KVGlobalAndBucketLimitResult,
 	KVPurgeBatchResult,
 	KVRateLimitResult,
 } from '@pkgs/kv_client/src/IKVProvider';
@@ -64,14 +65,8 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0
 `;
-const CHECK_LEAKY_BUCKET_LIMIT_SCRIPT = `
-${DECODE_BUCKET_STATE_SCRIPT}
-local key = KEYS[1]
-local nowMs = tonumber(ARGV[1])
-local limit = tonumber(ARGV[2])
-local windowMs = tonumber(ARGV[3])
-local cost = tonumber(ARGV[4])
-
+const LEAKY_BUCKET_CHECK_SCRIPT = `
+local function checkLeakyBucket(key, nowMs, limit, windowMs, cost)
 if not limit or limit <= 0 then
 	error('limit must be positive')
 end
@@ -117,14 +112,14 @@ local function leakyBucketRetryAfterMs(currentLevel)
 end
 
 local function createResult(allowed, remaining, resetAfterMs, retryAfterMs)
-	return cjson.encode({
+	return {
 		allowed = allowed,
 		limit = capacity,
 		remaining = remaining,
 		resetAfterMs = resetAfterMs,
 		resetAtMs = nowMs + resetAfterMs,
 		retryAfterMs = retryAfterMs,
-	})
+	}
 end
 
 if cost == 0 then
@@ -152,6 +147,23 @@ local resetAfterMs = leakyBucketResetAfterMs(level)
 local ttlMs = math.max(1, resetAfterMs)
 redis.call('SET', key, cjson.encode({level = level, updatedAt = updatedAt}), 'PX', ttlMs)
 return createResult(true, remaining, resetAfterMs, 0)
+end
+`;
+const CHECK_LEAKY_BUCKET_LIMIT_SCRIPT = `
+${DECODE_BUCKET_STATE_SCRIPT}
+${LEAKY_BUCKET_CHECK_SCRIPT}
+return cjson.encode(checkLeakyBucket(KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])))
+`;
+const CHECK_GLOBAL_AND_BUCKET_LIMIT_SCRIPT = `
+${DECODE_BUCKET_STATE_SCRIPT}
+${LEAKY_BUCKET_CHECK_SCRIPT}
+local nowMs = tonumber(ARGV[1])
+local global = checkLeakyBucket(KEYS[1], nowMs, tonumber(ARGV[2]), tonumber(ARGV[3]), 1)
+if not global.allowed then
+	return cjson.encode({global = global})
+end
+local bucket = checkLeakyBucket(KEYS[2], nowMs, tonumber(ARGV[4]), tonumber(ARGV[5]), 1)
+return cjson.encode({global = global, bucket = bucket})
 `;
 const SCHEDULE_BULK_DELETION_SCRIPT = `
 redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
@@ -539,6 +551,43 @@ export class KVClient implements IKVProvider {
 		return parseRateLimitResult(result);
 	}
 
+	/** 按全局、路由顺序扣额，单节点合并往返而集群仍使用单键调用。 */
+	async checkGlobalAndBucketLimit(
+		globalKey: string,
+		globalLimit: number,
+		globalWindowMs: number,
+		bucketKey: string,
+		bucketLimit: number,
+		bucketWindowMs: number,
+	): Promise<KVGlobalAndBucketLimitResult> {
+		// 集群跨槽不能执行多键脚本，保留原来的全局、路由顺序。
+		if (this.isClustered()) {
+			const global = await this.checkLeakyBucketLimit(globalKey, globalLimit, globalWindowMs, 1);
+			if (!global.allowed) return {global};
+			return {global, bucket: await this.checkLeakyBucketLimit(bucketKey, bucketLimit, bucketWindowMs, 1)};
+		}
+		const result = await this.executeJsonScript(
+			'checkGlobalAndBucketLimit',
+			CHECK_GLOBAL_AND_BUCKET_LIMIT_SCRIPT,
+			2,
+			globalKey,
+			bucketKey,
+			Date.now(),
+			globalLimit,
+			globalWindowMs,
+			bucketLimit,
+			bucketWindowMs,
+		);
+		if (!isJsonObject(result)) throw createInvalidResponseError('checkGlobalAndBucketLimit', 'a combined result');
+		const global = parseRateLimitResult(result.global);
+		if (!global.allowed) {
+			if (result.bucket !== undefined)
+				throw createInvalidResponseError('checkGlobalAndBucketLimit', 'no route on global rejection');
+			return {global};
+		}
+		return {global, bucket: parseRateLimitResult(result.bucket)};
+	}
+
 	async scheduleBulkDeletion(queueKey: string, secondaryKey: string, score: number, value: string): Promise<void> {
 		const result = await this.executeScript(
 			'scheduleBulkDeletion',
@@ -759,6 +808,7 @@ function parseIntegerDecision(value: unknown, command: string): boolean {
 	throw createInvalidResponseError(command, 'the integer 0 or 1');
 }
 
+/** 复用严格结果校验，避免未知提交被误当成可以再次扣额。 */
 function parseRateLimitResult(value: unknown): KVRateLimitResult {
 	const command = 'checkLeakyBucketLimit';
 	if (!isJsonObject(value)) throw createInvalidResponseError(command, 'a rate-limit result object');

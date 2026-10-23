@@ -101,6 +101,10 @@ export interface MasterConfig {
 			/** 是否合并频道上下文、成员及权限的网关查询。 */
 			combined_channel_auth_enabled?: boolean;
 
+
+			/** 是否合并单节点的全局与路由限流往返。 */
+			combined_rate_limit_enabled?: boolean;
+
 			/** 是否合并已读清通知与派发网关调用。 */
 			read_state_combined_gateway_rpc_enabled?: boolean;
 			/** 是否为会话已读请求只读取认证所需用户字段。 */

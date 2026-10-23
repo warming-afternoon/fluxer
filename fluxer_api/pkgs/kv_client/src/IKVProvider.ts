@@ -34,6 +34,15 @@ export interface KVRateLimitResult {
 	retryAfterMs: number;
 }
 
+/** 全局与路由桶按顺序扣额后的结果。 */
+export interface KVGlobalAndBucketLimitResult {
+	/** 全局限流结果，拒绝时不访问路由桶。 */
+	global: KVRateLimitResult;
+
+	/** 全局通过后才产生的路由桶结果。 */
+	bucket?: KVRateLimitResult;
+}
+
 export interface IKVProvider {
 	get(key: string): Promise<string | null>;
 	set(key: string, value: string, ...args: Array<string | number>): Promise<string | null>;
@@ -72,6 +81,15 @@ export interface IKVProvider {
 	acquireLock(key: string, token: string, ttlSeconds: number): Promise<boolean>;
 	releaseLock(key: string, token: string): Promise<boolean>;
 	extendLock(key: string, token: string, ttlSeconds: number): Promise<boolean>;
+	/** 全局拒绝时不改路由桶，集群模式保留原有单键顺序检查。 */
+	checkGlobalAndBucketLimit?(
+		globalKey: string,
+		globalLimit: number,
+		globalWindowMs: number,
+		bucketKey: string,
+		bucketLimit: number,
+		bucketWindowMs: number,
+	): Promise<KVGlobalAndBucketLimitResult>;
 	checkLeakyBucketLimit(key: string, limit: number, windowMs: number, cost: number): Promise<KVRateLimitResult>;
 	scheduleBulkDeletion(queueKey: string, secondaryKey: string, score: number, value: string): Promise<void>;
 	claimBulkDeletion(queueKey: string, member: string, maxScore: number, leaseScore: number): Promise<boolean>;

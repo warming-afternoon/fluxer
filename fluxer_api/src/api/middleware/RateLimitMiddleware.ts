@@ -165,6 +165,7 @@ async function revokeAuthenticatedSessionOnGlobalRateLimit(ctx: Context<HonoEnv>
 	} catch (_error) {}
 }
 
+/** 按原有扣额和拒绝顺序执行限流，仅在支持时合并存储往返。 */
 export function RateLimitMiddleware(routeConfig: RouteRateLimitConfig): MiddlewareHandler<HonoEnv> {
 	const routeBucketHash = getBucketHash(routeConfig.bucket);
 	const emailBucketHash = routeConfig.emailBucket ? getBucketHash(routeConfig.emailBucket.bucket) : undefined;
@@ -186,9 +187,21 @@ export function RateLimitMiddleware(routeConfig: RouteRateLimitConfig): Middlewa
 		const accountType = getAccountType(ctx);
 		const showHeaders = shouldShowHeadersOnSuccess(accountType);
 		const clientId = getClientIdentifier(ctx, routeConfig);
+		const bucket = resolveBucket(routeConfig.bucket, clientId, ctx);
+		const combinedResult =
+			Config.combinedRateLimitEnabled === true &&
+			!routeConfig.config.exemptFromGlobal &&
+			rateLimitService.checkGlobalAndBucketLimit
+				? await rateLimitService.checkGlobalAndBucketLimit(
+						clientId,
+						getGlobalRateLimit(ctx),
+						bucket,
+						routeConfig.config,
+					)
+				: null;
 		if (!routeConfig.config.exemptFromGlobal) {
 			const globalLimit = getGlobalRateLimit(ctx);
-			const globalResult = await rateLimitService.checkGlobalLimit(clientId, globalLimit);
+			const globalResult = combinedResult?.global ?? (await rateLimitService.checkGlobalLimit(clientId, globalLimit));
 			if (!globalResult.allowed) {
 				await revokeAuthenticatedSessionOnGlobalRateLimit(ctx);
 				throw new RateLimitError({
@@ -202,8 +215,10 @@ export function RateLimitMiddleware(routeConfig: RouteRateLimitConfig): Middlewa
 				});
 			}
 		}
-		const bucket = resolveBucket(routeConfig.bucket, clientId, ctx);
-		const bucketResult = await rateLimitService.checkBucketLimit(bucket, routeConfig.config);
+		const bucketResult = combinedResult
+			? combinedResult.bucket
+			: await rateLimitService.checkBucketLimit(bucket, routeConfig.config);
+		if (!bucketResult) throw new Error('Missing route result after combined global allowance');
 		if (!bucketResult.allowed) {
 			throw new RateLimitError({
 				retryAfter: getRetryAfterSeconds(bucketResult),

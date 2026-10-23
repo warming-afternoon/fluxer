@@ -109,6 +109,7 @@ function defaultConfig(): MasterConfig {
 				max_inflight_requests: 512,
 				instances: 2,
 				combined_channel_auth_enabled: false,
+				combined_rate_limit_enabled: false,
 				read_state_combined_gateway_rpc_enabled: false,
 				read_state_narrow_auth_enabled: false,
 				automated_message_deletion_delay_days: 7,
@@ -640,6 +641,7 @@ function normalizeConfig(config: MasterConfig): MasterConfig {
 		'FLUXER_READ_STATE_COMBINED_GATEWAY_RPC_ENABLED',
 	);
 	assertBoolean(config.services.api.combined_channel_auth_enabled ?? false, 'FLUXER_COMBINED_CHANNEL_AUTH_ENABLED');
+	assertBoolean(config.services.api.combined_rate_limit_enabled ?? false, 'FLUXER_COMBINED_RATE_LIMIT_ENABLED');
 	assertBoolean(config.services.api.read_state_narrow_auth_enabled ?? false, 'FLUXER_READ_STATE_NARROW_AUTH_ENABLED');
 	assertIntegerInRange(config.services.api.instances ?? 2, 'FLUXER_API_INSTANCES', 1, 512);
 	assertIntegerInRange(config.services.api.max_inflight_requests, 'FLUXER_API_MAX_INFLIGHT_REQUESTS', 1, 100_000);

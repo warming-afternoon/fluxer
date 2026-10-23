@@ -185,6 +185,7 @@ export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 		maxInflightRequests: master.services.api.max_inflight_requests,
 		apiInstances: master.services.api.instances ?? 2,
 		combinedChannelAuthEnabled: master.services.api.combined_channel_auth_enabled ?? false,
+		combinedRateLimitEnabled: master.services.api.combined_rate_limit_enabled ?? false,
 		readState: {
 			combinedGatewayRpcEnabled: master.services.api.read_state_combined_gateway_rpc_enabled ?? false,
 			narrowAuthEnabled: master.services.api.read_state_narrow_auth_enabled ?? false,

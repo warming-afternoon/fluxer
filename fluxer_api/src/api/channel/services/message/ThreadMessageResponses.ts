@@ -145,15 +145,21 @@ export class ThreadMessageResponses {
 		return this.buildStarter(params);
 	}
 
+	/** 按已验证的消息历史权限过滤帖子预览，避免批量接口绕过截止时间。 */
 	async getFirstMessages(params: {
 		userId: UserID;
 		guildId: GuildID;
 		canReadMessageHistory: boolean;
+		messageHistoryCutoff: string | null;
 		threadIds: Array<ChannelID>;
 	}): Promise<Map<string, MessageResponse>> {
-		if (params.threadIds.length === 0) return new Map();
+		const cutoff = params.messageHistoryCutoff ? new Date(params.messageHistoryCutoff).getTime() : null;
+		const readableIds = params.threadIds.filter(
+			(id) => params.canReadMessageHistory || (cutoff !== null && snowflakeToDate(id).getTime() >= cutoff),
+		);
+		if (readableIds.length === 0) return new Map();
 		const messages = await Promise.all(
-			params.threadIds.map((threadId) =>
+			readableIds.map((threadId) =>
 				this.channelRepository.messages.getMessage(threadId, channelIdToMessageId(threadId)),
 			),
 		);
@@ -163,7 +169,7 @@ export class ThreadMessageResponses {
 			messages: found,
 			access: {
 				sourceGuildId: params.guildId,
-				messageHistoryCutoff: null,
+				messageHistoryCutoff: params.messageHistoryCutoff,
 				canReadMessageHistory: params.canReadMessageHistory,
 			},
 		});

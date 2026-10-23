@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type {ChannelID, GuildID, MessageID, UserID} from '@app/api/BrandedTypes';
+import {type ChannelID, createMessageID, type GuildID, type MessageID, type UserID} from '@app/api/BrandedTypes';
 import type {ChannelRepository} from '@app/api/channel/ChannelRepository';
 import {mapThreadMemberToRpcResponse, mapThreadToRpcResponse} from '@app/api/channel/services/thread/ThreadMappers';
 import {mapThreadParentFields} from '@app/api/channel/services/thread/ThreadParentSettings';
@@ -19,6 +19,7 @@ import type {
 	ThreadMemberRpcResponse,
 	ThreadParentSettingsRpcResponse,
 } from '@fluxer/schema/src/domains/channel/ThreadSchemas';
+import {createSnowflakeFromTimestamp, FLUXER_EPOCH} from '@fluxer/snowflake/src/Snowflake';
 
 const MEMBER_PAGE_SIZE = 1000;
 const MEMBER_LOAD_CONCURRENCY = 16;
@@ -129,31 +130,37 @@ export interface ForumUnreadRpcEntry {
 	missing?: true;
 }
 
+/** 仅统计授权通过的帖子，并按消息历史截止时间限制计数范围。 */
 export async function loadForumUnreads(
 	repository: ChannelRepository,
 	params: {
 		guildId: GuildID;
 		channelId: ChannelID;
 		threads: Array<{threadId: ChannelID; ackMessageId?: MessageID}>;
+		/** 已经按真实频道和线程权限验证的范围。 */
+		visibleThreadIds: ReadonlySet<ChannelID>;
+
+		/** 是否可以读取完整消息历史。 */
+		canReadMessageHistory: boolean;
+
+		/** 无完整历史权限时允许读取的最早时间。 */
+		messageHistoryCutoff: string | null;
 	},
 ): Promise<Array<ForumUnreadRpcEntry>> {
-	const states = await repository.threads.getStates(params.threads.map((thread) => thread.threadId));
-	const inForum = new Set(
-		states
-			.filter((state) => state.guildId === params.guildId && state.parentId === params.channelId)
-			.map((state) => state.threadId),
-	);
+	const cutoff = params.messageHistoryCutoff ? new Date(params.messageHistoryCutoff).getTime() : null;
+	const cutoffId =
+		cutoff !== null && Number.isFinite(cutoff)
+			? createMessageID(createSnowflakeFromTimestamp(Math.max(cutoff, Number(FLUXER_EPOCH))) - 1n)
+			: null;
 	return Promise.all(
 		params.threads
-			.filter((thread) => inForum.has(thread.threadId))
+			.filter((thread) => params.visibleThreadIds.has(thread.threadId))
 			.map(async ({threadId, ackMessageId}): Promise<ForumUnreadRpcEntry> => {
 				if (ackMessageId === undefined) return {thread_id: threadId.toString(), missing: true};
-				const unread = await repository.messages.listMessages(
-					threadId,
-					undefined,
-					FORUM_UNREAD_COUNT_CAP,
-					ackMessageId,
-				);
+				if (!params.canReadMessageHistory && cutoffId === null) return {thread_id: threadId.toString(), count: 0};
+				const after =
+					!params.canReadMessageHistory && cutoffId !== null && cutoffId > ackMessageId ? cutoffId : ackMessageId;
+				const unread = await repository.messages.listMessages(threadId, undefined, FORUM_UNREAD_COUNT_CAP, after);
 				return {thread_id: threadId.toString(), count: unread.length};
 			}),
 	);

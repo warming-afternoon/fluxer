@@ -210,6 +210,35 @@ const TagQueryType = z.preprocess(
 
 const THREAD_SEARCH_ARCHIVED_VALUES = ['true', 'false', 'True', 'False', '1', '0'];
 
+export const ThreadDirectoryQuery = withSchemaMetadata(
+	z.object({
+		archived: z
+			.enum(['true', 'false'])
+			.default('false')
+			.transform((value) => value === 'true'),
+		tag: TagQueryType.optional(),
+		tag_setting: ForumTagSettingSchema.optional(),
+		cursor: createStringType(1, 128).optional(),
+		limit: createQueryIntegerType({defaultValue: 50, minValue: 1, maxValue: 100}),
+	}),
+	EXPERIMENT,
+);
+
+export type ThreadDirectoryQuery = z.infer<typeof ThreadDirectoryQuery>;
+
+export const ThreadDirectoryResponse = withSchemaMetadata(
+	z.object({
+		threads: z.array(ThreadChannelResponse),
+		members: z.array(ThreadMemberResponse),
+		pinned_thread: ThreadChannelResponse.nullable(),
+		next_cursor: z.string().nullable(),
+		has_more: z.boolean().describe('Whether scanning can continue; a page may contain no visible threads'),
+	}),
+	EXPERIMENT,
+);
+
+export type ThreadDirectoryResponse = z.infer<typeof ThreadDirectoryResponse>;
+
 export const ThreadSearchSortBySchema = z
 	.enum(['last_message_time', 'archive_time', 'relevance', 'creation_time'])
 	.describe('The sorting algorithm to use');

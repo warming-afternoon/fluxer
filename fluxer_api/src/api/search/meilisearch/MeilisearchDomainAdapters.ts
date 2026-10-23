@@ -315,11 +315,16 @@ function threadCursorFilter(cursor: ThreadSearchCursor, op: '>' | '<'): Meilisea
 	return `(createdAt ${op} ${cursor.createdAt} OR (createdAt = ${cursor.createdAt} AND idSequence ${op} ${cursor.idSequence}))`;
 }
 
+/** 构造线程搜索条件，将显式帖子范围与现有权限条件合并 */
 function buildThreadFilters(filters: ThreadSearchFilters): Array<MeilisearchFilter | undefined> {
 	const clauses: Array<MeilisearchFilter | undefined> = [
 		meiliTermFilter('guildId', filters.guildId),
 		meiliTermFilter('parentId', filters.parentId),
 	];
+	// 空范围必须返回空结果，不能退化为整个社区的帖子
+	if (filters.threadIds !== undefined) {
+		clauses.push(meiliTermsFilter('id', filters.threadIds) ?? 'id = ""');
+	}
 	if (filters.publicOnly) {
 		const privateIds = meiliTermsFilter('id', filters.privateThreadIds ?? []);
 		const publicTypes = meiliTermsFilter('type', [10, 11]);

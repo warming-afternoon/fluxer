@@ -256,15 +256,39 @@ export interface ThreadSearchCursor {
 }
 
 export interface ThreadSearchFilters {
+	/** 所属社区 */
 	guildId: string;
+
+	/** 所属父频道 */
 	parentId: string;
+
+	/** 是否仅包含公开或允许访问的私有线程 */
 	publicOnly?: boolean;
+
+	/** 允许访问的私有线程编号 */
 	privateThreadIds?: Array<string>;
+
+	/** 允许返回的线程编号，空数组表示无可见结果，省略表示不额外限制 */
+	threadIds?: Array<string>;
+
+	/** 是否已归档 */
 	archived?: boolean;
+
+	/** 筛选标签编号 */
 	tagIds?: Array<string>;
+
+	/** 标签匹配方式 */
 	tagSetting?: 'match_some' | 'match_all';
+
+	/** 结果范围的起始游标 */
 	after?: ThreadSearchCursor;
+
+	/** 结果范围的结束游标 */
 	before?: ThreadSearchCursor;
+
+	/** 排序依据 */
 	sortBy?: 'last_message_time' | 'archive_time' | 'relevance' | 'creation_time';
+
+	/** 排序方向 */
 	sortOrder?: 'asc' | 'desc';
 }

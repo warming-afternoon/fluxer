@@ -14,6 +14,8 @@ import {
 	ChannelIdTagIdParam,
 	ForumTagRequest,
 	SearchIndexNotReadyResponse,
+	ThreadDirectoryQuery,
+	ThreadDirectoryResponse,
 	ThreadPostDataRequest,
 	ThreadPostDataResponse,
 	ThreadSearchQuery,
@@ -36,6 +38,35 @@ function tagEditParams(ctx: Context<HonoEnv>) {
 }
 
 export function ForumController(app: HonoApp) {
+	app.get(
+		'/channels/:channel_id/threads/directory',
+		ChannelThreadsRouteGuard(),
+		RateLimitMiddleware(RateLimitConfigs.CHANNEL_THREADS_SEARCH),
+		LoginRequired,
+		Validator('param', ChannelIdParam),
+		Validator('query', ThreadDirectoryQuery),
+		OpenAPI({
+			operationId: 'list_thread_directory',
+			summary: 'List the thread directory',
+			description:
+				'Returns visible threads ordered by creation time descending. Continue with next_cursor even when a page is empty. Expired or mismatched cursors return a validation error on cursor.',
+			responseSchema: ThreadDirectoryResponse,
+			statusCode: 200,
+			security: ['botToken', 'sessionToken'],
+			tags: TAGS,
+			experiment: EXPERIMENT,
+		}),
+		async (ctx) => {
+			return ctx.json(
+				await ctx.get('threadService').directory.list({
+					viewer: viewerFromCtx(ctx),
+					userId: ctx.get('user').id,
+					channelId: createChannelID(ctx.req.valid('param').channel_id),
+					query: ctx.req.valid('query'),
+				}),
+			);
+		},
+	);
 	app.get(
 		'/channels/:channel_id/threads/search',
 		ChannelThreadsRouteGuard(),

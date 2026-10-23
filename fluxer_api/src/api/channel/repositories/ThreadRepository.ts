@@ -862,6 +862,26 @@ export class ThreadRepository {
 		});
 	}
 
+	/** 按创建时间倒序读取单个父频道的有界目录批次 */
+	async listDirectoryThreadIds(
+		parentId: ChannelID,
+		opts: {before?: ChannelID; limit: number},
+	): Promise<Array<ChannelID>> {
+		// 保留维护任务使用的 after 升序接口，目录单独使用严格小于游标
+		const query = ThreadsByParent.select({
+			where:
+				opts.before !== undefined
+					? [ThreadsByParent.where.eq('parent_id'), ThreadsByParent.where.lt('thread_id', 'before')]
+					: ThreadsByParent.where.eq('parent_id'),
+			orderBy: {col: 'thread_id', direction: 'DESC'},
+			limit: opts.limit,
+		});
+		const rows = await fetchMany<ThreadsByParentRow>(
+			query.bind(opts.before !== undefined ? {parent_id: parentId, before: opts.before} : {parent_id: parentId}),
+		);
+		return rows.map((row) => row.thread_id);
+	}
+
 	async listThreadIdsByParent(
 		parentId: ChannelID,
 		opts: {after?: ChannelID; limit: number},

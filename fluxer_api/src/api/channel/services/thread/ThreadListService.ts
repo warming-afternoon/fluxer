@@ -22,8 +22,10 @@ import type {
 } from '@fluxer/schema/src/domains/channel/ThreadRequestSchemas';
 
 export class ThreadListService {
+	/** 注入线程目录所需的业务依赖 */
 	constructor(private readonly ctx: ThreadServiceContext) {}
 
+	/** 按频道和私有线程权限返回活跃目录，不以关注关系限制公开帖子。 */
 	async listGuildActive(params: {userId: UserID; guildId: GuildID}): Promise<ActiveThreadsResponse> {
 		const {guildId, userId} = params;
 		const guild = await this.ctx.gatewayService.getGuildData({guildId, userId});
@@ -34,7 +36,14 @@ export class ThreadListService {
 		]);
 		const viewable = new Set(viewableChannelIds.map((id) => id.toString()));
 		const joined = new Set(joinedThreadIds);
-		const candidates = states.filter((state) => viewable.has(state.parentId.toString()));
+		// 批量验证父频道存在，保留原有目录访问与私有线程检查。
+		const parents = await this.ctx.channelRepository.channelData.listChannels([
+			...new Set(states.map((state) => state.parentId)),
+		]);
+		const parentTypes = new Map(parents.map((parent) => [parent.id, parent.type]));
+		const candidates = states.filter(
+			(state) => viewable.has(state.parentId.toString()) && parentTypes.has(state.parentId),
+		);
 		const memberships = await this.memberships(
 			candidates.filter((state) => joined.has(state.threadId)),
 			userId,
@@ -78,6 +87,7 @@ export class ThreadListService {
 		return views.map((view) => mapThreadToResponse(view));
 	}
 
+	/** 按归档时间和实际访问权限返回兼容的旧分页结果。 */
 	async listPublicArchived(params: {
 		viewer: ThreadViewer;
 		userId: UserID;

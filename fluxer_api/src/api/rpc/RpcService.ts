@@ -16,8 +16,10 @@ import {
 import {Config} from '@app/api/Config';
 import {mapChannelToResponse} from '@app/api/channel/ChannelMappers';
 import type {ChannelRepository} from '@app/api/channel/ChannelRepository';
+import {ChannelAuthService} from '@app/api/channel/services/channel_data/ChannelAuthService';
 import {buildBroadcastMessageData} from '@app/api/channel/services/message/MessageGatewayDispatch';
 import {ensurePersonalNotesChannelExists} from '@app/api/channel/services/PersonalNotesChannelRepair';
+import {filterThreadDiscoveryStates} from '@app/api/channel/services/thread/ThreadDiscoveryAccess';
 import {withThreadParentFieldsMany} from '@app/api/channel/services/thread/ThreadParentSettings';
 import {
 	listThreadMembersPage,
@@ -29,6 +31,7 @@ import {getChannelThreadsConfig, isTainted, type ThreadViewer} from '@app/api/ex
 import {mapFavoriteMemeToResponse} from '@app/api/favorite_meme/FavoriteMemeModel';
 import type {FavoriteMemeRepository} from '@app/api/favorite_meme/FavoriteMemeRepository';
 import {
+	isGuildMemberTimedOut,
 	mapGuildEmojiToResponse,
 	mapGuildMemberToResponse,
 	mapGuildRoleToResponse,
@@ -99,7 +102,12 @@ import type {VoiceService} from '@app/api/voice/VoiceService';
 import type {WebhookRepository} from '@app/api/webhook/WebhookRepository';
 import {ensureGuildThreadPermissionsSeeded} from '@app/api/worker/tasks/SeedThreadPermissions';
 import type {WorkerTaskName} from '@app/api/worker/WorkerLaneConfig';
-import {AUTOMATIC_VOICE_REGION_ID, ChannelTypes, MessageTypes} from '@fluxer/constants/src/ChannelConstants';
+import {
+	AUTOMATIC_VOICE_REGION_ID,
+	ChannelTypes,
+	MessageTypes,
+	Permissions,
+} from '@fluxer/constants/src/ChannelConstants';
 import type {LimitKey} from '@fluxer/constants/src/LimitConfigMetadata';
 import {MAX_PRIVATE_CHANNELS_PER_USER} from '@fluxer/constants/src/LimitConstants';
 import {THREAD_ONLY_CHANNEL_TYPES} from '@fluxer/constants/src/ThreadConstants';
@@ -554,13 +562,47 @@ export class RpcService {
 						after: request.after_user_id !== undefined ? createUserID(request.after_user_id) : undefined,
 					}),
 				};
-			case 'forum_unreads':
+			case 'forum_unreads': {
+				const userId = createUserID(request.user_id);
+				const guildId = createGuildID(request.guild_id);
+				const auth = await new ChannelAuthService(
+					this.channelRepository,
+					this.userRepository,
+					this.guildRepository,
+					this.gatewayService,
+				).getChannelAuthenticated({
+					userId,
+					channelId: createChannelID(request.channel_id),
+					viewer: {kind: 'user', userId, bot: false, capable: true},
+				});
+				if (auth.channel.guildId !== guildId || !THREAD_ONLY_CHANNEL_TYPES.has(auth.channel.type)) {
+					return {type: 'forum_unreads', data: {threads: []}};
+				}
+				const visible = await filterThreadDiscoveryStates(
+					{
+						channelRepository: this.channelRepository,
+						parentActor: async () => ({
+							permissions: await this.gatewayService.getUserPermissions({guildId, userId, channelId: auth.channel.id}),
+							isOwner: auth.guild?.owner_id === userId.toString(),
+							timedOut: isGuildMemberTimedOut(auth.member),
+						}),
+					},
+					auth,
+					userId,
+					await this.channelRepository.threads.getStates(
+						request.threads.map((thread) => createChannelID(thread.thread_id)),
+					),
+				);
+				const canReadMessageHistory = await auth.hasPermission(Permissions.READ_MESSAGE_HISTORY);
 				return {
 					type: 'forum_unreads',
 					data: {
 						threads: await loadForumUnreads(this.channelRepository, {
 							guildId: createGuildID(request.guild_id),
 							channelId: createChannelID(request.channel_id),
+							visibleThreadIds: new Set(visible.map((state) => state.threadId)),
+							canReadMessageHistory,
+							messageHistoryCutoff: canReadMessageHistory ? null : (auth.guild?.message_history_cutoff ?? null),
 							threads: request.threads.map((thread) => ({
 								threadId: createChannelID(thread.thread_id),
 								ackMessageId: thread.ack_message_id !== undefined ? createMessageID(thread.ack_message_id) : undefined,
@@ -568,6 +610,7 @@ export class RpcService {
 						}),
 					},
 				};
+			}
 			case 'guild_thread_flip_data':
 				return {
 					type: 'guild_thread_flip_data',

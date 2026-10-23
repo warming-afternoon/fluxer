@@ -13,6 +13,7 @@
     state_opts/1,
     is_thread_only_type/1,
     thread/2,
+    directory_allowed/3,
     is_thread_id/2,
     channel_visible/3,
     pre_update_filter/3,
@@ -185,6 +186,26 @@ safe_get_thread(Tab, ThreadId) ->
 is_thread_id(ChannelId, State) ->
     thread(ChannelId, State) =/= undefined.
 
+%% 论坛和媒体目录仅包含已加入帖子，普通文本线程沿用现有可见规则
+-spec directory_allowed(integer() | undefined, map(), guild_state()) -> boolean().
+directory_allowed(UserId, Thread, State) ->
+    ParentId = guild_thread_permissions:parent_id(Thread),
+    case is_thread_only_type(channel_type(ParentId, State)) of
+        true ->
+            ThreadId = snowflake_id:parse(maps:get(<<"id">>, Thread)),
+            case thread(ThreadId, State) of
+                undefined ->
+                    lists:member(
+                        UserId,
+                        snowflake_id:parse_list(maps:get(<<"_fluxer_member_ids">>, Thread, []))
+                    );
+                _ ->
+                    is_thread_member(UserId, ThreadId, State)
+            end;
+        false ->
+            true
+    end.
+
 -spec is_gated_channel_id(integer(), guild_state()) -> boolean().
 is_gated_channel_id(ChannelId, State) ->
     case active(State) orelse tainted(State) of
@@ -310,6 +331,7 @@ viewer_sessions(Sessions) ->
         fun(_Sid, Session) -> is_map(Session) andalso session_viewer(Session) end, Sessions
     ).
 
+%% 筛选线程事件的在线接收者，并保留最终的会话和权限检查
 -spec thread_sessions(atom(), map(), integer(), map(), binary() | undefined, guild_state()) ->
     [session_pair()].
 thread_sessions(Event, Data, ThreadId, Thread, SessionIdOpt, State) ->
@@ -325,7 +347,7 @@ thread_sessions(Event, Data, ThreadId, Thread, SessionIdOpt, State) ->
                 Sid =/= SessionIdOpt andalso is_map(Session) andalso
                     session_viewer(Session) andalso
                     maps:get(pending_connect, Session, false) =/= true andalso
-                    thread_interested(Session, ThreadId, State)
+                    delivery_interested(Event, Data, Session, ThreadId, Thread, State)
             of
                 true ->
                     {Ok, Memo1} = thread_access(Session, Ctx, Memo),
@@ -338,6 +360,21 @@ thread_sessions(Event, Data, ThreadId, Thread, SessionIdOpt, State) ->
         maps:get(sessions, State, #{})
     ),
     Pairs.
+
+%% 普通论坛事件要求成员资格，消息创建允许带权限检查的直接提及例外
+-spec delivery_interested(atom(), map(), map(), integer(), map(), guild_state()) -> boolean().
+delivery_interested(Event, Data, Session, ThreadId, Thread, State) ->
+    UserId = maps:get(user_id, Session, undefined),
+    (directory_allowed(UserId, Thread, State) andalso
+        thread_interested(Session, ThreadId, State)) orelse
+        (Event =:= message_create andalso is_integer(UserId) andalso
+            lists:any(
+                fun
+                    (#{<<"id">> := Id}) -> snowflake_id:parse_maybe(Id) =:= UserId;
+                    (_) -> false
+                end,
+                maps:get(<<"mentions">>, Data, [])
+            )).
 
 -spec prepend(boolean(), binary(), map(), [session_pair()]) -> [session_pair()].
 prepend(true, Sid, Session, Acc) -> [{Sid, Session} | Acc];

@@ -375,6 +375,7 @@ presence(UserId, Ctx) ->
 null_if_undefined(undefined) -> null;
 null_if_undefined(Value) -> Value.
 
+%% 按目录成员规则、订阅意愿与权限筛选线程事件接收者
 -spec recipients(
     map() | undefined,
     [session_pair()],
@@ -390,7 +391,13 @@ recipients(Thread, Viewers, State, Wants, Memo0) ->
     {Pairs, Memo} = lists:foldl(
         fun({_Sid, Session} = Pair, {Acc, Memo1}) ->
             case
-                Wants(Session, (not Small) andalso session_passive:is_passive(GuildId, Session))
+                guild_thread_gate:directory_allowed(
+                    maps:get(user_id, Session, undefined), Thread, State
+                ) andalso
+                    Wants(
+                        Session,
+                        (not Small) andalso session_passive:is_passive(GuildId, Session)
+                    )
             of
                 true ->
                     case guild_thread_gate:thread_view_access(Session, Thread, State, Memo1) of

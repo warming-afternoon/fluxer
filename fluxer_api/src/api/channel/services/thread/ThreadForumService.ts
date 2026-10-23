@@ -3,6 +3,7 @@
 import {type ChannelID, createUserID, type UserID} from '@app/api/BrandedTypes';
 import type {AuthenticatedChannel} from '@app/api/channel/services/AuthenticatedChannel';
 import {assertThreadAllowed} from '@app/api/channel/services/thread/ThreadDenials';
+import {filterThreadDiscoveryStates} from '@app/api/channel/services/thread/ThreadDiscoveryAccess';
 import {mapThreadMemberToResponse, mapThreadToResponse} from '@app/api/channel/services/thread/ThreadMappers';
 import type {ThreadServiceContext} from '@app/api/channel/services/thread/ThreadServiceContext';
 import {loadThreadViews} from '@app/api/channel/services/thread/ThreadViews';
@@ -16,6 +17,7 @@ import {
 	searchThreadDocuments,
 	threadSearchCursor,
 } from '@app/api/search/thread/ThreadSearchService';
+import {Permissions} from '@fluxer/constants/src/ChannelConstants';
 import {
 	ForumTagSettings,
 	THREAD_ONLY_CHANNEL_TYPES,
@@ -40,8 +42,10 @@ const SEARCH_INDEX_RETRY_AFTER_SECONDS = 2;
 const MAX_SEARCH_PRIVATE_THREAD_IDS = 1000;
 
 export class ThreadForumService {
+	/** 注入论坛帖子查询所需的业务依赖 */
 	constructor(private readonly ctx: ThreadServiceContext) {}
 
+	/** 按真实访问权限批量返回帖子的作者与首条消息。 */
 	async postData(params: {
 		viewer: ThreadViewer;
 		userId: UserID;
@@ -53,14 +57,21 @@ export class ThreadForumService {
 		const guildId = parentAuth.channel.guildId!;
 		const {threads, channelData} = this.ctx.channelRepository;
 		const requestedIds = [...new Set(params.threadIds)];
-		const states = (await threads.getStates(requestedIds)).filter((state) => state.parentId === parentAuth.channel.id);
+		const states = await filterThreadDiscoveryStates(
+			this.ctx,
+			parentAuth,
+			params.userId,
+			await threads.getStates(requestedIds),
+		);
+		const canReadMessageHistory = await parentAuth.hasPermission(Permissions.READ_MESSAGE_HISTORY);
 		const threadIds = states.map((state) => state.threadId);
 		const [channels, firstMessages] = await Promise.all([
 			channelData.listChannels(threadIds),
 			this.ctx.threadMessageResponses.getFirstMessages({
 				userId: params.userId,
 				guildId,
-				canReadMessageHistory: true,
+				canReadMessageHistory,
+				messageHistoryCutoff: canReadMessageHistory ? null : (parentAuth.guild?.message_history_cutoff ?? null),
 				threadIds,
 			}),
 		]);
@@ -84,7 +95,7 @@ export class ThreadForumService {
 		const ownerByThread = new Map(channels.map((channel) => [channel.id.toString(), channel.ownerId?.toString()]));
 		return {
 			threads: Object.fromEntries(
-				requestedIds.map((threadId) => {
+				threadIds.map((threadId) => {
 					const key = threadId.toString();
 					const ownerId = ownerByThread.get(key);
 					return [
@@ -99,6 +110,7 @@ export class ThreadForumService {
 		};
 	}
 
+	/** 在已有频道和私有线程权限范围内搜索帖子。 */
 	async search(params: {
 		viewer: ThreadViewer;
 		userId: UserID;
@@ -164,9 +176,12 @@ export class ThreadForumService {
 		});
 		if (!result) throw new FeatureTemporarilyDisabledError();
 		const order = searchHitThreadIds(result);
-		const states = (await threads.getStates(order)).filter(
-			(state) =>
-				state.parentId === parent.id && (moderator || !state.isPrivate || joinedPrivate.has(state.threadId.toString())),
+		const states = await filterThreadDiscoveryStates(
+			this.ctx,
+			parentAuth,
+			params.userId,
+			await threads.getStates(order),
+			actor,
 		);
 		const views = await loadThreadViews(this.ctx.channelRepository, states, [parent]);
 		const viewById = new Map(views.map((view) => [view.state.threadId.toString(), view]));
@@ -185,10 +200,12 @@ export class ThreadForumService {
 			total_results: result.total,
 		};
 		if (THREAD_ONLY_CHANNEL_TYPES.has(parent.type)) {
+			const canReadMessageHistory = await parentAuth.hasPermission(Permissions.READ_MESSAGE_HISTORY);
 			const firstMessages = await this.ctx.threadMessageResponses.getFirstMessages({
 				userId: params.userId,
 				guildId,
-				canReadMessageHistory: true,
+				canReadMessageHistory,
+				messageHistoryCutoff: canReadMessageHistory ? null : (parentAuth.guild?.message_history_cutoff ?? null),
 				threadIds,
 			});
 			response.first_messages = threadIds.flatMap((threadId) => {

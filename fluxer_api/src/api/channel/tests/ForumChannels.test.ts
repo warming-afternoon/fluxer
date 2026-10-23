@@ -545,8 +545,8 @@ describe('forum and media channels', () => {
 				.post(`/channels/${s.forumId}/post-data`)
 				.body({thread_ids: [created.id, '1']})
 				.execute();
-			expect(Object.keys(data.threads).sort()).toEqual([created.id, '1'].sort());
-			expect(data.threads['1']).toEqual({owner: null, first_message: null});
+			expect(Object.keys(data.threads)).toEqual([created.id]);
+			expect(data.threads['1']).toBeUndefined();
 			expect(data.threads[created.id]?.owner?.user.id).toBe(s.member.userId);
 			expect(data.threads[created.id]?.first_message?.id).toBe(created.id);
 		});

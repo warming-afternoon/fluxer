@@ -23,14 +23,31 @@ guild_threads(UserId, _Opts, Member, State) ->
             directory_threads(UserId, Member, Tab, State)
     end.
 
-%% 根据候选索引构造目录并附带用户自身的成员信息
+%% 构造当前用户可见的目录子频道及自身成员信息。
 -spec directory_threads(integer(), map() | undefined, ets:table(), guild_state()) -> [map()].
 directory_threads(UserId, Member, Tab, State) ->
     [
         with_own_member(UserId, Thread, Tab)
-     || Thread <- candidate_threads(all, UserId, Tab, State),
-        can_view(UserId, Thread, Member, State)
+     || Thread <- visible_candidates(
+            UserId, candidate_threads(all, UserId, Tab, State), Member, State
+        )
     ].
+
+%% 在同一遍历内复用父权限且保留可见结果顺序。
+-spec visible_candidates(integer(), [map()], map() | undefined, guild_state()) -> [map()].
+visible_candidates(UserId, Threads, Member, State) ->
+    %% 权限缓存由本次遍历创建，结果顺序与输入候选保持一致。
+    {Results, _} = lists:mapfoldl(
+        fun(Thread, Cache) ->
+            {Perms, Next} = guild_thread_permissions:resolve_cached(
+                UserId, Thread, Member, State, Cache
+            ),
+            {{Thread, bitset:has(Perms, constants:view_channel_permission())}, Next}
+        end,
+        #{},
+        Threads
+    ),
+    [Thread || {Thread, true} <- Results].
 
 -spec with_own_member(integer(), map(), ets:table()) -> map().
 with_own_member(UserId, Thread, Tab) ->
@@ -58,6 +75,7 @@ can_view(UserId, Thread, Member, State) ->
     bitset:has(Perms, constants:view_channel_permission()).
 
 %% 过滤指定同步范围内的成员资格和访问权限
+%% 筛选目录门允许且当前成员可见的子频道。
 -spec viewable_thread_ids(
     integer(), [integer()] | all | joined, map() | undefined, guild_state()
 ) ->
@@ -67,11 +85,14 @@ viewable_thread_ids(UserId, Parents, Member, State) ->
         undefined ->
             [];
         Tab ->
+            Candidates = [
+                Thread
+             || Thread <- candidate_threads(Parents, UserId, Tab, State),
+                guild_thread_gate:directory_allowed(UserId, Thread, State)
+            ],
             [
                 {thread_id(Thread), Thread}
-             || Thread <- candidate_threads(Parents, UserId, Tab, State),
-                guild_thread_gate:directory_allowed(UserId, Thread, State),
-                can_view(UserId, Thread, Member, State)
+             || Thread <- visible_candidates(UserId, Candidates, Member, State)
             ]
     end.
 

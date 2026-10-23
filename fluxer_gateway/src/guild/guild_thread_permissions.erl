@@ -5,6 +5,7 @@
 
 -export([
     resolve/4,
+    resolve_cached/5,
     parent_id/1,
     unknown_parent_count/0,
     init_counters/0
@@ -17,21 +18,43 @@
 -type permission() :: non_neg_integer().
 -type guild_state() :: map().
 
+%% 使用独立遍历缓存解析单个子频道权限。
 -spec resolve(integer(), map(), map() | undefined, guild_state()) -> permission().
 resolve(UserId, Thread, Member, State) ->
+    {Perms, _} = resolve_cached(UserId, Thread, Member, State, #{}),
+    Perms.
+
+%% 仅复用本次遍历的父权限并逐子频道校验成员和超时。
+-spec resolve_cached(integer(), map(), map() | undefined, guild_state(), map()) ->
+    {permission(), map()}.
+resolve_cached(UserId, Thread, Member, State, Cache) ->
+    %% 缓存只保存父权限，私有成员关系和超时仍逐子频道判断。
     case parent_channel(Thread, State) of
         undefined ->
             note_unknown_parent(),
-            0;
+            {0, Cache};
         ParentId ->
-            ParentPerms = guild_permissions:compute_member_permissions(
-                UserId, ParentId, Member, State
+            {Perms, NextCache} = cached_parent_permissions(
+                UserId, ParentId, Member, State, Cache
             ),
-            Perms = alias_permissions(ParentPerms),
             case can_view_thread_from_parent(UserId, Thread, Perms, Member, State) of
-                true -> Perms;
-                false -> Perms band bnot constants:view_channel_permission()
+                true -> {Perms, NextCache};
+                false -> {Perms band bnot constants:view_channel_permission(), NextCache}
             end
+    end.
+
+%% 按父频道缓存当前用户及状态的权限计算。
+-spec cached_parent_permissions(integer(), integer(), map() | undefined, guild_state(), map()) ->
+    {permission(), map()}.
+cached_parent_permissions(UserId, ParentId, Member, State, Cache) ->
+    case maps:find(ParentId, Cache) of
+        {ok, Perms} ->
+            {Perms, Cache};
+        error ->
+            Perms = alias_permissions(
+                guild_permissions:compute_member_permissions(UserId, ParentId, Member, State)
+            ),
+            {Perms, Cache#{ParentId => Perms}}
     end.
 
 -spec alias_permissions(permission()) -> permission().

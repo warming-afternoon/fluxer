@@ -53,17 +53,76 @@ class ChannelThreads {
 	private readonly threadIdsByParent = observable.map<string, ReadonlyArray<string>>();
 	private readonly threadIdsByGuild = observable.map<string, ReadonlyArray<string>>();
 	private readonly parentByThread = new Map<string, {guildId: string; parentId: string}>();
+	private readonly directoryReferences = new Map<string, ReadonlySet<string>>();
+	// 保留提及消息依赖的模型，关注同步和目录释放不代表失去该消息的访问权限。
+	private readonly messageContextReferences = new Set<string>();
+	private lifecycleGeneration = 0;
+	private mentionReferences: ReadonlySet<string> = new Set();
 
 	constructor() {
-		makeAutoObservable<this, 'threadIdsByParent' | 'threadIdsByGuild' | 'parentByThread'>(
+		makeAutoObservable<
 			this,
-			{threadIdsByParent: false, threadIdsByGuild: false, parentByThread: false},
+			| 'threadIdsByParent'
+			| 'threadIdsByGuild'
+			| 'parentByThread'
+			| 'directoryReferences'
+			| 'messageContextReferences'
+			| 'lifecycleGeneration'
+			| 'mentionReferences'
+		>(
+			this,
+			{
+				threadIdsByParent: false,
+				threadIdsByGuild: false,
+				parentByThread: false,
+				directoryReferences: false,
+				messageContextReferences: false,
+				lifecycleGeneration: false,
+				mentionReferences: false,
+			},
 			{autoBind: true},
 		);
 	}
 
 	getThreadIdsForParent(parentId: string): ReadonlyArray<string> {
 		return this.threadIdsByParent.get(parentId) ?? EMPTY_IDS;
+	}
+
+	/** 目录只持有模型引用，退出结果集时释放未加入且未打开的帖子。 */
+	setDirectoryReferences(parentId: string, ids: ReadonlySet<string>): void {
+		const previous = this.directoryReferences.get(parentId) ?? new Set<string>();
+		if (ids.size > 0) this.directoryReferences.set(parentId, ids);
+		else this.directoryReferences.delete(parentId);
+		for (const id of previous) {
+			if (
+				ids.has(id) ||
+				this.messageContextReferences.has(id) ||
+				this.mentionReferences.has(id) ||
+				ThreadMemberships.isMember(id) ||
+				Navigation.channelId === id ||
+				Navigation.threadId === id
+			)
+				continue;
+			this.remove(id);
+		}
+	}
+
+	/** 提及消息集合持有共享模型，最后一条消息移除时释放没有其他消费者的帖子。 */
+	setMentionReferences(ids: ReadonlySet<string>): void {
+		const previous = this.mentionReferences;
+		this.mentionReferences = ids;
+		for (const id of previous) {
+			const channel = Channels.getChannel(id);
+			if (ids.has(id) || this.messageContextReferences.has(id) || ThreadMemberships.isMember(id)) continue;
+			if (Navigation.channelId === id || Navigation.threadId === id) continue;
+			if (this.directoryReferences.get(channel?.parentId ?? '')?.has(id)) continue;
+			if (channel?.isThread()) this.remove(id);
+		}
+	}
+
+	/** 删除、失权和重置后禁止在途响应恢复旧模型。 */
+	getLifecycleGeneration(): number {
+		return this.lifecycleGeneration;
 	}
 
 	getGuildThreadIds(guildId: string): ReadonlyArray<string> {
@@ -173,12 +232,16 @@ class ChannelThreads {
 	}
 
 	remove(threadId: string): void {
+		this.lifecycleGeneration++;
+		this.messageContextReferences.delete(threadId);
 		this.unindex(threadId);
 		ThreadMemberships.remove(threadId);
 		Channels.removeThread(threadId);
 	}
 
 	deleteThread(threadId: string): void {
+		this.lifecycleGeneration++;
+		this.messageContextReferences.delete(threadId);
 		const channel = Channels.getChannel(threadId);
 		this.unindex(threadId);
 		ThreadMemberships.remove(threadId);
@@ -215,7 +278,14 @@ class ChannelThreads {
 			const channel = Channels.getChannel(threadId);
 			if (!channel || channel.isArchived) continue;
 			if (parents != null && (channel.parentId == null || !parents.has(channel.parentId))) continue;
-			this.remove(threadId);
+			ThreadMemberships.remove(threadId);
+			if (
+				!this.isParentViewable(channel) ||
+				(!this.directoryReferences.get(channel.parentId ?? '')?.has(threadId) &&
+					!this.messageContextReferences.has(threadId) &&
+					!this.mentionReferences.has(threadId))
+			)
+				this.remove(threadId);
 		}
 		const membersByThread = new Map<string, ThreadMemberResponse>();
 		for (const member of payload.members) {
@@ -255,6 +325,7 @@ class ChannelThreads {
 	}
 
 	handleParentDelete(parentId: string): void {
+		this.directoryReferences.delete(parentId);
 		for (const threadId of [...this.getThreadIdsForParent(parentId)]) {
 			this.deleteThread(threadId);
 		}
@@ -266,6 +337,10 @@ class ChannelThreads {
 		this.threadIdsByParent.clear();
 		this.threadIdsByGuild.clear();
 		this.parentByThread.clear();
+		this.directoryReferences.clear();
+		this.messageContextReferences.clear();
+		this.lifecycleGeneration++;
+		this.mentionReferences = new Set();
 		ThreadMemberships.clear();
 		for (const guild of guilds) {
 			if (guild.unavailable || !guild.threads) continue;

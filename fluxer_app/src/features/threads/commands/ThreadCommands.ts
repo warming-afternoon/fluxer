@@ -3,6 +3,7 @@
 import {Endpoints} from '@app/features/app/constants/Endpoints';
 import type {Channel, ChannelWire} from '@app/features/channel/models/Channel';
 import Channels from '@app/features/channel/state/Channels';
+import ForumPosts from '@app/features/forum/state/ForumPosts';
 import {http} from '@app/features/platform/transport/RestTransport';
 import {HttpError} from '@app/features/platform/types/EndpointError';
 import {Logger} from '@app/features/platform/utils/AppLogger';
@@ -96,11 +97,17 @@ export async function updateThread(thread: Channel, body: ThreadPatchBody): Prom
 	assertActive(thread.guildId);
 	const response = await http.patch<ChannelWire>(Endpoints.CHANNEL(thread.id), {body});
 	ingestThread(response.body, thread.guildId);
+	const forum = thread.parentId ? Channels.getChannel(thread.parentId) : undefined;
+	if (forum?.isThreadOnly()) ForumPosts.refresh(forum);
 }
 
 export async function deleteThread(thread: Channel): Promise<void> {
 	assertActive(thread.guildId);
 	await http.delete(Endpoints.CHANNEL(thread.id));
+	const forum = thread.parentId ? Channels.getChannel(thread.parentId) : undefined;
+	ChannelThreads.deleteThread(thread.id);
+	ForumPosts.discardPost(thread.id, thread.parentId);
+	if (forum?.isThreadOnly()) ForumPosts.refresh(forum);
 }
 
 export async function joinThread(thread: Channel): Promise<void> {
@@ -174,8 +181,9 @@ const nonThreadChannelIds = new Set<string>();
 
 export async function loadThreadsForMessages(
 	messages: ReadonlyArray<{channel_id: string; guild_id?: string}>,
+	isCurrent: () => boolean = () => true,
 ): Promise<void> {
-	if (!ThreadGuilds.anyActive) return;
+	if (!ThreadGuilds.anyActive || !isCurrent()) return;
 	const pending = new Set<string>();
 	for (const message of messages) {
 		if (pending.size >= MAX_THREAD_LOOKUPS_PER_BATCH) break;
@@ -184,13 +192,15 @@ export async function loadThreadsForMessages(
 		if (nonThreadChannelIds.has(message.channel_id)) continue;
 		pending.add(message.channel_id);
 	}
-	await Promise.all(Array.from(pending, loadUnknownThread));
+	await Promise.all(Array.from(pending, (id) => loadUnknownThread(id, isCurrent)));
 }
 
-async function loadUnknownThread(channelId: string): Promise<void> {
+/** 旧提及请求不得在异步回源完成后重建已释放模型。 */
+async function loadUnknownThread(channelId: string, isCurrent: () => boolean): Promise<void> {
 	try {
 		const response = await http.get<ChannelWire>(Endpoints.CHANNEL(channelId));
 		const wire = response.body;
+		if (!isCurrent()) return;
 		if (!wire || !THREAD_CHANNEL_TYPES.has(wire.type) || !wire.guild_id) {
 			nonThreadChannelIds.add(channelId);
 			return;
@@ -198,6 +208,7 @@ async function loadUnknownThread(channelId: string): Promise<void> {
 		if (!ThreadGuilds.isActive(wire.guild_id)) return;
 		ingestThread(wire, wire.guild_id);
 	} catch (error) {
+		if (!isCurrent()) return;
 		if (error instanceof HttpError && (error.status === 403 || error.status === 404)) {
 			nonThreadChannelIds.add(channelId);
 			return;

@@ -3,7 +3,8 @@
 import {Endpoints} from '@app/features/app/constants/Endpoints';
 import type {Channel, ChannelWire} from '@app/features/channel/models/Channel';
 import Channels from '@app/features/channel/state/Channels';
-import {getDefaultLayout, getDefaultSortOrder, getDefaultTagSetting} from '@app/features/forum/utils/ForumChannelUtils';
+import ForumReadState from '@app/features/forum/state/ForumReadState';
+import {getDefaultLayout, getDefaultTagSetting} from '@app/features/forum/utils/ForumChannelUtils';
 import Permission from '@app/features/permissions/state/Permission';
 import {http} from '@app/features/platform/transport/RestTransport';
 import {HttpError} from '@app/features/platform/types/EndpointError';
@@ -20,6 +21,7 @@ import {
 	POST_DATA_MAX_IDS,
 	THREAD_SEARCH_MAX_LIMIT,
 } from '@fluxer/constants/src/ThreadConstants';
+import {ValidationErrorCodes} from '@fluxer/constants/src/ValidationErrorCodes';
 import type {ThreadMemberResponse} from '@fluxer/schema/src/domains/channel/ThreadSchemas';
 import type {Message as WireMessage} from '@fluxer/schema/src/domains/message/MessageResponseSchemas';
 import {makeAutoObservable, observable, runInAction} from 'mobx';
@@ -31,9 +33,15 @@ export const POST_DATA_DEBOUNCE_MS = 50;
 export const SEARCH_RETRY_MAX_ATTEMPTS = 6;
 export const SEARCH_RETRY_MAX_DELAY_MS = 60_000;
 
-export type ForumListKind = 'archived' | 'search';
+export type ForumListKind = 'active' | 'archived' | 'search';
 
 export interface ForumListState {
+	/** 下一次目录扫描的游标，空结果页仍可能有下一页。 */
+	readonly nextCursor?: string | null;
+
+	/** 首屏额外返回的置顶帖子，不占分页数量。 */
+	readonly pinnedId?: string | null;
+
 	readonly ids: ReadonlyArray<string>;
 	readonly hasMore: boolean;
 	readonly loading: boolean;
@@ -50,9 +58,25 @@ interface ThreadSearchResponseBody {
 	first_messages?: Array<WireMessage>;
 }
 
+interface ThreadDirectoryResponseBody extends Omit<ThreadSearchResponseBody, 'total_results'> {
+	/** 下一段扫描位置。 */
+	next_cursor: string | null;
+
+	/** 首屏可见的额外置顶帖子。 */
+	pinned_thread: ChannelWire | null;
+}
+
 interface SearchNotReadyBody {
 	code?: string;
 	retry_after?: number;
+}
+
+interface DiscardedPost {
+	/** 需要释放删除标记的所属目录。 */
+	forumId: string | null;
+
+	/** 失去访问发生时的单帖代次。 */
+	revision: number;
 }
 
 interface PostDataResponseBody {
@@ -158,16 +182,23 @@ function buildSearchPath(
 
 class ForumPosts {
 	private readonly lists = observable.map<string, ForumListState>();
+	private readonly viewers = observable.map<string, number>();
 	private readonly queries = observable.map<string, string>();
 	private readonly tagFilters = observable.map<string, ReadonlyArray<string>>();
 	private readonly sortOverrides = observable.map<string, ForumSortOrderType>();
 	private readonly layoutOverrides = observable.map<string, ForumLayoutType>();
 	private readonly firstMessages = observable.map<string, WireMessage | null>({}, {deep: false});
 	private readonly generations = new Map<string, number>();
+	private generationSerial = 0;
+	previewVersion = 0;
+	connectionVersion = 0;
 	private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly retryAttempts = new Map<string, number>();
 	private readonly searchTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly requestedPostData = new Set<string>();
+	private readonly previewTokens = new Map<string, object>();
+	private readonly discardedPosts = new Map<string, DiscardedPost>();
+	private discardRevision = 0;
 	private readonly pendingPostData = new Map<string, Set<string>>();
 	private postDataTimer: ReturnType<typeof setTimeout> | null = null;
 	searchUnavailable = false;
@@ -176,6 +207,7 @@ class ForumPosts {
 		makeAutoObservable<
 			this,
 			| 'lists'
+			| 'viewers'
 			| 'queries'
 			| 'tagFilters'
 			| 'sortOverrides'
@@ -186,12 +218,15 @@ class ForumPosts {
 			| 'retryAttempts'
 			| 'searchTimers'
 			| 'requestedPostData'
+			| 'previewTokens'
+			| 'discardedPosts'
 			| 'pendingPostData'
 			| 'postDataTimer'
 		>(
 			this,
 			{
 				lists: false,
+				viewers: false,
 				queries: false,
 				tagFilters: false,
 				sortOverrides: false,
@@ -202,11 +237,53 @@ class ForumPosts {
 				retryAttempts: false,
 				searchTimers: false,
 				requestedPostData: false,
+				previewTokens: false,
+				discardedPosts: false,
 				pendingPostData: false,
 				postDataTimer: false,
 			},
 			{autoBind: true},
 		);
+	}
+
+	/** 多个论坛视图共享目录，最后一个视图退出时释放请求和模型。 */
+	beginViewing(forumId: string): () => void {
+		this.viewers.set(forumId, (this.viewers.get(forumId) ?? 0) + 1);
+		let released = false;
+		return () =>
+			runInAction(() => {
+				if (released) return;
+				released = true;
+				const count = this.viewers.get(forumId) ?? 0;
+				if (count > 1) {
+					this.viewers.set(forumId, count - 1);
+					return;
+				}
+				this.viewers.delete(forumId);
+				const ids = new Set<string>();
+				for (const kind of ['active', 'archived', 'search'] as const) {
+					const list = this.getList(forumId, kind);
+					for (const id of list.ids) ids.add(id);
+					if (list.pinnedId) ids.add(list.pinnedId);
+					this.resetList(forumId, kind);
+				}
+				this.cancelSearchTimer(forumId);
+				this.pendingPostData.delete(forumId);
+				this.previewVersion += 1;
+				this.previewTokens.delete(forumId);
+				for (const [id, discarded] of this.discardedPosts)
+					if (discarded.forumId === forumId) this.discardedPosts.delete(id);
+				for (const id of ids) {
+					this.requestedPostData.delete(id);
+					this.firstMessages.delete(id);
+				}
+				ForumReadState.refreshPosts([...ids]);
+			});
+	}
+
+	/** 只允许实际打开的论坛继续发起分页或预览请求。 */
+	isViewing(forumId: string): boolean {
+		return (this.viewers.get(forumId) ?? 0) > 0;
 	}
 
 	getList(forumId: string, kind: ForumListKind): ForumListState {
@@ -225,8 +302,9 @@ class ForumPosts {
 		return this.tagFilters.get(forumId) ?? EMPTY_TAGS;
 	}
 
-	getSortOrder(forum: Channel): ForumSortOrderType {
-		return this.sortOverrides.get(forum.id) ?? getDefaultSortOrder(forum);
+	/** 目录固定按创建时间排序，忽略历史配置。 */
+	getSortOrder(_forum: Channel): ForumSortOrderType {
+		return ForumSortOrderTypes.CREATION_TIME;
 	}
 
 	getLayout(forum: Channel): ForumLayoutType {
@@ -249,6 +327,7 @@ class ForumPosts {
 
 	setTagFilter(forum: Channel, tagIds: ReadonlyArray<string>): void {
 		this.tagFilters.set(forum.id, [...tagIds]);
+		this.resetList(forum.id, 'active');
 		this.resetList(forum.id, 'archived');
 		if (this.isSearching(forum.id)) {
 			this.cancelSearchTimer(forum.id);
@@ -264,6 +343,7 @@ class ForumPosts {
 	setQuery(forum: Channel, query: string): void {
 		this.queries.set(forum.id, query);
 		this.cancelSearchTimer(forum.id);
+		this.resetList(forum.id, 'search');
 		if (!query.trim()) {
 			this.resetList(forum.id, 'search');
 			return;
@@ -281,17 +361,61 @@ class ForumPosts {
 
 	loadMore(forum: Channel, kind: ForumListKind): void {
 		const list = this.getList(forum.id, kind);
+		if (list.loading) return;
 		void this.fetchList(forum, kind, list.loaded);
+	}
+
+	/** 手动刷新当前目录，保留搜索、标签和布局偏好。 */
+	refresh(forum: Channel): void {
+		if (!this.isViewing(forum.id)) return;
+		this.cancelSearchTimer(forum.id);
+		this.previewVersion += 1;
+		this.previewTokens.delete(forum.id);
+		this.pendingPostData.delete(forum.id);
+		for (const kind of ['active', 'archived', 'search'] as const) {
+			const list = this.getList(forum.id, kind);
+			for (const id of [...list.ids, ...(list.pinnedId ? [list.pinnedId] : [])]) {
+				this.requestedPostData.delete(id);
+				this.firstMessages.delete(id);
+			}
+			ForumReadState.refreshPosts([...list.ids, ...(list.pinnedId ? [list.pinnedId] : [])]);
+			this.resetList(forum.id, kind);
+		}
+		const kind = this.isSearching(forum.id) ? 'search' : 'active';
+		void this.fetchList(forum, kind, false);
+	}
+
+	/** 删除或失去访问时使该帖子的旧响应失效，保留其他合法分页结果。 */
+	discardPost(threadId: string, forumId: string | null): void {
+		if (forumId ? this.isViewing(forumId) : this.viewers.size > 0) {
+			this.discardedPosts.set(threadId, {forumId, revision: ++this.discardRevision});
+		}
+		this.requestedPostData.delete(threadId);
+		this.firstMessages.delete(threadId);
+		ForumReadState.refreshPosts([threadId]);
+		if (!forumId) return;
+		this.pendingPostData.get(forumId)?.delete(threadId);
+		for (const kind of ['active', 'archived', 'search'] as const) {
+			const key = listKey(forumId, kind);
+			const list = this.lists.get(key);
+			if (!list) continue;
+			this.lists.set(key, {
+				...list,
+				ids: list.ids.filter((id) => id !== threadId),
+				pinnedId: list.pinnedId === threadId ? null : list.pinnedId,
+			});
+		}
+		this.syncReferences(forumId);
 	}
 
 	retry(forum: Channel, kind: ForumListKind): void {
 		this.retryAttempts.delete(listKey(forum.id, kind));
 		const list = this.getList(forum.id, kind);
-		void this.fetchList(forum, kind, list.loaded && list.ids.length > 0);
+		void this.fetchList(forum, kind, list.loaded);
 	}
 
 	requestPostData(forum: Channel, threadIds: ReadonlyArray<string>): void {
-		if (!canRequestForumPosts(forum)) return;
+		if (!canRequestForumPosts(forum) || !this.isViewing(forum.id)) return;
 		let pending = this.pendingPostData.get(forum.id);
 		for (const threadId of threadIds) {
 			if (this.requestedPostData.has(threadId) || this.firstMessages.has(threadId)) continue;
@@ -338,16 +462,27 @@ class ForumPosts {
 	}
 
 	handleGatewayReady(): void {
-		const sortOverrides = new Map(this.sortOverrides);
-		const layoutOverrides = new Map(this.layoutOverrides);
-		this.reset();
-		this.sortOverrides.replace(sortOverrides);
-		this.layoutOverrides.replace(layoutOverrides);
+		this.previewTokens.clear();
+		this.discardedPosts.clear();
+		this.connectionVersion += 1;
+		for (const forumId of [...this.searchTimers.keys()]) this.cancelSearchTimer(forumId);
+		this.previewVersion += 1;
+		// 只使已浏览的列表失效，页面挂载后自行请求，不遍历社区回源。
+		for (const key of [...this.lists.keys()]) {
+			const separator = key.lastIndexOf(':');
+			this.resetList(key.slice(0, separator), key.slice(separator + 1) as ForumListKind);
+		}
+		this.firstMessages.clear();
+		this.requestedPostData.clear();
 	}
 
 	purgeForum(forumId: string, threadIds: ReadonlyArray<string>): void {
+		this.previewTokens.delete(forumId);
+		for (const [id, discarded] of this.discardedPosts)
+			if (discarded.forumId === forumId) this.discardedPosts.delete(id);
+		this.previewVersion += 1;
 		const postIds = new Set([...threadIds, ...(this.pendingPostData.get(forumId) ?? [])]);
-		for (const kind of ['archived', 'search'] as const) {
+		for (const kind of ['active', 'archived', 'search'] as const) {
 			for (const id of this.getList(forumId, kind).ids) postIds.add(id);
 			this.resetList(forumId, kind);
 		}
@@ -362,6 +497,9 @@ class ForumPosts {
 	}
 
 	reset(): void {
+		this.previewTokens.clear();
+		this.discardedPosts.clear();
+		this.previewVersion += 1;
 		for (const timer of this.retryTimers.values()) clearTimeout(timer);
 		for (const timer of this.searchTimers.values()) clearTimeout(timer);
 		if (this.postDataTimer != null) clearTimeout(this.postDataTimer);
@@ -370,8 +508,10 @@ class ForumPosts {
 		this.searchTimers.clear();
 		this.retryAttempts.clear();
 		this.generations.clear();
+		this.viewers.clear();
 		this.requestedPostData.clear();
 		this.pendingPostData.clear();
+		for (const key of this.lists.keys()) ChannelThreads.setDirectoryReferences(key.split(':')[0], new Set());
 		this.lists.clear();
 		this.queries.clear();
 		this.tagFilters.clear();
@@ -395,45 +535,41 @@ class ForumPosts {
 
 	private resetList(forumId: string, kind: ForumListKind): void {
 		const key = listKey(forumId, kind);
-		this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+		this.generations.set(key, ++this.generationSerial);
 		this.cancelRetry(key);
 		this.retryAttempts.delete(key);
 		this.lists.delete(key);
+		this.syncReferences(forumId);
 	}
 
 	private async fetchList(forum: Channel, kind: ForumListKind, append: boolean): Promise<void> {
-		if (!canRequestForumPosts(forum)) return;
+		if (!canRequestForumPosts(forum) || !this.isViewing(forum.id)) return;
 		const key = listKey(forum.id, kind);
 		const current = this.getList(forum.id, kind);
 		if (append && (current.loading || !current.hasMore)) return;
 		const query = this.getQuery(forum.id).trim();
 		if (kind === 'search' && !query) return;
-		const generation = (this.generations.get(key) ?? 0) + 1;
+		const generation = ++this.generationSerial;
+		const requestRevision = this.discardRevision;
 		this.generations.set(key, generation);
 		this.cancelRetry(key);
 		const base = append ? current : EMPTY_LIST;
 		this.lists.set(key, {...base, loading: true, failed: false});
-		if (kind === 'archived' && this.searchUnavailable) {
-			await this.fetchArchivedFallback(forum, append, base, generation);
+		if (kind !== 'search') {
+			await this.fetchDirectory(forum, kind, append, base, generation, requestRevision);
 			return;
 		}
-		const sortOrder = this.getSortOrder(forum);
 		const path = buildSearchPath(forum.id, {
-			name: kind === 'search' ? query : null,
+			name: query,
 			tagIds: this.getTagFilter(forum.id),
 			tagSetting: getDefaultTagSetting(forum),
-			archived: kind === 'archived' ? true : null,
-			sortBy:
-				kind === 'search'
-					? 'relevance'
-					: sortOrder === ForumSortOrderTypes.CREATION_TIME
-						? 'creation_time'
-						: 'last_message_time',
+			archived: null,
+			sortBy: 'relevance',
 			offset: append ? current.ids.length : 0,
 		});
 		try {
 			const response = await http.get<ThreadSearchResponseBody | SearchNotReadyBody>(path);
-			if (this.generations.get(key) !== generation) return;
+			if (this.generations.get(key) !== generation || !canRequestForumPosts(forum) || !this.isViewing(forum.id)) return;
 			if (response.status === 202) {
 				this.scheduleRetry(forum.id, kind, append, base, (response.body as SearchNotReadyBody | null)?.retry_after);
 				return;
@@ -441,8 +577,10 @@ class ForumPosts {
 			const body = response.body as ThreadSearchResponseBody;
 			runInAction(() => {
 				this.retryAttempts.delete(key);
-				const ids = this.ingestSearch(forum, body);
-				const merged = append ? [...current.ids, ...ids.filter((id) => !current.ids.includes(id))] : ids;
+				const ids = this.ingestSearch(forum, body, requestRevision);
+				const merged = (append ? [...current.ids, ...ids.filter((id) => !current.ids.includes(id))] : ids).filter(
+					(id) => (this.discardedPosts.get(id)?.revision ?? 0) <= requestRevision,
+				);
 				this.lists.set(key, {
 					ids: merged,
 					hasMore: body.has_more,
@@ -451,12 +589,12 @@ class ForumPosts {
 					indexing: false,
 					failed: false,
 				});
+				this.syncReferences(forum.id);
 			});
 		} catch (error) {
 			if (this.generations.get(key) !== generation) return;
 			if (isSearchDisabledError(error)) {
 				this.disableSearch();
-				if (kind === 'archived') await this.fetchArchivedFallback(forum, append, base, generation);
 				return;
 			}
 			logger.warn(`Failed to load ${kind} posts for forum ${forum.id}`, error);
@@ -474,41 +612,80 @@ class ForumPosts {
 		this.queries.clear();
 	}
 
-	private async fetchArchivedFallback(
+	/** 目录使用独立游标，空扫描页也保留下一段位置。 */
+	private async fetchDirectory(
 		forum: Channel,
+		kind: 'active' | 'archived',
 		append: boolean,
 		base: ForumListState,
 		generation: number,
+		requestRevision: number,
 	): Promise<void> {
-		const key = listKey(forum.id, 'archived');
-		const lastId = append ? base.ids[base.ids.length - 1] : undefined;
-		const before = lastId ? Channels.getChannel(lastId)?.threadMetadata?.archive_timestamp : undefined;
-		const query: Record<string, string> = {limit: String(THREAD_SEARCH_MAX_LIMIT)};
-		if (before) query.before = before;
+		const key = listKey(forum.id, kind);
+		const query = new URLSearchParams({archived: String(kind === 'archived'), limit: '50'});
+		for (const tag of this.getTagFilter(forum.id)) query.append('tag', tag);
+		query.set('tag_setting', getDefaultTagSetting(forum));
+		if (append && base.nextCursor) query.set('cursor', base.nextCursor);
 		try {
-			const response = await http.get<ThreadSearchResponseBody>(Endpoints.CHANNEL_THREADS_ARCHIVED_PUBLIC(forum.id), {
-				query,
-			});
-			if (this.generations.get(key) !== generation) return;
+			const response = await http.get<ThreadDirectoryResponseBody>(
+				`${Endpoints.CHANNEL_THREADS(forum.id)}/directory?${query}`,
+			);
+			if (this.generations.get(key) !== generation || !canRequestForumPosts(forum) || !this.isViewing(forum.id)) return;
 			const body = response.body;
 			runInAction(() => {
-				const ids = body ? this.ingestSearch(forum, body) : [];
+				const ids = this.ingestSearch(forum, body, requestRevision);
+				const pin =
+					!append &&
+					body.pinned_thread &&
+					(this.discardedPosts.get(body.pinned_thread.id)?.revision ?? 0) <= requestRevision
+						? ChannelThreads.upsert(body.pinned_thread, forum.guildId)
+						: undefined;
 				this.lists.set(key, {
-					ids: append ? [...base.ids, ...ids.filter((id) => !base.ids.includes(id))] : ids,
-					hasMore: body?.has_more ?? false,
+					ids: (append ? [...base.ids, ...ids.filter((id) => !base.ids.includes(id))] : ids).filter(
+						(id) => (this.discardedPosts.get(id)?.revision ?? 0) <= requestRevision,
+					),
+					pinnedId: append
+						? base.pinnedId && (this.discardedPosts.get(base.pinnedId)?.revision ?? 0) <= requestRevision
+							? base.pinnedId
+							: null
+						: (pin?.id ?? null),
+					nextCursor: body.next_cursor,
+					hasMore: body.has_more,
 					loading: false,
 					loaded: true,
 					indexing: false,
 					failed: false,
 				});
+				this.syncReferences(forum.id);
 			});
 		} catch (error) {
 			if (this.generations.get(key) !== generation) return;
-			logger.warn(`Failed to load archived posts for forum ${forum.id}`, error);
-			runInAction(() => {
-				this.lists.set(key, {...base, loading: false, indexing: false, failed: true});
-			});
+			// 只有携带旧游标的请求恢复一次，首屏失败直接呈现重试。
+			const cursorInvalid =
+				error instanceof HttpError &&
+				error.status === 400 &&
+				(error.body as {errors?: Array<{path?: string; code?: string}>} | null)?.errors?.some(
+					(validation) => validation.path === 'cursor' && validation.code === ValidationErrorCodes.INVALID_FORMAT,
+				);
+			if (append && base.nextCursor && cursorInvalid) {
+				this.resetList(forum.id, kind);
+				await this.fetchList(forum, kind, false);
+				return;
+			}
+			logger.warn(`Failed to load ${kind} directory for forum ${forum.id}`, error);
+			runInAction(() => this.lists.set(key, {...base, loading: false, failed: true}));
 		}
+	}
+
+	/** 只保留目录和搜索结果引用，不为卡片建立实时浏览关系。 */
+	private syncReferences(forumId: string): void {
+		const ids = new Set<string>();
+		for (const kind of ['active', 'archived', 'search'] as const) {
+			const list = this.getList(forumId, kind);
+			for (const id of list.ids) ids.add(id);
+			if (list.pinnedId) ids.add(list.pinnedId);
+		}
+		ChannelThreads.setDirectoryReferences(forumId, ids);
 	}
 
 	private scheduleRetry(
@@ -545,18 +722,24 @@ class ForumPosts {
 		);
 	}
 
-	private ingestSearch(forum: Channel, body: ThreadSearchResponseBody): Array<string> {
+	private ingestSearch(
+		forum: Channel,
+		body: Pick<ThreadSearchResponseBody, 'threads' | 'members' | 'first_messages'>,
+		requestRevision: number,
+	): Array<string> {
 		const members = new Map<string, ThreadMemberResponse>();
 		for (const member of body.members ?? []) {
 			if (member.id) members.set(member.id, member);
 		}
 		const ids: Array<string> = [];
 		for (const thread of body.threads ?? []) {
+			if ((this.discardedPosts.get(thread.id)?.revision ?? 0) > requestRevision) continue;
 			const member = members.get(thread.id);
 			const post = ChannelThreads.upsert(member ? {...thread, member} : thread, forum.guildId);
 			if (post?.parentId === forum.id) ids.push(post.id);
 		}
 		for (const message of body.first_messages ?? []) {
+			if ((this.discardedPosts.get(message.channel_id)?.revision ?? 0) > requestRevision) continue;
 			this.firstMessages.set(message.channel_id, message);
 		}
 		return ids;
@@ -569,7 +752,7 @@ class ForumPosts {
 		for (const [forumId, pending] of batches) {
 			const forum = Channels.getChannel(forumId);
 			const ids = Array.from(pending);
-			if (!forum || !canRequestForumPosts(forum)) {
+			if (!forum || !canRequestForumPosts(forum) || !this.isViewing(forum.id)) {
 				for (const id of ids) this.requestedPostData.delete(id);
 				continue;
 			}
@@ -580,17 +763,26 @@ class ForumPosts {
 	}
 
 	private async fetchPostData(forum: Channel, threadIds: Array<string>): Promise<void> {
+		const requestRevision = this.discardRevision;
+		const token = this.previewTokens.get(forum.id) ?? {};
+		this.previewTokens.set(forum.id, token);
 		try {
 			const response = await http.post<PostDataResponseBody>(Endpoints.CHANNEL_POST_DATA(forum.id), {
 				body: {thread_ids: threadIds},
 			});
+			if (this.previewTokens.get(forum.id) !== token || !canRequestForumPosts(forum)) return;
 			runInAction(() => {
 				for (const threadId of threadIds) {
-					if (!this.requestedPostData.has(threadId)) continue;
+					if (
+						!this.requestedPostData.has(threadId) ||
+						(this.discardedPosts.get(threadId)?.revision ?? 0) > requestRevision
+					)
+						continue;
 					this.firstMessages.set(threadId, response.body?.threads?.[threadId]?.first_message ?? null);
 				}
 			});
 		} catch (error) {
+			if (this.previewTokens.get(forum.id) !== token) return;
 			for (const threadId of threadIds) this.requestedPostData.delete(threadId);
 			logger.warn(`Failed to load post data for forum ${forum.id}`, error);
 		}

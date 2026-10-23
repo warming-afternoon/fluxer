@@ -96,7 +96,9 @@ export async function createForumPost(forum: Channel, input: ForumPostInput): Pr
 		const {message: firstMessage, ...wire} = response.body;
 		if (input.hasAttachments) CloudUpload.removeMessageUpload(input.nonce);
 		if (firstMessage) ForumPosts.setFirstMessage(firstMessage);
-		return ChannelThreads.upsert(wire, forum.guildId);
+		const post = ChannelThreads.upsert(wire, forum.guildId);
+		ForumPosts.refresh(forum);
+		return post;
 	} catch (error) {
 		if (input.hasAttachments) CloudUpload.restoreAttachmentsToTextarea(input.nonce);
 		throw error;
@@ -133,6 +135,8 @@ async function patchPost(post: Channel, body: Record<string, unknown>): Promise<
 	assertActive(post);
 	const response = await http.patch<ChannelWire>(Endpoints.CHANNEL(post.id), {body});
 	if (response.body) ChannelThreads.upsert(response.body, post.guildId);
+	const forum = post.parentId ? Channels.getChannel(post.parentId) : undefined;
+	if (forum?.isThreadOnly()) ForumPosts.refresh(forum);
 }
 
 export function setPostPinned(post: Channel, pinned: boolean): Promise<void> {

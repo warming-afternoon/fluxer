@@ -7,6 +7,7 @@ import {http} from '@app/features/platform/transport/RestTransport';
 import {Logger} from '@app/features/platform/utils/AppLogger';
 import * as ReadStateCommands from '@app/features/read_state/commands/ReadStateCommands';
 import {loadThreadsForMessages} from '@app/features/threads/commands/ThreadCommands';
+import ChannelThreads from '@app/features/threads/state/ChannelThreads';
 import ThreadGuilds from '@app/features/threads/state/ThreadGuilds';
 import {MAX_MESSAGES_PER_CHANNEL} from '@fluxer/constants/src/LimitConstants';
 import type {Message} from '@fluxer/schema/src/domains/message/MessageResponseSchemas';
@@ -40,13 +41,20 @@ async function requestMentions(options: MentionFetchOptions = {}): Promise<Array
 
 async function runMentionFetch(label: string, options: MentionFetchOptions = {}): Promise<Array<Message>> {
 	const requestId = MentionFeed.handleFetchPending();
+	const generation = ChannelThreads.getLifecycleGeneration();
+	const isCurrent = () =>
+		MentionFeed.isFetchCurrent(requestId) && generation === ChannelThreads.getLifecycleGeneration();
 	try {
 		logger.debug(label);
 		const data = await requestMentions(options);
 		if (ThreadGuilds.anyActive) {
-			await loadThreadsForMessages(data);
+			await loadThreadsForMessages(data, isCurrent);
 		}
-		MentionFeed.handleRecentMentionsFetchSuccess(requestId, data);
+		if (!isCurrent()) {
+			MentionFeed.handleRecentMentionsFetchError(requestId);
+			return [];
+		}
+		MentionFeed.handleRecentMentionsFetchSuccess(requestId, data, options.before != null);
 		logger.debug(`Successfully loaded ${data.length} mentions`);
 		return data;
 	} catch (error) {

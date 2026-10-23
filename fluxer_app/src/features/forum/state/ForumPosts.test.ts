@@ -8,6 +8,7 @@ const channels = new Map<string, Channel>();
 const activeGuilds = new Set<string>();
 const readableChannels = new Set<string>();
 
+vi.mock('@app/features/forum/state/ForumReadState', () => ({default: {refreshPosts: vi.fn()}}));
 vi.mock('@app/features/app/state/RuntimeConfig', () => ({default: {localInstanceDomain: 'fluxer.test'}}));
 vi.mock('@app/features/user/state/Users', () => ({default: {getUser: () => undefined, cacheUsers: () => {}}}));
 vi.mock('@app/features/channel/state/Channels', () => ({
@@ -18,6 +19,7 @@ vi.mock('@app/features/threads/state/ThreadGuilds', () => ({
 }));
 vi.mock('@app/features/threads/state/ChannelThreads', () => ({
 	default: {
+		setDirectoryReferences: vi.fn(),
 		upsert: (wire: ChannelWire, guildId?: string) => {
 			const channel = new Channel({...wire, guild_id: wire.guild_id ?? guildId});
 			channels.set(channel.id, channel);
@@ -49,6 +51,7 @@ const POST = '1500000000000000003';
 function seedForum(): Channel {
 	const forum = new Channel({id: FORUM, type: ChannelTypes.GUILD_FORUM, guild_id: GUILD, name: 'forum'});
 	channels.set(FORUM, forum);
+	ForumPosts.beginViewing(FORUM);
 	return forum;
 }
 
@@ -122,10 +125,11 @@ describe('ForumPosts index backoff', () => {
 			.mockResolvedValueOnce(notReady)
 			.mockResolvedValueOnce(notReady)
 			.mockResolvedValueOnce({ok: true, status: 200, headers: {}, body: searchBody([POST])});
-		ForumPosts.loadMore(forum, 'archived');
+		ForumPosts.setQuery(forum, 'hello');
+		await vi.advanceTimersByTimeAsync(FORUM_SEARCH_DEBOUNCE_MS);
 		await flush();
 		expect(http.get).toHaveBeenCalledTimes(1);
-		expect(ForumPosts.getList(FORUM, 'archived').indexing).toBe(true);
+		expect(ForumPosts.getList(FORUM, 'search').indexing).toBe(true);
 		await vi.advanceTimersByTimeAsync(1999);
 		expect(http.get).toHaveBeenCalledTimes(1);
 		await vi.advanceTimersByTimeAsync(1);
@@ -134,7 +138,7 @@ describe('ForumPosts index backoff', () => {
 		expect(http.get).toHaveBeenCalledTimes(2);
 		await vi.advanceTimersByTimeAsync(1);
 		expect(http.get).toHaveBeenCalledTimes(3);
-		const list = ForumPosts.getList(FORUM, 'archived');
+		const list = ForumPosts.getList(FORUM, 'search');
 		expect(list.indexing).toBe(false);
 		expect(list.ids).toEqual([POST]);
 	});
@@ -142,9 +146,10 @@ describe('ForumPosts index backoff', () => {
 	it('gives up with a failed state after too many 202 answers', async () => {
 		const forum = seedForum();
 		vi.mocked(http.get).mockResolvedValue({ok: true, status: 202, headers: {}, body: {retry_after: 1}});
-		ForumPosts.loadMore(forum, 'archived');
+		ForumPosts.setQuery(forum, 'hello');
+		await vi.advanceTimersByTimeAsync(FORUM_SEARCH_DEBOUNCE_MS);
 		await vi.advanceTimersByTimeAsync(10 * 60_000);
-		const list = ForumPosts.getList(FORUM, 'archived');
+		const list = ForumPosts.getList(FORUM, 'search');
 		expect(list.failed).toBe(true);
 		expect(list.indexing).toBe(false);
 		const calls = vi.mocked(http.get).mock.calls.length;
@@ -152,14 +157,17 @@ describe('ForumPosts index backoff', () => {
 		expect(http.get).toHaveBeenCalledTimes(calls);
 	});
 
-	it('drops a retry when the filter changes', async () => {
+	it('restarts the search and drops the old retry when the filter changes', async () => {
 		const forum = seedForum();
 		vi.mocked(http.get).mockResolvedValue({ok: true, status: 202, headers: {}, body: {retry_after: 1}});
-		ForumPosts.loadMore(forum, 'archived');
+		ForumPosts.setQuery(forum, 'hello');
+		await vi.advanceTimersByTimeAsync(FORUM_SEARCH_DEBOUNCE_MS);
 		await flush();
+		vi.mocked(http.get).mockResolvedValue({ok: true, status: 200, headers: {}, body: searchBody([])});
 		ForumPosts.setTagFilter(forum, ['11']);
 		await vi.advanceTimersByTimeAsync(60_000);
-		expect(http.get).toHaveBeenCalledTimes(1);
+		expect(http.get).toHaveBeenCalledTimes(2);
+		expect(requestedPath(1).searchParams.getAll('tag')).toEqual(['11']);
 	});
 });
 

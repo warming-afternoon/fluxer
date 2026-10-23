@@ -147,6 +147,16 @@ class ForumReadState {
 		}
 	}
 
+	/** 手动刷新或关闭目录时清除对应未读请求，下一次可重新获取。 */
+	refreshPosts(postIds: ReadonlyArray<string>): void {
+		for (const id of postIds) {
+			this.queue.delete(id);
+			this.awaiting.delete(id);
+			this.sentAcks.delete(id);
+			this.postUnreads.delete(id);
+		}
+	}
+
 	private resetRequests(): void {
 		if (this.pump != null) clearTimeout(this.pump);
 		this.pump = null;

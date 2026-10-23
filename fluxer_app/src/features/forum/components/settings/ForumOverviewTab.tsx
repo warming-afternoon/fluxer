@@ -22,7 +22,6 @@ import {
 	type ForumEmojiRef,
 	getDefaultLayout,
 	getDefaultReaction,
-	getDefaultSortOrder,
 	hidesMediaDownloads,
 	isMediaChannel,
 	isTagRequired,
@@ -50,8 +49,6 @@ import {
 	FORUM_TOPIC_MAX_LENGTH,
 	type ForumLayoutType,
 	ForumLayoutTypes,
-	type ForumSortOrderType,
-	ForumSortOrderTypes,
 } from '@fluxer/constants/src/ThreadConstants';
 import {useLingui} from '@lingui/react/macro';
 import {SmileyIcon} from '@phosphor-icons/react';
@@ -61,7 +58,6 @@ import {Controller, type UseFormReturn, useForm} from 'react-hook-form';
 
 interface ForumFormInputs extends FormInputs {
 	default_reaction: ForumEmojiRef | null;
-	default_sort_order: ForumSortOrderType;
 	default_forum_layout: ForumLayoutType;
 	require_tag: boolean;
 	hide_media_download: boolean;
@@ -81,7 +77,6 @@ function remoteValuesFor(forum: Channel): ForumFormInputs {
 		default_auto_archive_duration: forum.defaultAutoArchiveDuration ?? DEFAULT_THREAD_AUTO_ARCHIVE_DURATION,
 		default_thread_rate_limit_per_user: forum.defaultThreadRateLimitPerUser,
 		default_reaction: getDefaultReaction(forum),
-		default_sort_order: getDefaultSortOrder(forum),
 		default_forum_layout: getDefaultLayout(forum),
 		require_tag: isTagRequired(forum),
 		hide_media_download: hidesMediaDownloads(forum),
@@ -180,7 +175,6 @@ const ForumOverviewForm = observer(({forum}: {forum: Channel}) => {
 				patch.default_thread_rate_limit_per_user = data.default_thread_rate_limit_per_user;
 			}
 			if (dirty.default_reaction) patch.default_reaction_emoji = data.default_reaction;
-			if (dirty.default_sort_order) patch.default_sort_order = data.default_sort_order;
 			if (dirty.default_forum_layout && !media) patch.default_forum_layout = data.default_forum_layout;
 			if (dirty.require_tag || dirty.hide_media_download) {
 				let flags = forum.flags & ~(ChannelFlags.REQUIRE_TAG | ChannelFlags.HIDE_MEDIA_DOWNLOAD_OPTIONS);
@@ -288,30 +282,6 @@ const ForumOverviewForm = observer(({forum}: {forum: Channel}) => {
 						forum={forum}
 						data-flx="forum.settings.forum-overview-tab.forum-overview-form.default-reaction-field"
 					/>
-					<SettingsControlRow
-						label={i18n._(D.DEFAULT_SORT_ORDER_DESCRIPTOR)}
-						stacked
-						dataFlx="forum.settings.forum-overview-tab.forum-overview-form.settings-section"
-						data-flx="forum.settings.forum-overview-tab.forum-overview-form.settings-section.settings-control-row"
-					>
-						<Controller
-							name="default_sort_order"
-							control={form.control}
-							render={({field}) => (
-								<RadioGroup
-									aria-label={i18n._(D.DEFAULT_SORT_ORDER_DESCRIPTOR)}
-									value={field.value}
-									onChange={field.onChange}
-									options={[
-										{value: ForumSortOrderTypes.LATEST_ACTIVITY, name: i18n._(D.SORT_RECENT_ACTIVITY_DESCRIPTOR)},
-										{value: ForumSortOrderTypes.CREATION_TIME, name: i18n._(D.SORT_CREATION_DATE_DESCRIPTOR)},
-									]}
-									data-flx="forum.settings.forum-overview-tab.forum-overview-form.radio-group.change"
-								/>
-							)}
-							data-flx="forum.settings.forum-overview-tab.forum-overview-form.controller--2"
-						/>
-					</SettingsControlRow>
 					{!media && (
 						<SettingsControlRow
 							label={i18n._(D.DEFAULT_LAYOUT_DESCRIPTOR)}

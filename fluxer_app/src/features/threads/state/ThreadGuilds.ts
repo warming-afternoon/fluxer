@@ -67,6 +67,9 @@ class ThreadGuilds {
 	}
 
 	handleGuildDelete(guildId: string, unavailable: boolean): void {
+		for (const channel of Channels.getGuildChannels(guildId)) {
+			if (channel.isThreadOnly()) ForumPosts.purgeForum(channel.id, ChannelThreads.getThreadIdsForParent(channel.id));
+		}
 		ChannelThreads.handleGuildRemoved(guildId);
 		if (!unavailable) this.activeGuildIds.delete(guildId);
 	}

@@ -4,8 +4,6 @@ import type {Channel} from '@app/features/channel/models/Channel';
 import Channels from '@app/features/channel/state/Channels';
 import ForumPosts, {canRequestForumPosts, type ForumListState} from '@app/features/forum/state/ForumPosts';
 import ForumReadState from '@app/features/forum/state/ForumReadState';
-import {getDefaultTagSetting} from '@app/features/forum/utils/ForumChannelUtils';
-import {buildForumPostList} from '@app/features/forum/utils/ForumPostList';
 import GatewaySessions from '@app/features/gateway/transport/GatewaySessionPool';
 import * as ReadStateCommands from '@app/features/read_state/commands/ReadStateCommands';
 import ReadStates from '@app/features/read_state/state/ReadStates';
@@ -36,15 +34,16 @@ export function getForumPostListView(forum: Channel): ForumPostListView {
 		const list = ForumPosts.getList(forum.id, 'search');
 		return {searching, pinned: null, posts: resolvePosts(forum.id, list.ids), archived: [], list};
 	}
-	const list = ForumPosts.getList(forum.id, 'archived');
-	const {pinned, active, archived} = buildForumPostList({
-		known: ChannelThreads.getThreadsForParent(forum.id),
-		extra: resolvePosts(forum.id, list.ids),
-		sortOrder: ForumPosts.getSortOrder(forum),
-		tagIds: ForumPosts.getTagFilter(forum.id),
-		tagSetting: getDefaultTagSetting(forum),
-	});
-	return {searching, pinned, posts: active, archived, list};
+	const active = ForumPosts.getList(forum.id, 'active');
+	const archived = ForumPosts.getList(forum.id, 'archived');
+	const pinned = active.pinnedId ? (ChannelThreads.getThread(active.pinnedId) ?? null) : null;
+	return {
+		searching,
+		pinned,
+		posts: resolvePosts(forum.id, active.ids).filter((post) => post.id !== pinned?.id),
+		archived: resolvePosts(forum.id, archived.ids).filter((post) => post.id !== pinned?.id),
+		list: active,
+	};
 }
 
 function requestPostUnreads(forum: Channel, postIds: ReadonlyArray<string>): void {
@@ -55,20 +54,34 @@ function requestPostUnreads(forum: Channel, postIds: ReadonlyArray<string>): voi
 
 export function usePostDataPrefetch(forum: Channel, posts: ReadonlyArray<Channel>): void {
 	const key = posts.map((post) => post.id).join(',');
+	const previewVersion = ForumPosts.previewVersion;
+	const viewing = ForumPosts.isViewing(forum.id);
 	useEffect(() => {
 		if (!key) return;
 		const postIds = key.split(',');
 		ForumPosts.requestPostData(forum, postIds);
 		requestPostUnreads(forum, postIds);
-	}, [forum, key]);
+	}, [forum, key, previewVersion, viewing]);
 }
 
 export function useForumViewing(forum: Channel): void {
 	const forumId = forum.id;
+	const connectionVersion = ForumPosts.connectionVersion;
+	const canRequest = canRequestForumPosts(forum);
 	useEffect(() => {
+		if (!canRequest) ForumPosts.purgeForum(forum.id, ChannelThreads.getThreadIdsForParent(forum.id));
+	}, [forum.id, canRequest]);
+	useEffect(() => {
+		const release = ForumPosts.beginViewing(forumId);
 		ForumReadState.beginViewing(forumId);
-		return () => ForumReadState.endViewing(forumId);
+		return () => {
+			release();
+			if (!ForumPosts.isViewing(forumId)) ForumReadState.endViewing(forumId);
+		};
 	}, [forumId]);
+	useEffect(() => {
+		if (ForumPosts.isSearching(forum.id)) ForumPosts.loadMore(forum, 'search');
+	}, [forum, connectionVersion]);
 	const lastMessageId = ReadStates.lastMessageId(forumId);
 	const unread = ReadStates.hasUnread(forumId);
 	const focused = Window.focused;

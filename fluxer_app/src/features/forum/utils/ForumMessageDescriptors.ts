@@ -390,3 +390,13 @@ export const POST_LINK_COPIED_DESCRIPTOR = msg({
 	message: 'Post link copied',
 	comment: 'Toast after the forum post link was copied.',
 });
+
+export const REFRESH_POSTS_DESCRIPTOR = msg({
+	message: 'Refresh posts',
+	comment: 'Manually reload the current forum directory.',
+});
+
+export const LOAD_MORE_POSTS_DESCRIPTOR = msg({
+	message: 'Load more posts',
+	comment: 'Load the next page of active forum posts.',
+});

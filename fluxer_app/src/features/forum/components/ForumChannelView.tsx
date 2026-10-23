@@ -19,7 +19,7 @@ import {MarkdownContext} from '@app/features/messaging/components/markdown/rende
 import {Button} from '@app/features/ui/button/Button';
 import {Spinner} from '@app/features/ui/components/Spinner';
 import FocusRing from '@app/features/ui/focus_ring/FocusRing';
-import {ForumLayoutTypes, THREAD_SEARCH_MAX_LIMIT} from '@fluxer/constants/src/ThreadConstants';
+import {ForumLayoutTypes} from '@fluxer/constants/src/ThreadConstants';
 import {useLingui} from '@lingui/react/macro';
 import {CaretDownIcon, CaretUpIcon, ChatsTeardropIcon, InfoIcon} from '@phosphor-icons/react';
 import {clsx} from 'clsx';
@@ -132,15 +132,37 @@ const ForumPostList = observer(({forum}: {forum: Channel}) => {
 	const grid = ForumPosts.getLayout(forum) === ForumLayoutTypes.GRID;
 	const current = view.pinned ? [view.pinned, ...view.posts] : view.posts;
 	usePostDataPrefetch(forum, current.length > 0 ? [...current, ...view.archived] : view.archived);
-	const kind = view.searching ? 'search' : 'archived';
+	const active = ForumPosts.getList(forum.id, 'active');
+	const kind = view.searching ? 'search' : 'active';
+	const archivedList = ForumPosts.getList(forum.id, 'archived');
 	const {list} = view;
 	const handleLoadMore = useCallback(() => ForumPosts.loadMore(forum, kind), [forum, kind]);
 	const handleRetry = useCallback(() => ForumPosts.retry(forum, kind), [forum, kind]);
 	const settled = !list.loading && !list.indexing;
+	const viewing = ForumPosts.isViewing(forum.id);
 	const needsFirstPage = !view.searching && !list.loaded && settled && !list.failed;
 	useEffect(() => {
-		if (needsFirstPage && current.length < THREAD_SEARCH_MAX_LIMIT) ForumPosts.loadMore(forum, 'archived');
-	}, [forum, needsFirstPage, current.length]);
+		if (needsFirstPage && viewing) ForumPosts.loadMore(forum, kind);
+	}, [forum, kind, needsFirstPage, viewing]);
+	useEffect(() => {
+		if (
+			!view.searching &&
+			active.loaded &&
+			!active.hasMore &&
+			!archivedList.loaded &&
+			!archivedList.loading &&
+			!archivedList.failed
+		)
+			ForumPosts.loadMore(forum, 'archived');
+	}, [
+		forum,
+		view.searching,
+		active.loaded,
+		active.hasMore,
+		archivedList.loaded,
+		archivedList.loading,
+		archivedList.failed,
+	]);
 	const empty = current.length === 0 && view.archived.length === 0;
 	const searchPending = view.searching && (!list.loaded || list.loading) && !list.indexing && !list.failed;
 	if (searchPending && current.length === 0) {
@@ -169,12 +191,15 @@ const ForumPostList = observer(({forum}: {forum: Channel}) => {
 					/>
 				</>
 			)}
-			{empty && settled && list.loaded && (
-				<ForumEmptyState
-					searching={view.searching}
-					data-flx="forum.forum-channel-view.forum-post-list.forum-empty-state"
-				/>
-			)}
+			{empty &&
+				settled &&
+				list.loaded &&
+				(view.searching || (archivedList.loaded && !archivedList.hasMore && !active.hasMore)) && (
+					<ForumEmptyState
+						searching={view.searching}
+						data-flx="forum.forum-channel-view.forum-post-list.forum-empty-state"
+					/>
+				)}
 			{list.indexing && (
 				<div className={styles.notice} role="status" data-flx="forum.forum-channel-view.forum-post-list.notice">
 					<Spinner size="small" data-flx="forum.forum-channel-view.forum-post-list.spinner" />
@@ -199,20 +224,36 @@ const ForumPostList = observer(({forum}: {forum: Channel}) => {
 					</Button>
 				</div>
 			)}
-			{settled &&
-				!list.failed &&
-				(list.loaded ? list.hasMore : needsFirstPage && current.length >= THREAD_SEARCH_MAX_LIMIT) && (
-					<div className={styles.notice} data-flx="forum.forum-channel-view.forum-post-list.notice--4">
+			{settled && !list.failed && list.loaded && list.hasMore && (
+				<div className={styles.notice} data-flx="forum.forum-channel-view.forum-post-list.notice--4">
+					<Button
+						small
+						variant="secondary"
+						onClick={handleLoadMore}
+						data-flx="forum.forum-channel-view.forum-post-list.button.load-more"
+					>
+						{i18n._(view.searching ? D.LOAD_OLDER_POSTS_DESCRIPTOR : D.LOAD_MORE_POSTS_DESCRIPTOR)}
+					</Button>
+				</div>
+			)}
+			{!view.searching && active.loaded && (archivedList.hasMore || archivedList.failed) && (
+				<div className={styles.notice} data-flx="forum.forum-channel-view.archived-pagination">
+					{archivedList.loading ? (
+						<Spinner size="small" data-flx="forum.forum-channel-view.archived-pagination.spinner" />
+					) : (
 						<Button
 							small
 							variant="secondary"
-							onClick={handleLoadMore}
-							data-flx="forum.forum-channel-view.forum-post-list.button.load-more"
+							onClick={() =>
+								archivedList.failed ? ForumPosts.retry(forum, 'archived') : ForumPosts.loadMore(forum, 'archived')
+							}
+							data-flx="forum.forum-channel-view.archived-pagination.button"
 						>
-							{i18n._(D.LOAD_OLDER_POSTS_DESCRIPTOR)}
+							{i18n._(archivedList.failed ? D_RETRY_DESCRIPTOR : D.LOAD_OLDER_POSTS_DESCRIPTOR)}
 						</Button>
-					</div>
-				)}
+					)}
+				</div>
+			)}
 		</>
 	);
 });

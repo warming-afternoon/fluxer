@@ -2,6 +2,7 @@
 
 import ChannelPins from '@app/features/channel/state/ChannelPins';
 import Channels from '@app/features/channel/state/Channels';
+import ForumPosts from '@app/features/forum/state/ForumPosts';
 import type {GatewayHandlerContext} from '@app/features/gateway/events/EventRouter';
 import GuildReadState from '@app/features/guild/state/GuildReadState';
 import Invites from '@app/features/invite/state/Invites';
@@ -46,6 +47,8 @@ export function cleanupChannelLocalState(channel: Channel): void {
 }
 
 export function handleChannelDelete(data: ChannelDeletePayload, _context: GatewayHandlerContext): void {
+	const threadIds = [...ChannelThreads.getThreadIdsForParent(data.id)];
+	ForumPosts.purgeForum(data.id, threadIds);
 	ChannelThreads.handleParentDelete(data.id);
 	cleanupChannelLocalState(data as Channel);
 	Messages.handleCleanup();

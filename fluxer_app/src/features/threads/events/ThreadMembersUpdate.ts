@@ -2,6 +2,7 @@
 
 import {Routes} from '@app/app/Routes';
 import Channels from '@app/features/channel/state/Channels';
+import ForumPosts from '@app/features/forum/state/ForumPosts';
 import type {GatewayHandlerContext} from '@app/features/gateway/events/EventRouter';
 import GuildReadState from '@app/features/guild/state/GuildReadState';
 import Navigation from '@app/features/navigation/state/Navigation';
@@ -39,6 +40,7 @@ export function handleThreadMembersUpdate(data: ThreadMembersUpdatePayload, _con
 	if (thread?.isPrivateThread() && !isThreadModeratorFor(thread)) {
 		const panelOpen = Navigation.threadId === data.id;
 		ChannelThreads.deleteThread(data.id);
+		ForumPosts.discardPost(data.id, thread.parentId);
 		if (panelOpen && Navigation.guildId && Navigation.channelId) {
 			RouterUtils.replaceWith(Routes.guildChannel(Navigation.guildId, Navigation.channelId));
 		}

@@ -11,10 +11,17 @@ const makeChannel = (id: string) => ({
 	type: 0,
 	guildId: 'guild-1',
 	isPrivate: () => false,
+	isThread: () => false,
 	getGuildId: () => 'guild-1',
 });
 
 vi.mock('@app/features/app/state/RuntimeConfig', () => ({default: {localInstanceDomain: 'fluxer.test'}}));
+vi.mock('@app/features/platform/utils/AppLogger', () => ({
+	Logger: class {
+		debug() {}
+		error() {}
+	},
+}));
 vi.mock('@app/features/channel/state/Channels', () => ({
 	default: {getChannel: (id: string) => makeChannel(id), getBasicChannel: (id: string) => makeChannel(id)},
 }));
@@ -110,6 +117,21 @@ describe('ReadStates ack queue across gateway ready', () => {
 	afterEach(() => {
 		vi.clearAllTimers();
 		vi.useRealTimers();
+	});
+
+	it('keeps reading locally after an acknowledgement fails and later submits the newer position', async () => {
+		const {channelId, state} = seedReadChannel();
+		post.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+		expect(() => ReadStates.handleChannelAck({channelId, messageId: ID.newer, immediate: true})).not.toThrow();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(state.ackMessageId).toBe(ID.newer);
+		expect(state.unreadCount).toBe(0);
+		const newer = (BigInt(ID.newer) + 1n).toString();
+		state.lastMessageId = newer;
+		ReadStates.handleChannelAck({channelId, messageId: newer});
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(ackedMessageIdsFor(channelId)).toEqual([ID.newer, newer]);
+		expect(state.ackMessageId).toBe(newer);
 	});
 
 	it('flushes a queued ack before gateway ready reseeds the store', async () => {

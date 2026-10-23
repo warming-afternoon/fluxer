@@ -205,6 +205,7 @@ export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 			maxConnections: postgresSource?.max_connections ?? 20,
 			kvTable: postgresSource?.kv_table ?? 'fluxer_kv',
 			preparedStatements: postgresSource?.prepared_statements ?? true,
+			readStateBatchingEnabled: postgresSource?.read_state_batching_enabled ?? true,
 		},
 		database: {
 			backend: master.database.backend,

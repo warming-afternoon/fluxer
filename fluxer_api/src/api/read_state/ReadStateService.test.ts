@@ -31,6 +31,46 @@ function makeReadState(channelId: ChannelID, messageId: MessageID, mentionCount 
 }
 
 describe('ReadStateService gateway side effects after the write', () => {
+	it('keeps a manual rollback notification behind an earlier delayed acknowledgement', async () => {
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const repository = {
+			upsertReadState: vi.fn(async (_user: UserID, channel: ChannelID, message: MessageID) => ({
+				readState: makeReadState(channel, message),
+				previous: null,
+			})),
+		} as unknown as ReadStateRepository;
+		const clear = vi
+			.fn()
+			.mockImplementationOnce(() => gate)
+			.mockResolvedValue(undefined);
+		const dispatch = vi.fn().mockResolvedValue(undefined);
+		const service = new ReadStateService(repository, {
+			clearPushChannelNotifications: clear,
+			dispatchPresence: dispatch,
+		} as unknown as IGatewayService);
+		const first = service.ackMessage({
+			userId: USER_ID,
+			channelId: CHANNEL_ID,
+			messageId: createMessageID(200n),
+			mentionCount: 0,
+		});
+		const second = service.ackMessage({
+			userId: USER_ID,
+			channelId: CHANNEL_ID,
+			messageId: createMessageID(150n),
+			mentionCount: 0,
+			manual: true,
+		});
+		await vi.waitFor(() => expect(clear).toHaveBeenCalledTimes(1));
+		expect(dispatch).not.toHaveBeenCalled();
+		release();
+		await Promise.all([first, second]);
+		expect(dispatch.mock.calls.map(([params]) => params.data.message_id)).toEqual(['200', '150']);
+	});
+
 	it('returns the committed read state when clearing push notifications fails', async () => {
 		const stored: Array<{channelId: ChannelID; messageId: MessageID}> = [];
 		const repository = {

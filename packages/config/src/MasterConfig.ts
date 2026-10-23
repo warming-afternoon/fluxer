@@ -67,6 +67,8 @@ export interface MasterConfig {
 			max_connections: number;
 			kv_table: string;
 			prepared_statements: boolean;
+			/** 是否主动等待跨请求已读组批 */
+			read_state_batching_enabled: boolean;
 		};
 	};
 	s3?: {

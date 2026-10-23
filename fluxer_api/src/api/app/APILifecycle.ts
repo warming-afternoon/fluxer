@@ -3,7 +3,12 @@
 import {randomUUID} from 'node:crypto';
 import {ensureDeletionQueueState} from '@app/api/app/DeletionQueueStartup';
 import type {APIConfig} from '@app/api/config/APIConfig';
-import {hasDatabaseQueryExecutor, setDatabaseQueryExecutor} from '@app/api/database/CassandraQueryExecution';
+import {
+	hasDatabaseQueryExecutor,
+	renderReadStateMetrics,
+	setDatabaseQueryExecutor,
+	shutdownDatabaseQueryExecutor,
+} from '@app/api/database/CassandraQueryExecution';
 import {ensurePostgresKvSchema, PostgresKvQueryExecutor} from '@app/api/database/PostgresKvQueryExecutor';
 import {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
 import {
@@ -127,7 +132,8 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 				await initPostgres(config.postgres, (diagnostic) => logger.error(diagnostic, 'Postgres connection error'));
 				const postgres = getDefaultPostgresClient();
 				await ensurePostgresKvSchema(postgres);
-				setDatabaseQueryExecutor(new PostgresKvQueryExecutor(postgres));
+				const executor = new PostgresKvQueryExecutor(postgres, config.postgres.readStateBatchingEnabled);
+				setDatabaseQueryExecutor(executor);
 				logger.info('Postgres KV client initialized');
 			} else if (config.database.backend === 'postgres') {
 				logger.info('Using injected database query executor for tests');
@@ -190,6 +196,7 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 				unregisterMetricsSections.push(
 					registerMetricsSection(renderActivityMetrics),
 					registerMetricsSection(renderSharedListMetrics),
+					registerMetricsSection(renderReadStateMetrics),
 				);
 				logger.info('Activity events initialized');
 			}
@@ -267,6 +274,8 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 export function createShutdown(config: APIConfig, logger: LoggerInterface): () => Promise<void> {
 	return async (): Promise<void> => {
 		logger.info('Shutting down API service...');
+		// 在网关、任务发布器和数据库连接关闭前结束已接收的读状态变更。
+		await shutdownDatabaseQueryExecutor();
 		try {
 			await shutdownVoiceResources();
 			logger.info('Voice resources shut down');

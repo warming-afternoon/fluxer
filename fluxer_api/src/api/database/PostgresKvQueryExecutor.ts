@@ -10,6 +10,9 @@ import type {
 	WhereExpr,
 } from '@app/api/database/CassandraTypes';
 import {isConditionalQuery, validateTtlSeconds} from '@app/api/database/CassandraTypes';
+import {PostgresReadStateBatcher} from '@app/api/database/PostgresReadStateBatcher';
+import type {ReadStateMutation, ReadStateMutationResult} from '@app/api/database/ReadStateMutation';
+import type {ReadStateRow} from '@app/api/database/types/ChannelTypes';
 import {Logger} from '@app/api/Logger';
 import {type IPostgresClient, type PostgresQueryable, quoteIdentifier} from '@pkgs/postgres/src/Client';
 import cassandra from 'cassandra-driver';
@@ -1020,9 +1023,37 @@ WHERE kv.table_name = expired.table_name AND kv.row_key = expired.row_key`,
 
 export class PostgresKvQueryExecutor {
 	private readonly table: string;
+	private readonly readStateBatcher: PostgresReadStateBatcher;
 
-	constructor(private readonly client: IPostgresClient) {
+	constructor(
+		private readonly client: IPostgresClient,
+		readStateBatchingEnabled = true,
+	) {
 		this.table = quoteIdentifier(client.kvTable());
+		this.readStateBatcher = new PostgresReadStateBatcher(
+			client,
+			{
+				key: (userId, channelId) => keyFromColumns(['user_id', 'channel_id'], {user_id: userId, channel_id: channelId}),
+				encode: (row) => encodeRow({...row}),
+				decode: (value) => decodeRow(value) as unknown as ReadStateRow,
+			},
+			readStateBatchingEnabled ? {} : {delayMs: 0, batchSize: 1},
+		);
+	}
+
+	/** 已读状态在数据库层共享缓冲区，不依赖 HTTP 请求如何分组 */
+	executeReadStateMutations(mutations: ReadonlyArray<ReadStateMutation>): Promise<Array<ReadStateMutationResult>> {
+		return this.readStateBatcher.enqueue(mutations);
+	}
+
+	/** 报告跨请求组批和积压水位 */
+	renderReadStateMetrics(): string {
+		return this.readStateBatcher.renderMetrics();
+	}
+
+	/** 先结束已接收的状态更新，再交由生命周期关闭连接池 */
+	async shutdown(): Promise<void> {
+		await this.readStateBatcher.shutdown();
 	}
 
 	async executeQuery<T = Row, P extends CassandraParams = CassandraParams>(

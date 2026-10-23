@@ -89,3 +89,5 @@ FLUXER_BENCHMARK_RESET_DISPOSABLE=yes node tools/benchmark/VerifyAckCursors.mjs 
 highestCapacityPassedOnline 记录完整满足吞吐验收的最高档位；不要将 highestPassedOnline（正确性通过）解释为稳定容量。
 
 凭据和输出保护：夹具应使用随机生成的合成账号凭据；输出可能包含合成账号 ID 与环境信息，分享前需脱敏。不要提交 *.private.json、*.env、数据转储或测量结果。
+
+通用准备工具：startup/Preparation.mjs 提供恢复快照成员证明复用、批量隔离检查和 keeper→目标连接交接适配器。必须绑定不可变快照与fixture SHA，验证恢复完成和独立inode；每轮重新检查容器身份/镜像/预算/端口/挂载。目标首目录出现后关闭keeper，关闭确认后才等待稳定；正式测量后必须调用 auditAfterMeasurement 执行完整成员审计和push排空。适配器不修改fixture地址，不绕过权限，不做CAS实验迁移。startup-only仍通过forum_load.mjs入口执行，不能标为容量通过。

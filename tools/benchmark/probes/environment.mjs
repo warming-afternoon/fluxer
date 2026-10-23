@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+export const stateDir=path.resolve(process.env.FLUXER_BENCHMARK_DIR||path.join(os.tmpdir(),'fluxer-benchmark'));
+export const outputDir=path.resolve(process.env.FLUXER_BENCHMARK_RESULTS||'artifacts/benchmark');
+export const project=process.env.FLUXER_BENCHMARK_PROJECT||'fluxer-loadtest-200k';
+if(!/^[a-z0-9][a-z0-9_-]*$/.test(project))throw Error('Invalid project');
+export const apiContainer=project+'-api-1',pgContainer=project+'-postgres-1',gatewayContainer=project+'-gateway-1';
+for(const p of [stateDir,outputDir])fs.mkdirSync(p,{recursive:true,mode:0o700});
+if(!fs.existsSync(stateDir+'/variant'))fs.writeFileSync(stateDir+'/variant','combined');

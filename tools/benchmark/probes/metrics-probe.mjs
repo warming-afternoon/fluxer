@@ -1,0 +1,6 @@
+import {stateDir,outputDir,project,apiContainer,pgContainer,gatewayContainer} from './environment.mjs';
+import fs from 'node:fs';import {spawn} from 'node:child_process';
+const dir=stateDir,root=outputDir;
+const code=`setInterval(async()=>{const result={utc:new Date().toISOString()};for(const [name,url]of [['api','http://127.0.0.1:8080/_metrics'],['push','http://push:8126/_metrics']]){try{const r=await fetch(url,{signal:AbortSignal.timeout(1500)});const t=await r.text();result[name]={status:r.status,metrics:Object.fromEntries(t.split('\\n').filter(l=>/^fluxer_(read_state_batch_|channel_metadata_|push_(subscription_batch_|jobs_|rpc_requests_))/.test(l)).map(l=>{const i=l.lastIndexOf(' ');return[l.slice(0,i),Number(l.slice(i+1))];}))};}catch(e){result[name]={error:e.name};}}console.log(JSON.stringify(result));},2000);`;
+const child=spawn('docker',['exec',apiContainer,'node','--input-type=module','-e',code],{stdio:['ignore','pipe','ignore']});let buffer='';
+child.stdout.on('data',data=>{buffer+=data;let i;while((i=buffer.indexOf('\n'))>=0){let line=buffer.slice(0,i);buffer=buffer.slice(i+1);try{const row=JSON.parse(line);row.variant=fs.readFileSync(dir+'/variant','utf8').trim();fs.appendFileSync(root+'/service-metrics.jsonl',JSON.stringify(row)+'\n');}catch{}}});child.on('exit',()=>process.exit(0));

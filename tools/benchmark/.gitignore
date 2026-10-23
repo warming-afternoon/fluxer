@@ -1,0 +1,5 @@
+*.private.json
+*.private.env
+seed.sql.gz
+results/
+state/

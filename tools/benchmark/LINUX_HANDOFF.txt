@@ -1,0 +1,30 @@
+Linux 接续说明（本轮按用户要求未运行新测试）
+
+先使用 test 分支，并记录 git rev-parse dev 与 git rev-parse test。dev 只含业务优化，test 才含压测工具。按目标 VM 架构重新构建；不复用 Mac ARM64 二进制、依赖目录或数据卷。
+
+Node 24+、Python 3 和 Docker/Compose 由目标环境提供。云端若无 Docker daemon 或容器权限，应先解决运行环境，不能声称完成真实压测。记录 CPU、RAM、cgroup、swap 和数据库额度，云端 VM 不等于预定生产机。
+
+数据必须在新建的、可销毁的 benchmark 数据库生成，禁止连接已有业务库。先正常初始化 PostgreSQL KV schema。用项目实际生产 Argon2 默认参数生成随机密码散列，保存为权限0600的 credentials.private.json，包含 password、passwordHash。不要输出或提交其内容。
+
+python3 tools/benchmark/seed/generate.py --scale full --total-members 200000 --history-divisor 10 --direct-copy --credentials /tmp/fluxer-benchmark/credentials.private.json --output /tmp/fluxer-benchmark/generated --api-base http://127.0.0.1:18080/api/v1 --gateway-url 'ws://127.0.0.1:18080/gateway?v=1&encoding=json'
+
+生成器直接复制模式拒绝已有 users/guilds/channels 的数据库。生成 SQL 及 manifest 含合成账号凭据，不在交接包中，需在隔离库重新生成。检查并仅向该隔离库导入 generated/seed.sql.gz；不要执行开发库重置脚本。
+
+python3 tools/benchmark/seed/validate_private_manifest.py /tmp/fluxer-benchmark/generated/fixture.private.json
+node tools/benchmark/prepare_forum_fixture.mjs --source /tmp/fluxer-benchmark/generated/fixture.private.json --out /tmp/fluxer-benchmark/fixture.private.json --max-online 10000
+
+目标为20万成员、3万帖、5000活跃帖、800热点帖、1092000条初始历史消息。这是历史量除以10的合成模型，不是1092万全历史。使用 seed 下 SQL 校验数据库，特别是作者、加入关系、TTL 和实际记录数；生成成功不等于导入验证完成。
+
+运行参数和计划见 README.txt。先使用单 API、2000人、20/50/100条每秒各30秒及1000突发；连接并发32，ACK并发128。正常成功后每次+500。正确性失败或资源保护即停，处理超过窗口1.2倍独立标为容量未通过。若要继续观察慢档，必须显式开启对应选项。
+
+当前工具每次投递立即单条HTTP确认，比前端普通3秒合并更激进；保持这个严格负载，再另加前端批量场景。端到端定义为消息提交到ACK HTTP204，不能当跨设备同步或设备通知清除完成时间。
+
+probes/environment.mjs 接受：FLUXER_BENCHMARK_DIR（状态目录）、FLUXER_BENCHMARK_RESULTS（结果根目录）、FLUXER_BENCHMARK_PROJECT（Compose项目名）、FLUXER_BENCHMARK_FIXTURE（私有夹具路径）、FLUXER_BENCHMARK_TOOLS_IMAGE（可运行Node的采样镜像）。state/variant 写 baseline、metadata、combined 或 scaling；各轮结果使用 variant/progression 子目录。
+
+启动前清除上轮 STOP、guard.done，准备只操作本测试项目的 state/compose.sh，用其管理无页面实例。guard.mjs 触线写 STOP 并调用该脚本 stop；若连续失去资源观测也写 STOP。Linux 使用 MemAvailable 和 swap 数据，保留容器内存阈值；阈值需按实际 VM/cgroup额度先核对，不能照搬Mac值。嵌套容器的宿主/proc内存可能不是可用配额，需额外核对 cgroup memory.max/current/events。这些跨平台适配尚未在目标Linux验证。
+
+启动 probes/guard.mjs、metrics-probe.mjs、pg-wait-probe.mjs、gateway-probe.mjs，采样结束写 guard.done。网关探针读取自有合成guild，不读取完整OTP状态。设备指标工具另开96MiB辅助采样容器，不是第二套应用，结束时主动停止。API诊断预加载会增加开销，必须同条件比较或另做轻量诊断校准。
+
+查询计划探针：pnpm --dir fluxer_api exec vitest run --config vitest.performance.config.ts；仅针对独立测试库设置 FLUXER_PERFORMANCE_TEST_POSTGRES_URL。默认业务回归不运行本分支的大数据量探针。
+
+已有结果与CPU采样属于提交前的来源快照。本轮仅做提交拆分、测试精简和脚本移植，按用户要求未重跑测试、类型检查或Linux压测。先核实环境和脚本后再运行，不能把旧结果标记为这些新提交均已验证。

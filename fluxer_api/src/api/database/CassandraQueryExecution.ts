@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import type {ChannelID} from '@app/api/BrandedTypes';
 import {logBatch, logQuery} from '@app/api/database/CassandraDevLogger';
 import {getIsDev} from '@app/api/database/CassandraMetaRegistry';
 import type {CassandraParams, KvQueryMeta, PreparedQuery, QueryTemplate} from '@app/api/database/CassandraTypes';
@@ -10,6 +11,7 @@ import {
 	normalizeExecuteArgs,
 	normalizeInParams,
 } from '@app/api/database/CassandraTypes';
+import type {ChannelMetadata} from '@app/api/database/ChannelMetadataCache';
 import type {ReadStateMutation, ReadStateMutationResult} from '@app/api/database/ReadStateMutation';
 import {Logger} from '@app/api/Logger';
 import {chunkArray} from '@app/api/utils/ArrayUtils';
@@ -52,6 +54,8 @@ export interface CassandraQueryExecutorForTesting {
 	/** 可选的跨请求已读事务入口，其他后端沿用仓库路径 */
 	executeReadStateMutations?(mutations: ReadonlyArray<ReadStateMutation>): Promise<Array<ReadStateMutationResult>>;
 	renderReadStateMetrics?(): string;
+	/** 只有提供该能力的 PostgreSQL 后端替换已有查询路径 */
+	getChannelMetadata?(ids: ReadonlyArray<ChannelID>): Promise<Map<ChannelID, ChannelMetadata>>;
 }
 
 let injectedExecutorForTesting: CassandraQueryExecutorForTesting | null = null;
@@ -59,6 +63,11 @@ let configuredExecutor: CassandraQueryExecutorForTesting | null = null;
 
 function activeExecutor(): CassandraQueryExecutorForTesting | null {
 	return injectedExecutorForTesting ?? configuredExecutor;
+}
+
+/** 不支持共享元数据缓存的后端返回空能力，调用方保留原行为 */
+export function getChannelMetadata(ids: ReadonlyArray<ChannelID>): Promise<Map<ChannelID, ChannelMetadata>> | null {
+	return activeExecutor()?.getChannelMetadata?.(ids) ?? null;
 }
 
 /** 将已读变更交给支持跨请求组批的数据库执行器 */

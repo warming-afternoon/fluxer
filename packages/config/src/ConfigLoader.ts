@@ -84,6 +84,7 @@ function defaultConfig(): MasterConfig {
 				kv_table: 'fluxer_kv',
 				prepared_statements: true,
 				read_state_batching_enabled: true,
+				channel_metadata_cache_enabled: true,
 			},
 		},
 		s3: {
@@ -409,6 +410,7 @@ function validatePostgresConfig(config: MasterConfig): void {
 	assertIdentifier(postgres.kv_table, 'FLUXER_POSTGRES_KV_TABLE');
 	assertBoolean(postgres.prepared_statements, 'FLUXER_POSTGRES_PREPARED_STATEMENTS');
 	assertBoolean(postgres.read_state_batching_enabled, 'FLUXER_READ_STATE_BATCHING_ENABLED');
+	assertBoolean(postgres.channel_metadata_cache_enabled, 'FLUXER_CHANNEL_METADATA_CACHE_ENABLED');
 	if (config.env !== 'production' || config.database.backend !== 'postgres') {
 		return;
 	}

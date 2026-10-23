@@ -234,6 +234,7 @@ export async function startWorkerMain(): Promise<void> {
 			const postgres = getDefaultPostgresClient();
 			await ensurePostgresKvSchema(postgres);
 			const executor = new PostgresKvQueryExecutor(postgres, Config.postgres.readStateBatchingEnabled);
+			await executor.startChannelMetadataCache(Config.postgres.channelMetadataCacheEnabled);
 			setDatabaseQueryExecutor(executor);
 			Logger.info('Postgres KV client initialised for worker backend');
 		}

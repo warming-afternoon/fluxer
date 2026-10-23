@@ -69,6 +69,8 @@ export interface MasterConfig {
 			prepared_statements: boolean;
 			/** 是否主动等待跨请求已读组批 */
 			read_state_batching_enabled: boolean;
+			/** 是否启用带数据库失效通知的频道元数据缓存 */
+			channel_metadata_cache_enabled: boolean;
 		};
 	};
 	s3?: {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {ChannelID, GuildID, UserID} from '@app/api/BrandedTypes';
-import {fetchOne} from '@app/api/database/CassandraQueryExecution';
+import {fetchOne, getChannelMetadata} from '@app/api/database/CassandraQueryExecution';
 import type {ChannelRow} from '@app/api/database/types/ChannelTypes';
 import {
 	THREAD_CHANNEL_TYPES,
@@ -41,6 +41,9 @@ function rememberChannelMeta(channelId: ChannelID, meta: ReadStateChannelHint): 
 }
 
 async function loadChannelMeta(channelId: ChannelID): Promise<ReadStateChannelHint | null> {
+	// Cassandra 继续使用下方独立缓存，只有 PostgreSQL 提供共享入口。
+	const metadata = getChannelMetadata([channelId]);
+	if (metadata !== null) return (await metadata).get(channelId) ?? null;
 	const cached = channelMetaCache.get(channelId.toString());
 	if (cached !== undefined) return cached;
 	const row = await fetchOne<Pick<ChannelRow, 'channel_id' | 'guild_id' | 'type'>>(FETCH_CHANNEL_META_CQL, {

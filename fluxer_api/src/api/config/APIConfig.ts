@@ -72,6 +72,8 @@ export interface APIConfig {
 		preparedStatements: boolean;
 		/** 是否启用跨请求收集窗口 */
 		readStateBatchingEnabled: boolean;
+		/** 是否启用带数据库失效通知的频道元数据缓存 */
+		channelMetadataCacheEnabled: boolean;
 	};
 	database: {
 		backend: 'cassandra' | 'postgres';

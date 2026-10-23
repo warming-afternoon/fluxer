@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import type {ChannelID} from '@app/api/BrandedTypes';
 import {getKvMeta, getTableMetadata} from '@app/api/database/CassandraMetaRegistry';
 import type {
 	CassandraParams,
@@ -10,10 +11,13 @@ import type {
 	WhereExpr,
 } from '@app/api/database/CassandraTypes';
 import {isConditionalQuery, validateTtlSeconds} from '@app/api/database/CassandraTypes';
+import {type ChannelMetadata, ChannelMetadataCache} from '@app/api/database/ChannelMetadataCache';
+import {PostgresChannelMetadataInvalidation} from '@app/api/database/PostgresChannelMetadataInvalidation';
 import {PostgresReadStateBatcher} from '@app/api/database/PostgresReadStateBatcher';
 import type {ReadStateMutation, ReadStateMutationResult} from '@app/api/database/ReadStateMutation';
-import type {ReadStateRow} from '@app/api/database/types/ChannelTypes';
+import type {ChannelRow, ReadStateRow} from '@app/api/database/types/ChannelTypes';
 import {Logger} from '@app/api/Logger';
+import {Channels} from '@app/api/Tables';
 import {type IPostgresClient, type PostgresQueryable, quoteIdentifier} from '@pkgs/postgres/src/Client';
 import cassandra from 'cassandra-driver';
 
@@ -1024,12 +1028,26 @@ WHERE kv.table_name = expired.table_name AND kv.row_key = expired.row_key`,
 export class PostgresKvQueryExecutor {
 	private readonly table: string;
 	private readonly readStateBatcher: PostgresReadStateBatcher;
+	private readonly channelMetadata: ChannelMetadataCache;
+	private readonly channelInvalidation: PostgresChannelMetadataInvalidation;
 
 	constructor(
 		private readonly client: IPostgresClient,
 		readStateBatchingEnabled = true,
 	) {
 		this.table = quoteIdentifier(client.kvTable());
+		this.channelMetadata = new ChannelMetadataCache(async (ids) => {
+			const rows = await this.executeQuery<Pick<ChannelRow, 'channel_id' | 'guild_id' | 'type'>>(
+				Channels.select({
+					columns: ['channel_id', 'guild_id', 'type'],
+					where: [Channels.where.in('channel_id', 'channel_ids'), Channels.where.eq('soft_deleted')],
+				}).bind({channel_ids: ids, soft_deleted: false}),
+			);
+			return new Map(
+				rows.map((row) => [row.channel_id, {channelId: row.channel_id, guildId: row.guild_id ?? null, type: row.type}]),
+			);
+		});
+		this.channelInvalidation = new PostgresChannelMetadataInvalidation(client, this.channelMetadata);
 		this.readStateBatcher = new PostgresReadStateBatcher(
 			client,
 			{
@@ -1048,11 +1066,31 @@ export class PostgresKvQueryExecutor {
 
 	/** 报告跨请求组批和积压水位 */
 	renderReadStateMetrics(): string {
-		return this.readStateBatcher.renderMetrics();
+		return this.readStateBatcher.renderMetrics() + this.channelMetadata.renderMetrics();
+	}
+
+	/** 启用失败只停用缓存，不影响数据库和已读批处理服务 */
+	async startChannelMetadataCache(enabled = true): Promise<void> {
+		if (!enabled) return;
+		try {
+			await this.channelInvalidation.start();
+		} catch (error) {
+			await this.channelInvalidation.shutdown();
+			logWarn(
+				{errorName: error instanceof Error ? error.name : 'UnknownError'},
+				'Channel metadata cache disabled: notification initialization failed',
+			);
+		}
+	}
+
+	/** PostgreSQL 共用稳定字段缓存，未启用时使用原批量读取 */
+	getChannelMetadata(ids: ReadonlyArray<ChannelID>): Promise<Map<ChannelID, ChannelMetadata>> {
+		return this.channelMetadata.getMany(ids);
 	}
 
 	/** 先结束已接收的状态更新，再交由生命周期关闭连接池 */
 	async shutdown(): Promise<void> {
+		await this.channelInvalidation.shutdown();
 		await this.readStateBatcher.shutdown();
 	}
 

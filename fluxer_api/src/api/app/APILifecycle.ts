@@ -133,6 +133,7 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 				const postgres = getDefaultPostgresClient();
 				await ensurePostgresKvSchema(postgres);
 				const executor = new PostgresKvQueryExecutor(postgres, config.postgres.readStateBatchingEnabled);
+				await executor.startChannelMetadataCache(config.postgres.channelMetadataCacheEnabled);
 				setDatabaseQueryExecutor(executor);
 				logger.info('Postgres KV client initialized');
 			} else if (config.database.backend === 'postgres') {

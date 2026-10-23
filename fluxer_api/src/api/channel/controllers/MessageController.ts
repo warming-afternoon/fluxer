@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import {requireSudoMode} from '@app/api/auth/services/SudoVerificationService';
 import {createAttachmentID, createChannelID, createMessageID} from '@app/api/BrandedTypes';
 import type {MessageRequest, MessageUpdateRequest} from '@app/api/channel/MessageTypes';
@@ -562,7 +563,7 @@ export function MessageController(app: HonoApp) {
 		}),
 		async (ctx) => {
 			const {channel_id, message_id} = ctx.req.valid('param');
-			const userId = ctx.get('user').id;
+			const userId = getRequestIdentity(ctx)!.id;
 			const channelId = createChannelID(channel_id);
 			const messageId = createMessageID(message_id);
 			const {mention_count: mentionCount, manual} = ctx.req.valid('json');

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import type {HonoEnv} from '@app/api/types/HonoEnv';
 import {AccessDeniedError} from '@fluxer/errors/src/domains/core/AccessDeniedError';
 import {UnauthorizedError} from '@fluxer/errors/src/domains/core/UnauthorizedError';
@@ -15,7 +16,7 @@ function ensureOAuth2BearerRouteSupport(
 }
 
 export const LoginRequired = createMiddleware<HonoEnv>(async (ctx, next) => {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user) {
 		throw new UnauthorizedError();
 	}
@@ -23,7 +24,7 @@ export const LoginRequired = createMiddleware<HonoEnv>(async (ctx, next) => {
 	await next();
 });
 export const DefaultUserOnly = createMiddleware<HonoEnv>(async (ctx, next) => {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user) {
 		throw new UnauthorizedError();
 	}
@@ -33,7 +34,7 @@ export const DefaultUserOnly = createMiddleware<HonoEnv>(async (ctx, next) => {
 	await next();
 });
 export const BotOnly = createMiddleware<HonoEnv>(async (ctx, next) => {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user) {
 		throw new UnauthorizedError();
 	}

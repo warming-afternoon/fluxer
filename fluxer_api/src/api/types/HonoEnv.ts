@@ -5,6 +5,7 @@ import type {AdminService} from '@app/api/admin/AdminService';
 import type {AdminApiKeyService} from '@app/api/admin/services/AdminApiKeyService';
 import type {AdminArchiveService} from '@app/api/admin/services/AdminArchiveService';
 import type {AuthRequestService} from '@app/api/auth/AuthRequestService';
+import type {ReadStatePrincipal} from '@app/api/auth/ReadStatePrincipal';
 import type {DesktopHandoffService} from '@app/api/auth/services/DesktopHandoffService';
 import type {SsoService} from '@app/api/auth/services/SsoService';
 import type {ApplicationID, UserID} from '@app/api/BrandedTypes';
@@ -85,6 +86,8 @@ export interface HonoEnv {
 	Variables: {
 		apiContext: ApiContext;
 		user: User;
+		/** 仅会话已读接口使用的窄身份，与完整用户模型分离。 */
+		readStatePrincipal?: ReadStatePrincipal;
 		requestId?: string;
 		clientIpResolution?: ClientIpResolution;
 		adminService: AdminService;

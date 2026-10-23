@@ -52,6 +52,9 @@ export interface APIConfig {
 	readState?: {
 		/** 合并已读后的两次网关调用。 */
 		combinedGatewayRpcEnabled: boolean;
+
+		/** 会话已读请求采用窄字段认证。 */
+		narrowAuthEnabled: boolean;
 	};
 	automatedMessageDeletionDelayDays: number;
 	ipBanExemptIps: Array<string>;

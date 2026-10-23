@@ -185,6 +185,7 @@ export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 		maxInflightRequests: master.services.api.max_inflight_requests,
 		readState: {
 			combinedGatewayRpcEnabled: master.services.api.read_state_combined_gateway_rpc_enabled ?? false,
+			narrowAuthEnabled: master.services.api.read_state_narrow_auth_enabled ?? false,
 		},
 		automatedMessageDeletionDelayDays: master.services.api.automated_message_deletion_delay_days,
 		ipBanExemptIps: normalizeIpBanExemptIps(master.services.api.ip_ban_exempt_ips),

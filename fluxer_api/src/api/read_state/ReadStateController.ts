@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import {DefaultUserOnly, LoginRequired} from '@app/api/middleware/AuthMiddleware';
 import {RateLimitMiddleware} from '@app/api/middleware/RateLimitMiddleware';
 import {OpenAPI} from '@app/api/middleware/ResponseTypeMiddleware';
@@ -34,7 +35,7 @@ export function ReadStateController(app: Hono<HonoEnv>): void {
 		async (ctx) => {
 			return ctx.json(
 				await ctx.get('readStateRequestService').ackReadStates({
-					userId: ctx.get('user').id,
+					userId: getRequestIdentity(ctx)!.id,
 					data: ctx.req.valid('json'),
 					capable: readStateCapable(ctx),
 				}),
@@ -58,7 +59,7 @@ export function ReadStateController(app: Hono<HonoEnv>): void {
 		Validator('json', ReadStateAckBulkRequest),
 		async (ctx) => {
 			await ctx.get('readStateRequestService').bulkAckMessages({
-				userId: ctx.get('user').id,
+				userId: getRequestIdentity(ctx)!.id,
 				data: ctx.req.valid('json'),
 				capable: readStateCapable(ctx),
 			});

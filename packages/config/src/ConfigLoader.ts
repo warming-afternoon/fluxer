@@ -85,6 +85,7 @@ function defaultConfig(): MasterConfig {
 				prepared_statements: true,
 				read_state_batching_enabled: true,
 				channel_metadata_cache_enabled: true,
+				guild_availability_cache_enabled: false,
 			},
 		},
 		s3: {
@@ -404,6 +405,11 @@ function validateVapidConfig(config: MasterConfig): void {
 
 function validatePostgresConfig(config: MasterConfig): void {
 	const postgres = config.database.postgres;
+	const metadataCache = config.database.metadata_cache;
+	if (metadataCache?.channel_enabled !== undefined)
+		assertBoolean(metadataCache.channel_enabled, 'FLUXER_CHANNEL_METADATA_CACHE_ENABLED');
+	if (metadataCache?.guild_enabled !== undefined)
+		assertBoolean(metadataCache.guild_enabled, 'FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED');
 	assertIntegerInRange(postgres.port, 'FLUXER_POSTGRES_PORT', 1, 65535);
 	assertIntegerInRange(postgres.max_connections, 'FLUXER_POSTGRES_MAX_CONNECTIONS', 1, 1000);
 	assertBoolean(postgres.ssl, 'FLUXER_POSTGRES_SSL');
@@ -411,6 +417,7 @@ function validatePostgresConfig(config: MasterConfig): void {
 	assertBoolean(postgres.prepared_statements, 'FLUXER_POSTGRES_PREPARED_STATEMENTS');
 	assertBoolean(postgres.read_state_batching_enabled, 'FLUXER_READ_STATE_BATCHING_ENABLED');
 	assertBoolean(postgres.channel_metadata_cache_enabled, 'FLUXER_CHANNEL_METADATA_CACHE_ENABLED');
+	assertBoolean(postgres.guild_availability_cache_enabled, 'FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED');
 	if (config.env !== 'production' || config.database.backend !== 'postgres') {
 		return;
 	}

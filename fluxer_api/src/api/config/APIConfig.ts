@@ -74,9 +74,11 @@ export interface APIConfig {
 		readStateBatchingEnabled: boolean;
 		/** 是否启用带数据库失效通知的频道元数据缓存 */
 		channelMetadataCacheEnabled: boolean;
+		guildAvailabilityCacheEnabled: boolean;
 	};
 	database: {
 		backend: 'cassandra' | 'postgres';
+		metadataCache?: {channelEnabled: boolean; guildEnabled: boolean};
 	};
 	kv: {
 		url: string;

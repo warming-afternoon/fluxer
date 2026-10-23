@@ -14,26 +14,38 @@ export interface ChannelMetadata {
 }
 
 interface Entry {
+	/** 缓存的稳定频道元数据。 */
 	value: ChannelMetadata;
 
+	/** 该条目的过期时间。 */
 	expiresAt: number;
 }
 
 interface Flight {
+	/** 从回源开始计算的固定截止时间。 */
+	expiresAt: number;
+
+	/** 共享的在途读取结果。 */
 	promise: Promise<ChannelMetadata | null>;
 
+	/** 完成等待者并交付读取结果。 */
 	resolve: (value: ChannelMetadata | null) => void;
 
+	/** 向所有等待者传播读取错误。 */
 	reject: (error: unknown) => void;
 }
 
 interface Options {
+	/** 最多缓存的频道数量。 */
 	capacity?: number;
 
+	/** 缓存固定有效期的毫秒数。 */
 	ttlMs?: number;
 
+	/** 最多同时填充的频道数量。 */
 	maxFlights?: number;
 
+	/** 可注入的当前时间来源。 */
 	now?: () => number;
 }
 
@@ -67,7 +79,13 @@ export class ChannelMetadataCache {
 		this.flights.clear();
 	}
 
-	/** 移除指定频道，后续请求不会加入失效前的查询 */
+	/** 清空条目和在途查询代次，但不改变就绪状态或连接。 */
+	clear(): void {
+		this.entries.clear();
+		this.flights.clear();
+	}
+
+	/** 移除指定频道，后续请求不再加入失效前的查询。 */
 	invalidate(id: ChannelID): void {
 		this.entries.delete(id);
 		this.flights.delete(id);
@@ -109,7 +127,7 @@ export class ChannelMetadataCache {
 				continue;
 			} else {
 				const deferred = Promise.withResolvers<ChannelMetadata | null>();
-				flight = {...deferred};
+				flight = {...deferred, expiresAt: this.now() + this.ttlMs};
 				this.flights.set(id, flight);
 				this.activeFills += 1;
 				this.counters.misses += 1;
@@ -141,9 +159,9 @@ export class ChannelMetadataCache {
 			for (const [id, flight] of batch) {
 				const row = rows.get(id);
 				const value = row ? Object.freeze({...row}) : null;
-				if (this.ready && this.flights.get(id) === flight && value) {
+				if (this.ready && this.flights.get(id) === flight && value && flight.expiresAt > this.now()) {
 					this.entries.delete(id);
-					this.entries.set(id, {value, expiresAt: this.now() + this.ttlMs});
+					this.entries.set(id, {value, expiresAt: flight.expiresAt});
 					this.counters.fills += 1;
 					while (this.entries.size > this.capacity) this.entries.delete(this.entries.keys().next().value!);
 				}

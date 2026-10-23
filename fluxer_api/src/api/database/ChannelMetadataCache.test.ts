@@ -55,7 +55,7 @@ describe('shared channel metadata cache', () => {
 		expect(load).toHaveBeenCalledTimes(4);
 	});
 
-	it.each(['invalidate', 'reconnect'] as const)(
+	it.each(['invalidate', 'reconnect', 'clear'] as const)(
 		'prevents stale refills after %s and lets new callers start fresh',
 		async (kind) => {
 			const id = createChannelID(1n);
@@ -68,6 +68,7 @@ describe('shared channel metadata cache', () => {
 			cache.setReady(true);
 			const pending = cache.get(id);
 			if (kind === 'invalidate') cache.invalidate(id);
+			else if (kind === 'clear') cache.clear();
 			else {
 				cache.setReady(false);
 				cache.setReady(true);
@@ -110,4 +111,38 @@ describe('shared channel metadata cache', () => {
 		await cache.get(id);
 		expect(load).toHaveBeenCalledTimes(4);
 	});
+});
+
+it('bounds unannounced source expiry by cache TTL rather than promising database TTL notifications', async () => {
+	let now = 0;
+	let exists = true;
+	const id = createChannelID(1n);
+	const cache = new ChannelMetadataCache(async () => (exists ? new Map([[id, metadata()]]) : new Map()), {
+		now: () => now,
+	});
+	cache.setReady(true);
+	expect(await cache.get(id)).not.toBeNull();
+	exists = false; // Future database TTL or unsupported external writer emits no invalidation.
+	now = 299_999;
+	expect(await cache.get(id)).not.toBeNull();
+	now = 300_000;
+	expect(await cache.get(id)).toBeNull();
+});
+
+it('expires from query start and never grants a slow old query another five minutes', async () => {
+	let now = 0;
+	const gate = Promise.withResolvers<Map<ReturnType<typeof createChannelID>, ChannelMetadata>>();
+	const id = createChannelID(1n);
+	const load = vi
+		.fn()
+		.mockReturnValueOnce(gate.promise)
+		.mockResolvedValue(new Map([[id, metadata(1, 11)]]));
+	const cache = new ChannelMetadataCache(load, {now: () => now});
+	cache.setReady(true);
+	const pending = cache.get(id);
+	now = 300_000;
+	gate.resolve(new Map([[id, metadata()]]));
+	expect((await pending)?.type).toBe(1);
+	expect((await cache.get(id))?.type).toBe(11);
+	expect(load).toHaveBeenCalledTimes(2);
 });

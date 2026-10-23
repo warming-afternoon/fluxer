@@ -23,6 +23,8 @@ const configuredMaxWorkers = parseParallelInteger(process.env.API_TEST_MAX_WORKE
 const configuredMaxConcurrency = parseParallelInteger(process.env.API_TEST_MAX_CONCURRENCY, configuredMaxWorkers);
 
 const MODULE_REGISTRY_TEST_FILES = [
+	'src/api/database/CassandraMetadataCaches.test.ts',
+	'src/api/database/CassandraMetadataExecution.test.ts',
 	'src/api/channel/tests/MessageCrosspostFanout.test.ts',
 	'src/api/experiment/tests/ExperimentController.test.ts',
 	'src/api/stripe/tests/StripeCheckoutCountryEnforcement.test.ts',

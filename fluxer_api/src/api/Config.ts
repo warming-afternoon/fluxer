@@ -206,10 +206,23 @@ export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 			kvTable: postgresSource?.kv_table ?? 'fluxer_kv',
 			preparedStatements: postgresSource?.prepared_statements ?? true,
 			readStateBatchingEnabled: postgresSource?.read_state_batching_enabled ?? true,
-			channelMetadataCacheEnabled: postgresSource?.channel_metadata_cache_enabled ?? true,
+			channelMetadataCacheEnabled:
+				master.database.metadata_cache?.channel_enabled ?? postgresSource?.channel_metadata_cache_enabled ?? true,
+			guildAvailabilityCacheEnabled:
+				master.database.metadata_cache?.guild_enabled ?? postgresSource?.guild_availability_cache_enabled ?? false,
 		},
 		database: {
 			backend: master.database.backend,
+			metadataCache: {
+				channelEnabled:
+					master.database.metadata_cache?.channel_enabled ??
+					(master.database.backend === 'postgres' ? (postgresSource?.channel_metadata_cache_enabled ?? true) : false),
+				guildEnabled:
+					master.database.metadata_cache?.guild_enabled ??
+					(master.database.backend === 'postgres'
+						? (postgresSource?.guild_availability_cache_enabled ?? false)
+						: false),
+			},
 		},
 		kv: {
 			url: master.internal.kv,

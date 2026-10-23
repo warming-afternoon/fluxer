@@ -53,8 +53,12 @@ const NAMED_FLUXER_ENV_OVERRIDES: Record<string, NamedEnvOverride> = {
 		path: ['database', 'postgres', 'read_state_batching_enabled'],
 		parse: parseBoolean,
 	},
+	FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED: {
+		path: ['database', 'metadata_cache', 'guild_enabled'],
+		parse: parseBoolean,
+	},
 	FLUXER_CHANNEL_METADATA_CACHE_ENABLED: {
-		path: ['database', 'postgres', 'channel_metadata_cache_enabled'],
+		path: ['database', 'metadata_cache', 'channel_enabled'],
 		parse: parseBoolean,
 	},
 	FLUXER_POSTGRES_KV_TABLE: {path: ['database', 'postgres', 'kv_table']},

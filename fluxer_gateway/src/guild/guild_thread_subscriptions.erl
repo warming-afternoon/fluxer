@@ -24,8 +24,8 @@
 -define(MAX_MEMBER_LISTS, 10).
 -define(MAX_LIST_MEMBERS, 1000).
 -define(MAX_PRESENCE_USERS, 1000).
--define(SYNC_JITTER_MS, 5000).
--define(SYNC_RATE, 20).
+-define(DEFAULT_SYNC_JITTER_MS, 500).
+-define(DEFAULT_SYNC_RATE, 80).
 -define(SYNC_RETRY_MS, 100).
 -define(LIST_FLUSH_MS, 250).
 -define(COUNTS_KEY, {?MODULE, list_sync}).
@@ -106,6 +106,14 @@ session_can_view(#{user_id := UserId}, Thread, State) when is_integer(UserId) ->
 session_can_view(_Session, _Thread, _State) ->
     false.
 
+sync_rate() -> configured_positive(thread_sync_rate, ?DEFAULT_SYNC_RATE).
+sync_jitter_ms() -> configured_positive(thread_sync_jitter_ms, ?DEFAULT_SYNC_JITTER_MS).
+configured_positive(Key, Default) ->
+    case fluxer_gateway_env:get_optional(Key) of
+        Value when is_integer(Value), Value > 0 -> Value;
+        _ -> Default
+    end.
+
 -spec schedule_sync(binary(), guild_state()) -> guild_state().
 schedule_sync(SessionId, State) ->
     Pending = maps:get(thread_sync_pending, State, #{}),
@@ -114,7 +122,7 @@ schedule_sync(SessionId, State) ->
             State;
         false ->
             _ = erlang:send_after(
-                rand:uniform(?SYNC_JITTER_MS) - 1, self(), {thread_list_sync_tick, SessionId}
+                rand:uniform(sync_jitter_ms()) - 1, self(), {thread_list_sync_tick, SessionId}
             ),
             State#{thread_sync_pending => Pending#{SessionId => scheduled}}
     end.
@@ -177,7 +185,7 @@ drain(State) ->
             maps:remove(thread_sync_queue, State);
         {{value, SessionId}, Rest} ->
             Now = erlang:monotonic_time(millisecond),
-            case take_token(Now, maps:get(thread_sync_bucket, State, {?SYNC_RATE, Now})) of
+            case take_token(Now, maps:get(thread_sync_bucket, State, {sync_rate(), Now})) of
                 {ok, Bucket} ->
                     send_full_sync(SessionId, State),
                     Pending = maps:remove(SessionId, maps:get(thread_sync_pending, State, #{})),
@@ -187,7 +195,7 @@ drain(State) ->
                         })
                     );
                 {wait, {Tokens, _} = Bucket} ->
-                    arm_drain(ceil((1 - Tokens) * 1000 / ?SYNC_RATE), State#{
+                    arm_drain(ceil((1 - Tokens) * 1000 / sync_rate()), State#{
                         thread_sync_bucket => Bucket
                     })
             end
@@ -209,7 +217,7 @@ arm_drain(DelayMs, State) ->
 -spec take_token(integer(), {number(), integer()}) ->
     {ok, {number(), integer()}} | {wait, {number(), integer()}}.
 take_token(Now, {Tokens0, Last}) ->
-    Tokens = min(?SYNC_RATE, Tokens0 + (Now - Last) * ?SYNC_RATE / 1000),
+    Tokens = min(sync_rate(), Tokens0 + (Now - Last) * sync_rate() / 1000),
     case Tokens >= 1 of
         true -> {ok, {Tokens - 1, Now}};
         false -> {wait, {Tokens, Now}}
@@ -572,8 +580,8 @@ token_bucket_allows_twenty_per_second_test() ->
             {ok, Next} = take_token(Now, B),
             Next
         end,
-        {?SYNC_RATE, Now},
-        lists:seq(1, ?SYNC_RATE)
+        {sync_rate(), Now},
+        lists:seq(1, sync_rate())
     ),
     ?assertMatch({wait, _}, take_token(Now, Bucket)),
     ?assertMatch({ok, _}, take_token(Now + 50, Bucket)).
@@ -591,10 +599,10 @@ queued_syncs_share_one_drain_timer() ->
     ?assertEqual(1000, queue:len(maps:get(thread_sync_queue, State2))),
     ?assertEqual(true, maps:get(thread_sync_timer, State2)),
     State3 = handle_drain(State2#{
-        thread_sync_bucket => {?SYNC_RATE, erlang:monotonic_time(millisecond)}
+        thread_sync_bucket => {sync_rate(), erlang:monotonic_time(millisecond)}
     }),
     Left = queue:len(maps:get(thread_sync_queue, State3)),
-    ?assert(Left =< 1000 - ?SYNC_RATE andalso Left >= 1000 - ?SYNC_RATE - 2),
+    ?assert(Left =< 1000 - sync_rate() andalso Left >= 1000 - sync_rate() - 2),
     ?assertEqual(true, maps:get(thread_sync_timer, State3)),
     ?assertEqual(1, count_drains(300, 0)).
 

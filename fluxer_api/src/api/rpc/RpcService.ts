@@ -317,6 +317,26 @@ export class RpcService {
 						limit: request.limit,
 					}),
 				};
+			case 'guild_member_bounds': {
+				const guildId = createGuildID(request.guild_id);
+				await this.getGuildOrThrow(guildId);
+				const bounds = await this.guildRepository.getMemberIdBounds(guildId);
+				return {
+					type: 'guild_member_bounds',
+					data: {min_user_id: bounds.minUserId?.toString() ?? null, max_user_id: bounds.maxUserId?.toString() ?? null},
+				};
+			}
+			case 'guild_member_range':
+				return {
+					type: 'guild_member_range',
+					data: await this.handleGuildCollectionMembersRequest({
+						guildId: createGuildID(request.guild_id),
+						requestCache,
+						afterUserId: request.after_user_id ? createUserID(request.after_user_id) : undefined,
+						throughUserId: request.through_user_id ? createUserID(request.through_user_id) : undefined,
+						limit: request.limit,
+					}),
+				};
 			case 'voice_state_upsert':
 				await this.persistGuildVoiceState({
 					guildId: createGuildID(request.guild_id),
@@ -1447,18 +1467,23 @@ export class RpcService {
 		guildId,
 		requestCache,
 		afterUserId,
+		throughUserId,
 		limit,
 	}: {
 		guildId: GuildID;
 		requestCache: RequestCache;
 		afterUserId?: UserID;
+		throughUserId?: UserID;
 		limit?: number;
 	}): Promise<RpcResponseGuildCollectionData> {
 		if (!afterUserId) {
 			await this.getGuildOrThrow(guildId);
 		}
 		const chunkSize = this.resolveGuildCollectionLimit(limit);
-		const members = await this.guildRepository.listMembersPaginated(guildId, chunkSize + 1, afterUserId);
+		const members =
+			throughUserId === undefined
+				? await this.guildRepository.listMembersPaginated(guildId, chunkSize + 1, afterUserId)
+				: await this.guildRepository.listMembersInRange(guildId, chunkSize + 1, afterUserId, throughUserId);
 		const hasMore = members.length > chunkSize;
 		const pageMembers = hasMore ? members.slice(0, chunkSize) : members;
 		const mappedMembers = await this.mapRpcGuildMembers({guildId, members: pageMembers, requestCache});

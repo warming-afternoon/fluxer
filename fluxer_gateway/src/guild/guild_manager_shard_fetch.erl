@@ -71,7 +71,10 @@ await_collection(Ref, PendingCollections, Acc, DeadlineMs, RemainingMs) ->
 -spec fetch_guild_collection(guild_id(), binary()) ->
     {ok, term()} | {ok, term(), map()} | {error, term()}.
 fetch_guild_collection(GuildId, <<"members">>) ->
-    fetch_members_stream(GuildId, undefined, []);
+    case fluxer_gateway_env:get_optional(guild_member_load_concurrency) of
+        N when N =:= 2; N =:= 4; N =:= 8 -> fetch_members_parallel(GuildId, N);
+        _ -> fetch_members_stream(GuildId, undefined, [])
+    end;
 fetch_guild_collection(GuildId, <<"channels">>) ->
     RpcRequest = #{
         <<"type">> => <<"guild_collection">>,
@@ -158,6 +161,150 @@ maybe_put_after(undefined, RpcRequest) ->
     RpcRequest;
 maybe_put_after(AfterUserId, RpcRequest) when is_binary(AfterUserId) ->
     RpcRequest#{<<"after_user_id">> => AfterUserId}.
+
+%% The outer ranges remain open: bounds are scheduling hints, not a snapshot.
+fetch_members_parallel(GuildId, N) ->
+    case
+        rpc_client:call(#{
+            <<"type">> => <<"guild_member_bounds">>,
+            <<"guild_id">> => type_conv:to_binary(GuildId)
+        })
+    of
+        {ok, #{<<"min_user_id">> := Min, <<"max_user_id">> := Max}} ->
+            case member_ranges(Min, Max, N) of
+                {ok, Ranges} ->
+                    Fetch = fun({Index, {After, Through}}) ->
+                        fetch_member_range(GuildId, Index, After, Through, [], N)
+                    end,
+                    case guild_thread_member_loader:run(lists:enumerate(Ranges), N, Fetch) of
+                        {ok, Chunks} -> {ok, lists:append(Chunks)};
+                        Error -> Error
+                    end;
+                Error ->
+                    Error
+            end;
+        {error, Reason} ->
+            {error, Reason};
+        _ ->
+            {error, invalid_member_bounds}
+    end.
+
+member_ranges(null, null, _N) ->
+    {ok, [{undefined, undefined}]};
+member_ranges(Min0, Max0, N) ->
+    case {member_id(Min0), member_id(Max0)} of
+        {{ok, Min}, {ok, Max}} when Min =< Max ->
+            Bounds = lists:usort([
+                B
+             || I <- lists:seq(1, N - 1),
+                B <- [Min + ((Max - Min + 1) * I div N) - 1],
+                B >= Min,
+                B < Max
+            ]),
+            Bins = [integer_to_binary(B) || B <- Bounds],
+            {ok, lists:zip([undefined | Bins], Bins ++ [undefined])};
+        _ ->
+            {error, invalid_member_bounds}
+    end.
+
+member_id(B) when is_binary(B) ->
+    try binary_to_integer(B) of
+        I when I > 0 ->
+            case integer_to_binary(I) =:= B of
+                true -> {ok, I};
+                false -> error
+            end;
+        _ ->
+            error
+    catch
+        _:_ -> error
+    end;
+member_id(_) ->
+    error.
+
+fetch_member_range(GuildId, Index, After, Through, Acc, N) ->
+    Request0 = maybe_put_after(After, #{
+        <<"type">> => <<"guild_member_range">>,
+        <<"guild_id">> => type_conv:to_binary(GuildId),
+        <<"limit">> => 1000
+    }),
+    Request =
+        case Through of
+            undefined -> Request0;
+            _ -> Request0#{<<"through_user_id">> => Through}
+        end,
+    case rpc_client:call(Request) of
+        {ok, Data} ->
+            case validated_range_page(Data, After, Through) of
+                {ok, Members, Next} ->
+                    case Next of
+                        null ->
+                            {ok, lists:append(lists:reverse([Members | Acc]))};
+                        _ ->
+                            fetch_member_range(
+                                GuildId, Index, Next, Through, [Members | Acc], N
+                            )
+                    end;
+                Error ->
+                    Error
+            end;
+        {error, Reason} ->
+            {error, Reason};
+        _ ->
+            {error, invalid_members_range_response}
+    end.
+
+validated_range_page(
+    #{
+        <<"members">> := Members,
+        <<"has_more">> := More,
+        <<"next_after_user_id">> := Next
+    },
+    After,
+    Through
+) when is_list(Members) ->
+    try
+        Lower =
+            case After of
+                undefined ->
+                    0;
+                _ ->
+                    {ok, L} = member_id(After),
+                    L
+            end,
+        Upper =
+            case Through of
+                undefined ->
+                    infinity;
+                _ ->
+                    {ok, U} = member_id(Through),
+                    U
+            end,
+        Last = lists:foldl(
+            fun(#{<<"user">> := #{<<"id">> := Id}}, Prev) ->
+                {ok, I} = member_id(Id),
+                true = I > Prev,
+                true = (Upper =:= infinity orelse I =< Upper),
+                I
+            end,
+            Lower,
+            Members
+        ),
+        case {More, Next} of
+            {false, null} ->
+                {ok, Members, null};
+            {true, Cursor} ->
+                {ok, C} = member_id(Cursor),
+                true = C > Lower,
+                true = C >= Last,
+                true = (Upper =:= infinity orelse C =< Upper),
+                {ok, Members, Cursor}
+        end
+    catch
+        _:_ -> {error, invalid_members_range_page}
+    end;
+validated_range_page(_, _, _) ->
+    {error, invalid_members_range_page}.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

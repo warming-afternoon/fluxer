@@ -86,6 +86,17 @@ export const RpcRequest = z.discriminatedUnion('type', [
 		after_user_id: SnowflakeType.optional().describe('Cursor for member collection pagination'),
 	}),
 	z.object({
+		type: z.literal('guild_member_bounds').describe('Read-only guild member ID bounds for load scheduling'),
+		guild_id: SnowflakeType,
+	}),
+	z.object({
+		type: z.literal('guild_member_range').describe('Read-only bounded guild member page'),
+		guild_id: SnowflakeType,
+		limit: z.number().int().min(1).max(1000).optional(),
+		after_user_id: SnowflakeType.optional().describe('Exclusive lower cursor'),
+		through_user_id: SnowflakeType.optional().describe('Inclusive upper bound'),
+	}),
+	z.object({
 		type: z.literal('voice_state_upsert').describe('Request type for persisting a guild voice state snapshot'),
 		guild_id: SnowflakeType.describe('ID of the guild for this voice state'),
 		voice_state: VoiceStateResponse.describe('Voice state payload to persist'),
@@ -400,6 +411,14 @@ export const RpcResponse = z.discriminatedUnion('type', [
 	z.object({
 		type: z.literal('guild_collection').describe('Response type for guild collection chunks'),
 		data: RpcResponseGuildCollectionData.describe('Guild collection chunk data'),
+	}),
+	z.object({
+		type: z.literal('guild_member_bounds'),
+		data: z.object({min_user_id: SnowflakeStringType.nullable(), max_user_id: SnowflakeStringType.nullable()}),
+	}),
+	z.object({
+		type: z.literal('guild_member_range'),
+		data: RpcResponseGuildCollectionData,
 	}),
 	z.object({
 		type: z.literal('voice_state_upsert').describe('Response type for voice state persistence upsert'),

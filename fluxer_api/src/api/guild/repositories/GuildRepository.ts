@@ -339,6 +339,43 @@ export class GuildRepository {
 		return rows.map((row) => new GuildMember(row));
 	}
 
+	/** Bounds are scheduling hints; the caller keeps outer ranges unbounded. */
+	async getMemberIdBounds(guildId: GuildID): Promise<{minUserId: UserID | null; maxUserId: UserID | null}> {
+		const page = (direction: 'ASC' | 'DESC') =>
+			GuildMembers.select({
+				columns: ['user_id'],
+				where: GuildMembers.where.eq('guild_id'),
+				orderBy: {col: 'user_id', direction},
+				limit: 1,
+			}).bind({guild_id: guildId});
+		const [first, last] = await Promise.all([
+			fetchMany<Pick<GuildMemberRow, 'user_id'>>(page('ASC')),
+			fetchMany<Pick<GuildMemberRow, 'user_id'>>(page('DESC')),
+		]);
+		return {minUserId: first[0]?.user_id ?? null, maxUserId: last[0]?.user_id ?? null};
+	}
+
+	async listMembersInRange(
+		guildId: GuildID,
+		limit: number,
+		afterUserId?: UserID,
+		throughUserId?: UserID,
+	): Promise<Array<GuildMember>> {
+		if (afterUserId !== undefined && throughUserId !== undefined && afterUserId >= throughUserId) return [];
+		const where: Array<WhereExpr<GuildMemberRow>> = [GuildMembers.where.eq('guild_id')];
+		const params: {guild_id: GuildID; user_id?: UserID; through_user_id?: UserID} = {guild_id: guildId};
+		if (afterUserId !== undefined) {
+			where.push(GuildMembers.where.gt('user_id'));
+			params.user_id = afterUserId;
+		}
+		if (throughUserId !== undefined) {
+			where.push(GuildMembers.where.lte('user_id', 'through_user_id'));
+			params.through_user_id = throughUserId;
+		}
+		const rows = await fetchMany<GuildMemberRow>(GuildMembers.select({where, limit}).bind(params));
+		return rows.map((row) => new GuildMember(row));
+	}
+
 	private async deleteMemberRows(guildId: GuildID, userId: UserID): Promise<void> {
 		const batch = new BatchBuilder();
 		batch.addPrepared(

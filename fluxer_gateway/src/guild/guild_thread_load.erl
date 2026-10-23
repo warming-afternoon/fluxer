@@ -107,20 +107,35 @@ with_paged_members(GuildId, Threads, Data) ->
         Class:Reason -> {error, {Class, Reason}}
     end.
 
--spec fetch_thread_members(integer(), [binary()], [[map()]]) ->
-    {ok, [map()]} | {error, term()}.
-fetch_thread_members(_GuildId, [], Acc) ->
-    {ok, lists:append(lists:reverse(Acc))};
+%% 独立帖子批次最多两批并行，单批页游标仍串行推进，最终按原批次顺序还原。
+-spec fetch_thread_members(integer(), [binary()], [[map()]]) -> {ok, [map()]} | {error, term()}.
 fetch_thread_members(GuildId, ThreadIds, Acc) ->
-    {Batch, Rest} = lists:split(min(?MEMBER_THREAD_BATCH, length(ThreadIds)), ThreadIds),
-    case
+    Limit =
+        case fluxer_gateway_env:get(thread_member_load_concurrency) of
+            undefined -> 2;
+            N -> N
+        end,
+    Batches = member_batches(ThreadIds, []),
+    Fetch = fun(Batch) ->
         fetch_member_pages(
-            GuildId, Batch, undefined, Acc, ?MEMBER_PAGES_PER_THREAD * length(Batch)
+            GuildId, Batch, undefined, [], ?MEMBER_PAGES_PER_THREAD * length(Batch)
         )
-    of
-        {ok, Acc1} -> fetch_thread_members(GuildId, Rest, Acc1);
-        {error, Reason} -> {error, Reason}
+    end,
+    case guild_thread_member_loader:run(Batches, Limit, Fetch) of
+        {ok, Results} ->
+            Members = lists:append([lists:append(lists:reverse(Pages)) || Pages <- Results]),
+            {ok, lists:append(lists:reverse(Acc)) ++ Members};
+        {error, _} = Error ->
+            Error
     end.
+
+%% 分批只改变调度，不改变帖子顺序、每批上限或页内游标。
+-spec member_batches([binary()], [[binary()]]) -> [[binary()]].
+member_batches([], Acc) ->
+    lists:reverse(Acc);
+member_batches(Ids, Acc) ->
+    {Batch, Rest} = lists:split(min(?MEMBER_THREAD_BATCH, length(Ids)), Ids),
+    member_batches(Rest, [Batch | Acc]).
 
 -spec fetch_member_pages(
     integer(), [binary()], binary() | undefined, [[map()]], non_neg_integer()
@@ -128,8 +143,8 @@ fetch_thread_members(GuildId, ThreadIds, Acc) ->
     {ok, [[map()]]} | {error, term()}.
 fetch_member_pages(_GuildId, [], _After, Acc, _PagesLeft) ->
     {ok, Acc};
-fetch_member_pages(_GuildId, _ThreadIds, _After, Acc, 0) ->
-    {ok, Acc};
+fetch_member_pages(_GuildId, _ThreadIds, _After, _Acc, 0) ->
+    {error, thread_member_page_budget_exhausted};
 fetch_member_pages(GuildId, ThreadIds, After, Acc, PagesLeft) ->
     Request0 = #{
         <<"type">> => <<"list_thread_members">>,
@@ -149,7 +164,12 @@ fetch_member_pages(GuildId, ThreadIds, After, Acc, PagesLeft) ->
                 done ->
                     {ok, Acc1};
                 {Remaining, Next} ->
-                    fetch_member_pages(GuildId, Remaining, Next, Acc1, PagesLeft - 1);
+                    case {Remaining, Next} =:= {ThreadIds, After} of
+                        true ->
+                            {error, non_advancing_thread_member_cursor};
+                        false ->
+                            fetch_member_pages(GuildId, Remaining, Next, Acc1, PagesLeft - 1)
+                    end;
                 invalid ->
                     {error, invalid_thread_members_page}
             end;
@@ -409,9 +429,8 @@ start_retry(#{thread_load := Load0} = State) ->
             _ -> false
         end,
     Load = maps:remove(ref, Load0),
-    Timer = erlang:send_after(
-        retry_delay(maps:get(attempt, Load, 0)), self(), thread_load_retry
-    ),
+    Delay = retry_delay(maps:get(attempt, Load, 0)),
+    Timer = erlang:send_after(Delay, self(), thread_load_retry),
     State#{thread_load => Load#{status => loading, timer => Timer}}.
 
 -spec retry_delay(non_neg_integer()) -> non_neg_integer().
@@ -534,6 +553,18 @@ fetch_counts() ->
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+member_page_budget_must_not_publish_partial_test() ->
+    ?assertEqual(
+        {error, thread_member_page_budget_exhausted},
+        fetch_member_pages(1, [<<"1">>], undefined, [[#{}]], 0)
+    ).
+
+member_batch_boundaries_preserve_all_ids_test() ->
+    Ids = [integer_to_binary(I) || I <- lists:seq(1, 205)],
+    Batches = member_batches(Ids, []),
+    ?assertEqual([100, 100, 5], [length(B) || B <- Batches]),
+    ?assertEqual(Ids, lists:append(Batches)).
 
 channels_collection_inactive_keeps_channels_test() ->
     Response = #{<<"channels">> => [#{<<"id">> => <<"1">>}]},

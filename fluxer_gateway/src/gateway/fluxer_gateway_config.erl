@@ -79,6 +79,8 @@ env_gateway_base_config() ->
         <<"push_enrolled_clear_notifications_enabled">> => env_bool(
             "FLUXER_GATEWAY_PUSH_ENROLLED_CLEAR_NOTIFICATIONS_ENABLED", true
         ),
+        <<"thread_sync_rate">> => env_int("FLUXER_GATEWAY_THREAD_SYNC_RATE", 80),
+        <<"thread_sync_jitter_ms">> => env_int("FLUXER_GATEWAY_THREAD_SYNC_JITTER_MS", 500),
         <<"push_outbox_request_timeout_ms">> => env_int(
             "FLUXER_GATEWAY_PUSH_OUTBOX_REQUEST_TIMEOUT_MS", 100000
         ),
@@ -108,6 +110,12 @@ env_gateway_base_config() ->
         ),
         <<"presence_push_buffer_max_bytes">> => env_int(
             "FLUXER_GATEWAY_PRESENCE_PUSH_BUFFER_MAX_BYTES", 1048576
+        ),
+        <<"thread_member_load_concurrency">> => env_int(
+            "FLUXER_GATEWAY_THREAD_MEMBER_LOAD_CONCURRENCY", 2
+        ),
+        <<"guild_member_load_concurrency">> => env_int(
+            "FLUXER_GATEWAY_GUILD_MEMBER_LOAD_CONCURRENCY", 4
         ),
         <<"gateway_http_rpc_max_concurrency">> => env_int(
             "FLUXER_GATEWAY_HTTP_RPC_MAX_CONCURRENCY", 512
@@ -281,10 +289,31 @@ parse_guild_id(Token) ->
 -spec build_misc_config(map()) -> config().
 build_misc_config(Service) ->
     #{
+        thread_sync_rate => positive_config(Service, <<"thread_sync_rate">>, 80),
+        thread_sync_jitter_ms => positive_config(Service, <<"thread_sync_jitter_ms">>, 500),
+        thread_member_load_concurrency => thread_member_concurrency(Service),
+        guild_member_load_concurrency => guild_member_concurrency(Service),
         voice_state_counts_sync_interval_ms =>
             get_int(Service, <<"voice_state_counts_sync_interval_ms">>, 30000),
         logger_level => get_log_level(Service, <<"logger_level">>, info)
     }.
+
+%% 帖子成员加载只接受串行或两批并发。
+-spec thread_member_concurrency(map()) -> 1 | 2.
+thread_member_concurrency(Service) ->
+    Value = get_int(Service, <<"thread_member_load_concurrency">>, 2),
+    case Value of
+        1 -> 1;
+        2 -> 2;
+        _ -> erlang:error({invalid_thread_member_load_concurrency, Value})
+    end.
+
+guild_member_concurrency(Service) ->
+    Value = get_int(Service, <<"guild_member_load_concurrency">>, 4),
+    case lists:member(Value, [1, 2, 4, 8]) of
+        true -> Value;
+        false -> erlang:error({invalid_guild_member_load_concurrency, Value})
+    end.
 
 -spec get_map(map(), [binary()]) -> map().
 get_map(Map, Keys) ->
@@ -560,3 +589,12 @@ public_endpoint(Url, Public) ->
 -spec optional_string(binary() | undefined) -> string() | undefined.
 optional_string(undefined) -> undefined;
 optional_string(Bin) when is_binary(Bin) -> binary_to_list(Bin).
+
+
+
+%% 受控重启更新地址列表，拒绝凭据、重复地址及非 RPC 路径。
+positive_config(Service, Key, Default) ->
+    case get_int(Service, Key, Default) of
+        Value when Value > 0 -> Value;
+        Value -> erlang:error({invalid_gateway_config, Key, Value})
+    end.

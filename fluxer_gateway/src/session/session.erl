@@ -62,6 +62,8 @@
     collected_sessions => [map()],
     collected_presences => [map()],
     guild_subscription_state => #{guild_id() => map()},
+    thread_watch_leases => #{guild_id() => map()},
+    thread_watch_generation => non_neg_integer(),
     relationships => #{user_id() => integer()},
     suppress_presence_updates => boolean(),
     pending_presences => pending_presence_buffer(),
@@ -171,6 +173,12 @@ handle_cast_guild_or_lifecycle({guild_join, GuildId}, State) when is_integer(Gui
     {noreply, session_bot_guilds:track_join(GuildId, State)};
 handle_cast_guild_or_lifecycle({store_guild_subscriptions, Data}, State) when is_map(Data) ->
     {noreply, session_guilds:store_guild_subscriptions(Data, State)};
+handle_cast_guild_or_lifecycle({update_thread_watches, Data, SocketPid}, State) when
+    is_map(Data)
+->
+    session_thread_watches:update(Data, SocketPid, State);
+handle_cast_guild_or_lifecycle({thread_watch_ack, Data}, State) when is_map(Data) ->
+    session_thread_watches:acknowledge(Data, State);
 handle_cast_guild_or_lifecycle({guild_leave, GuildId, forced_unavailable, true}, State) when
     is_integer(GuildId)
 ->

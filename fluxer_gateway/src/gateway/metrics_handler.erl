@@ -310,7 +310,8 @@ render_channel_threads_stats() ->
             ]
         ),
         render_identify_counts(safe_apply_map(fun channel_threads_config:identify_counts/0)),
-        render_thread_stats()
+        render_thread_stats(),
+        render_thread_watch_stats()
     ].
 
 -spec render_thread_stats() -> iolist().
@@ -378,6 +379,28 @@ render_thread_stats() ->
             <<"counter">>,
             <<"GUILD_CREATE resends after a channel threads gate flip">>,
             integer_to_binary(safe_apply_int(fun guild_thread_flip:resend_count/0))
+        )
+    ].
+
+%% 导出浏览订阅规模、缓存行为和处理成本，标签维度保持固定
+-spec render_thread_watch_stats() -> iolist().
+render_thread_watch_stats() ->
+    Counts = safe_apply_map(fun guild_thread_watch_metrics:counts/0),
+    [
+        format_metric(
+            <<"fluxer_gateway_thread_watch_leases">>,
+            <<"gauge">>,
+            <<"Stored post browsing leases awaiting cancellation or expiry cleanup">>,
+            integer_to_binary(safe_apply_int(fun guild_thread_watch_metrics:leases/0))
+        ),
+        format_labeled_series(
+            <<"fluxer_gateway_thread_watch_operations_total">>,
+            <<"counter">>,
+            <<"Post browsing operations and cumulative processing microseconds">>,
+            [
+                {<<"operation=\"", (atom_to_binary(Kind))/binary, "\"">>, integer_to_binary(N)}
+             || {Kind, N} <- lists:sort(maps:to_list(Counts))
+            ]
         )
     ].
 

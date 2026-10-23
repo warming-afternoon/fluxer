@@ -102,7 +102,7 @@ guild_scope(GuildId, Request, Guilds) ->
             denied
     end.
 
-%% 将论坛未读查询限制为用户已加入且可访问的帖子
+%% 主动未读查询按真实访问权限处理，冷帖子交由API再次授权。
 -spec scope(map() | undefined, map(), map()) -> {ok, #{integer() => thread_scope()}} | denied.
 scope(undefined, _Request, _State) ->
     denied;
@@ -114,16 +114,7 @@ scope(Session, #{channel_id := ForumId, thread_ids := ThreadIds}, State) when
             guild_member_list_connected:session_can_view_channel(Session, ForumId, State)
     of
         true ->
-            Joined = [
-                Id
-             || Id <- ThreadIds,
-                is_integer(Id),
-                case guild_thread_gate:store(State) of
-                    undefined -> false;
-                    Tab -> guild_thread_store:is_member(Tab, Id, maps:get(user_id, Session))
-                end
-            ],
-            {ok, thread_scopes(ForumId, Joined, State)};
+            {ok, thread_scopes(Session, ForumId, ThreadIds, State)};
         false ->
             denied
     end;
@@ -143,28 +134,33 @@ is_forum(ChannelId, State) ->
         _ -> false
     end.
 
--spec thread_scopes(integer(), [term()], map()) -> #{integer() => thread_scope()}.
-thread_scopes(ForumId, ThreadIds, State) ->
+-spec thread_scopes(map(), integer(), [term()], map()) -> #{integer() => thread_scope()}.
+thread_scopes(Session, ForumId, ThreadIds, State) ->
     maps:from_list([
         {ThreadId, Scope}
      || ThreadId <- ThreadIds,
         is_integer(ThreadId),
-        Scope <- [thread_scope(ThreadId, ForumId, State)],
+        Scope <- [thread_scope(Session, ThreadId, ForumId, State)],
         Scope =/= foreign
     ]).
 
--spec thread_scope(integer(), integer(), map()) -> thread_scope() | foreign.
-thread_scope(ThreadId, ForumId, State) ->
+-spec thread_scope(map(), integer(), integer(), map()) -> thread_scope() | foreign.
+thread_scope(Session, ThreadId, ForumId, State) ->
     case guild_thread_gate:thread(ThreadId, State) of
         undefined ->
             unstored;
         Thread ->
             case snowflake_id:parse_maybe(maps:get(<<"parent_id">>, Thread, undefined)) of
                 ForumId ->
-                    {stored,
-                        snowflake_id:parse_maybe(
-                            maps:get(<<"last_message_id">>, Thread, undefined)
-                        )};
+                    case guild_thread_gate:thread_view_access(Session, Thread, State, #{}) of
+                        {true, _} ->
+                            {stored,
+                                snowflake_id:parse_maybe(
+                                    maps:get(<<"last_message_id">>, Thread, undefined)
+                                )};
+                        {false, _} ->
+                            foreign
+                    end;
                 _ ->
                     foreign
             end
@@ -197,12 +193,7 @@ resolve(GuildId, ChannelId, UserId, Threads, Scopes) ->
 
 -spec local_entry(integer() | undefined, thread_scope()) ->
     map() | {remote, integer() | undefined}.
-local_entry(undefined, {stored, _LastMessageId}) ->
-    #{<<"missing">> => true};
-local_entry(Ack, {stored, LastMessageId}) when
-    is_integer(Ack), (LastMessageId =:= undefined orelse LastMessageId =< Ack)
-->
-    #{<<"count">> => 0};
+%% 会话缓存没有年龄与消息历史授权信息，冷热请求统一交由API验证。
 local_entry(Ack, _Scope) ->
     {remote, Ack}.
 
@@ -282,10 +273,10 @@ parse_threads_dedupes_and_caps_at_forty_test() ->
     ?assertEqual([{9, undefined}], parse_threads([#{<<"thread_id">> => 9}])),
     ?assertEqual([], parse_threads(null)).
 
-local_entries_skip_the_rpc_when_the_store_answers_test() ->
-    ?assertEqual(#{<<"missing">> => true}, local_entry(undefined, {stored, 10})),
-    ?assertEqual(#{<<"count">> => 0}, local_entry(10, {stored, 10})),
-    ?assertEqual(#{<<"count">> => 0}, local_entry(10, {stored, undefined})),
+local_entries_require_api_authorization_for_warm_and_cold_posts_test() ->
+    ?assertEqual({remote, undefined}, local_entry(undefined, {stored, 10})),
+    ?assertEqual({remote, 10}, local_entry(10, {stored, 10})),
+    ?assertEqual({remote, 10}, local_entry(10, {stored, undefined})),
     ?assertEqual({remote, 10}, local_entry(10, {stored, 11})),
     ?assertEqual({remote, undefined}, local_entry(undefined, unstored)).
 
@@ -375,7 +366,7 @@ scope_requires_a_viewer_session_on_a_visible_forum_test() ->
         )
     end).
 
-resolve_asks_the_api_only_for_threads_with_newer_messages_test() ->
+resolve_asks_the_api_for_all_explicitly_requested_visible_posts_test() ->
     Self = self(),
     ok = meck:new(rpc_client, [passthrough, no_link]),
     try
@@ -384,6 +375,8 @@ resolve_asks_the_api_only_for_threads_with_newer_messages_test() ->
             {ok, #{
                 <<"threads">> => [
                     #{<<"thread_id">> => <<"500">>, <<"count">> => 3},
+                    #{<<"thread_id">> => <<"501">>, <<"count">> => 0},
+                    #{<<"thread_id">> => <<"502">>, <<"missing">> => true},
                     #{<<"thread_id">> => <<"700">>, <<"missing">> => true}
                 ]
             }}
@@ -409,6 +402,8 @@ resolve_asks_the_api_only_for_threads_with_newer_messages_test() ->
                 ?assertEqual(
                     [
                         #{<<"thread_id">> => <<"500">>, <<"ack_message_id">> => <<"505">>},
+                        #{<<"thread_id">> => <<"501">>, <<"ack_message_id">> => <<"520">>},
+                        #{<<"thread_id">> => <<"502">>},
                         #{<<"thread_id">> => <<"700">>}
                     ],
                     Threads

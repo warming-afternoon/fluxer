@@ -87,17 +87,14 @@ apply_member_lists(Ids, Session, State) when is_list(Ids) ->
 apply_member_lists(_Other, Session, _State) ->
     {Session, []}.
 
-%% 检查成员列表订阅是否满足目录规则和访问权限
+%% 显式成员列表订阅只检查真实访问权限，不建立关注或消息订阅。
 -spec viewable_thread(map(), integer(), guild_state()) -> boolean().
 viewable_thread(Session, ThreadId, State) ->
     case guild_thread_gate:thread(ThreadId, State) of
         undefined ->
             false;
         Thread ->
-            guild_thread_gate:directory_allowed(
-                maps:get(user_id, Session, undefined), Thread, State
-            ) andalso
-                session_can_view(Session, Thread, State)
+            session_can_view(Session, Thread, State)
     end.
 
 -spec session_can_view(map(), map(), guild_state()) -> boolean().
@@ -479,7 +476,7 @@ list_pids(ThreadId, SessionIds, Sessions, State) ->
             Pids
     end.
 
-%% 向仍具备成员资格与访问权限的订阅会话发送成员列表
+%% 向仍具备实际访问权限的显式订阅会话发送成员列表。
 -spec list_pid(integer(), map(), term(), guild_state(), [pid()], map()) -> {[pid()], map()}.
 list_pid(
     ThreadId,
@@ -489,12 +486,7 @@ list_pid(
     Acc,
     Memo
 ) when is_pid(Pid) ->
-    case
-        lists:member(ThreadId, Lists) andalso
-            guild_thread_gate:directory_allowed(
-                maps:get(user_id, Session, undefined), Thread, State
-            )
-    of
+    case lists:member(ThreadId, Lists) of
         true ->
             case guild_thread_gate:thread_view_access(Session, Thread, State, Memo) of
                 {true, Memo1} -> {[Pid | Acc], Memo1};

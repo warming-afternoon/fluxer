@@ -398,8 +398,24 @@ async fn run_clear_job(state: &AppState, sends: &Semaphore, job: ClearJob) -> an
     let started_ms = now_ms();
     let deadline = Instant::now() + RETRY_DEADLINE;
     let user_ids = std::slice::from_ref(&job.user_id);
-    let (badges, subscriptions) =
-        lookup_delivery_context(&state.rpc, user_ids, Audience::Standard, deadline).await?;
+    let (badges, subscriptions) = if let Some(batcher) = &state.subscription_batcher {
+        let devices = batcher
+            .get(job.user_id.clone(), deadline)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let subscriptions = HashMap::from([(job.user_id.clone(), devices)]);
+        let badges = lookup_badges(
+            &state.rpc,
+            user_ids,
+            &subscriptions,
+            Audience::Standard,
+            deadline,
+        )
+        .await?;
+        (badges, subscriptions)
+    } else {
+        lookup_delivery_context(&state.rpc, user_ids, Audience::Standard, deadline).await?
+    };
     state.metrics.record_recipients(1);
 
     let envelope = payload::web_push_clear(&job, badge_of(&badges, &job.user_id));
@@ -524,7 +540,7 @@ async fn run_ring_job(state: &AppState, sends: &Semaphore, job: RingJob) -> anyh
     Ok(())
 }
 
-async fn lookup<T, F, Fut>(deadline: Instant, mut call: F) -> Result<T, RpcError>
+pub(crate) async fn lookup<T, F, Fut>(deadline: Instant, mut call: F) -> Result<T, RpcError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, RpcError>>,

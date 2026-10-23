@@ -42,9 +42,10 @@ safe_scope(Tab, ChannelId) ->
         error:badarg -> undefined
     end.
 
+%% 附加候选用户所需的线程通知设置，保留新帖标记和原有回退行为
 -spec push_message_data(map(), integer(), [user_id()], map()) -> {map(), binary()} | undefined.
 push_message_data(MessageData, ChannelId, UserIds, Data) ->
-    case scope(ChannelId, Data) of
+    case push_scope(MessageData, ChannelId, UserIds, Data) of
         undefined ->
             undefined;
         #{thread := Thread, members := Members} ->
@@ -71,6 +72,39 @@ push_message_data(MessageData, ChannelId, UserIds, Data) ->
                 },
                 thread_name(Thread)
             }
+    end.
+
+%% 普通线程只读取候选成员，论坛新帖保留适用于大量 watcher 的成员快照路径
+-spec push_scope(map(), integer(), [user_id()], map()) -> scope().
+push_scope(#{?FORUM_THREAD_CREATED_KEY := true}, ChannelId, _UserIds, Data) ->
+    %% watcher 数量可能远超线程成员数量，复用已有快照避免逐个查询非成员
+    scope(ChannelId, Data);
+push_scope(_MessageData, ChannelId, UserIds, Data) ->
+    case guild_thread_gate:store(Data) of
+        undefined -> undefined;
+        Tab -> safe_candidate_scope(Tab, ChannelId, UserIds)
+    end.
+
+%% 去重读取候选成员，存储中途失效时放弃部分结果并沿用不可用回退
+-spec safe_candidate_scope(ets:table(), integer(), [user_id()]) -> scope().
+safe_candidate_scope(Tab, ChannelId, UserIds) ->
+    try
+        case guild_thread_store:get_thread(Tab, ChannelId) of
+            undefined ->
+                undefined;
+            Thread ->
+                #{
+                    thread => Thread,
+                    members => maps:from_list([
+                        {UserId, Member}
+                     || UserId <- lists:usort(UserIds),
+                        Member <- [guild_thread_store:get_member(Tab, ChannelId, UserId)],
+                        is_map(Member)
+                    ])
+                }
+        end
+    catch
+        error:badarg -> undefined
     end.
 
 -spec take_forum_thread_created(map()) -> {boolean(), map()}.
@@ -232,6 +266,83 @@ push_message_data_stamps_parent_and_member_settings_test() ->
         )
     end).
 
+%% 仅在测试期间记录成员读取，并保证 mock 在异常时也被释放
+-spec with_mock_store(fun(() -> term())) -> term().
+with_mock_store(Fun) ->
+    ok = meck:new(guild_thread_store, [passthrough, no_link]),
+    try
+        Fun()
+    after
+        meck:unload(guild_thread_store)
+    end.
+
+push_message_data_reads_candidate_members_only_test() ->
+    with_mock_store(fun() ->
+        meck:expect(guild_thread_store, members, fun(_Tab, _ThreadId) ->
+            error(unexpected_full_member_scan)
+        end),
+        with_store(fun(Data) ->
+            Tab = maps:get(thread_store, Data),
+            MuteConfig = #{<<"end_time">> => <<"2099-01-01T00:00:00Z">>},
+            Settings = #{
+                <<"flags">> => 1, <<"muted">> => true, <<"mute_config">> => MuteConfig
+            },
+            ok = guild_thread_store:put_member(Tab, 500, 2, Settings#{
+                <<"id">> => 500, <<"user_id">> => 2, <<"join_timestamp">> => <<"x">>
+            }),
+            {MessageData, <<"t">>} = push_message_data(#{}, 500, [2, 3, 2], Data),
+            ThreadPush = maps:get(?THREAD_PUSH_KEY, MessageData),
+            ?assertEqual(#{2 => Settings}, maps:get(<<"members">>, ThreadPush)),
+            ?assertEqual(1, meck:num_calls(guild_thread_store, get_member, [Tab, 500, 2])),
+            ?assertEqual(1, meck:num_calls(guild_thread_store, get_member, [Tab, 500, 3])),
+            ?assertEqual(0, meck:num_calls(guild_thread_store, get_member, [Tab, 500, 1])),
+            ?assertEqual(0, meck:num_calls(guild_thread_store, members, '_'))
+        end)
+    end).
+
+push_message_data_matches_full_scope_member_settings_test() ->
+    with_store(fun(Data) ->
+        #{members := Members} = scope(500, Data),
+        lists:foreach(
+            fun(UserIds) ->
+                {MessageData, <<"t">>} = push_message_data(#{}, 500, UserIds, Data),
+                ThreadPush = maps:get(?THREAD_PUSH_KEY, MessageData),
+                ?assertEqual(
+                    member_settings(UserIds, Members), maps:get(<<"members">>, ThreadPush)
+                )
+            end,
+            [[], [1], [1, 2], [2, 3], [3], [2, 2]]
+        )
+    end).
+
+push_message_data_preserves_unavailable_scope_fallback_test() ->
+    with_store(fun(Data) ->
+        ?assertEqual(undefined, push_message_data(#{}, 200, [1], Data)),
+        ?assertEqual(
+            undefined,
+            push_message_data(#{}, 500, [1], Data#{thread_gate => #{active => false}})
+        ),
+        Deleted = guild_thread_store:new(),
+        ok = guild_thread_store:destroy(Deleted),
+        ?assertEqual(
+            undefined, push_message_data(#{}, 500, [1], Data#{thread_store => Deleted})
+        )
+    end).
+
+push_message_data_discards_partial_members_if_store_disappears_test() ->
+    with_mock_store(fun() ->
+        meck:expect(guild_thread_store, get_member, fun(Tab, ThreadId, UserId) ->
+            case UserId of
+                2 -> guild_thread_store:destroy(Tab);
+                _ -> ok
+            end,
+            meck:passthrough([Tab, ThreadId, UserId])
+        end),
+        with_store(fun(Data) ->
+            ?assertEqual(undefined, push_message_data(#{}, 500, [1, 2], Data))
+        end)
+    end).
+
 with_forum_store(Fun) ->
     Tab = guild_thread_store:new(),
     try
@@ -293,6 +404,24 @@ forum_thread_created_marker_moves_into_the_thread_push_test() ->
         ),
         {Plain, _} = push_message_data(#{<<"id">> => <<"701">>}, 700, [2], Data),
         ?assertNot(maps:is_key(<<"forum_thread_created">>, maps:get(?THREAD_PUSH_KEY, Plain)))
+    end).
+
+forum_thread_created_keeps_member_scan_for_many_watchers_test() ->
+    with_mock_store(fun() ->
+        meck:expect(guild_thread_store, get_member, fun(_Tab, _ThreadId, _UserId) ->
+            error(unexpected_watcher_lookup)
+        end),
+        with_forum_store(fun(Data) ->
+            Tab = maps:get(thread_store, Data),
+            Marked = mark_forum_thread_created(#{<<"id">> => <<"700">>}),
+            UserIds = [1 | lists:seq(1000, 2999)],
+            {MessageData, <<"post">>} = push_message_data(Marked, 700, UserIds, Data),
+            ThreadPush = maps:get(?THREAD_PUSH_KEY, MessageData),
+            ?assertEqual(#{1 => #{<<"flags">> => 1}}, maps:get(<<"members">>, ThreadPush)),
+            ?assertEqual(true, maps:get(<<"forum_thread_created">>, ThreadPush)),
+            ?assertEqual(1, meck:num_calls(guild_thread_store, members, [Tab, 700])),
+            ?assertEqual(0, meck:num_calls(guild_thread_store, get_member, '_'))
+        end)
     end).
 
 passive_threads_need_a_viewer_session_test() ->

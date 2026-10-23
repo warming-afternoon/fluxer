@@ -91,3 +91,5 @@ highestCapacityPassedOnline 记录完整满足吞吐验收的最高档位；不�
 凭据和输出保护：夹具应使用随机生成的合成账号凭据；输出可能包含合成账号 ID 与环境信息，分享前需脱敏。不要提交 *.private.json、*.env、数据转储或测量结果。
 
 通用准备工具：startup/Preparation.mjs 提供恢复快照成员证明复用、批量隔离检查和 keeper→目标连接交接适配器。必须绑定不可变快照与fixture SHA，验证恢复完成和独立inode；每轮重新检查容器身份/镜像/预算/端口/挂载。目标首目录出现后关闭keeper，关闭确认后才等待稳定；正式测量后必须调用 auditAfterMeasurement 执行完整成员审计和push排空。适配器不修改fixture地址，不绕过权限，不做CAS实验迁移。startup-only仍通过forum_load.mjs入口执行，不能标为容量通过。
+
+外部HTTP指标工具：metrics/MetricHttpClient.mjs 的 startMetricClient({port,namespace}) 创建单个长期worker。namespace为 namespaceIdentity(pid) 返回的Linux bootId/startTicks身份；调用方仍必须先验证PID属于所需容器。省略namespace只访问本机loopback，供隔离测试/本地指标使用。固定 /_metrics，无自动重试；保留真实HTTP状态、900ms请求超时、512KiB上限和逐请求时钟。调用方必须记录每次失败，并检查stop().ok；helper在末次采样后异常死亡同样使stop失败，不可把缺失指标视为0。此工具降低观测准备开销，没有业务吞吐收益承诺。

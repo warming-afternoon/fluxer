@@ -21,6 +21,7 @@
     event_scope/3,
     viewer_sessions/1,
     thread_sessions/6,
+    with_message_channel_context/3,
     thread_view_access/4,
     needs_variant/1,
     mask_payload/2,
@@ -443,6 +444,40 @@ delivery_interested(Event, Data, Session, ThreadId, Thread, State) ->
                 maps:get(<<"mentions">>, Data, [])
             )).
 
+%% 在接收者完成实际权限筛选后，一次构造所属帖子的公共模型，不改变订阅或成员关系
+-spec with_message_channel_context(atom(), map(), guild_state()) -> map().
+with_message_channel_context(message_create, Data, State) ->
+    case event_scope(message_create, Data, State) of
+        {thread, _ThreadId, Thread} ->
+            %% 内部上下文补齐被存储容量淘汰的帖子基础字段，白名单排除用户专属及内部状态
+            Base = maps:get(<<"_fluxer_thread">>, Data, #{}),
+            Context = maps:with(
+                [
+                    <<"id">>,
+                    <<"guild_id">>,
+                    <<"parent_id">>,
+                    <<"type">>,
+                    <<"name">>,
+                    <<"owner_id">>,
+                    <<"last_message_id">>,
+                    <<"last_pin_timestamp">>,
+                    <<"rate_limit_per_user">>,
+                    <<"flags">>,
+                    <<"thread_metadata">>,
+                    <<"applied_tags">>,
+                    <<"message_count">>,
+                    <<"total_message_sent">>,
+                    <<"member_count">>
+                ],
+                (maps:merge(Thread, Base))#{<<"guild_id">> => maps:get(<<"guild_id">>, Data)}
+            ),
+            Data#{<<"channel_context">> => Context};
+        _ ->
+            maps:remove(<<"channel_context">>, Data)
+    end;
+with_message_channel_context(_Event, Data, _State) ->
+    Data.
+
 -spec prepend(boolean(), binary(), map(), [session_pair()]) -> [session_pair()].
 prepend(true, Sid, Session, Acc) -> [{Sid, Session} | Acc];
 prepend(false, _Sid, _Session, Acc) -> Acc.
@@ -598,7 +633,7 @@ mask_payload(_Event, Data) ->
 
 -spec mask_message(map()) -> map().
 mask_message(Message) ->
-    Message1 = maps:remove(<<"thread">>, Message),
+    Message1 = maps:without([<<"thread">>, <<"channel_context">>], Message),
     Message2 =
         case maps:get(<<"flags">>, Message1, undefined) of
             Flags when is_integer(Flags) ->

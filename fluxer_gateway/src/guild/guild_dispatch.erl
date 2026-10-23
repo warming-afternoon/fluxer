@@ -93,7 +93,9 @@ process_regular_dispatch(Event, EventData, State) ->
     FilteredSessions = filter_dispatch_sessions(
         Event, FinalData0, SessionIdOpt, Sessions, FilterState
     ),
-    FinalData = strip_thread_internal(FinalData0, UpdatedState),
+    FinalData = strip_thread_internal(
+        guild_thread_gate:with_message_channel_context(Event, FinalData0, FilterState), UpdatedState
+    ),
     ?LOG_DEBUG(
         "process_dispatch: event=~p guild_id=~p total_sessions=~p filtered_sessions=~p",
         [Event, GuildId, map_size(Sessions), length(FilteredSessions)]

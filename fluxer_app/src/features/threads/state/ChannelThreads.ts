@@ -298,6 +298,20 @@ class ChannelThreads {
 		}
 	}
 
+	/** 在消息消费者运行前补齐所属帖子，保留现有模型与成员信息且不创建关注或浏览订阅。 */
+	ingestMessageChannelContexts(messages: ReadonlyArray<WireMessage>): void {
+		for (const message of messages) {
+			const context = message.channel_context;
+			if (!context || context.id !== message.channel_id || context.guild_id !== message.guild_id) continue;
+			if (!context.guild_id || !ThreadGuilds.isActive(context.guild_id)) continue;
+			const existing = Channels.getChannel(context.id);
+			// 公共上下文即使来自较旧事件，也不能覆盖本地已有完整模型或更新自身成员状态。
+			const {member: _member, member_ids_preview: _preview, ...publicContext} = context;
+			const channel = existing ?? this.upsert(publicContext, context.guild_id);
+			if (channel?.isThread()) this.messageContextReferences.add(channel.id);
+		}
+	}
+
 	ingestMessageThreads(messages: ReadonlyArray<WireMessage>): void {
 		for (const message of messages) {
 			const thread = message.thread as ChannelWire | undefined;

@@ -15,7 +15,9 @@ import TtsUtils from '@app/features/voice/utils/VoiceTtsUtils';
 import type {GuildMemberData} from '@fluxer/schema/src/domains/guild/GuildMemberSchemas';
 import type {Message} from '@fluxer/schema/src/domains/message/MessageResponseSchemas';
 
+/** 先补齐消息所属帖子，再按原顺序更新消息、未读、提及与通知。 */
 export function handleMessageCreate(data: Message, _context: GatewayHandlerContext): void {
+	ChannelThreads.ingestMessageChannelContexts([data]);
 	if (data.guild_id && data.member) {
 		GuildMembers.hydrateIfMissing(data.guild_id, {
 			...data.member,

@@ -1235,13 +1235,26 @@ view_to_filtermap(UserId, ChannelId, Member, State) ->
         false -> false
     end.
 
+%% 复用活跃状态通知资格，并为当前消息重新生成宽限截止时间
 -spec build_push_session_eligibility(map(), guild_state()) ->
     {#{user_id() => boolean()}, grace_hold()}.
 build_push_session_eligibility(Sessions, State) ->
-    case presence_eligibility_enabled() of
-        true -> build_push_presence_eligibility(Sessions, State);
-        false -> build_legacy_session_eligibility(Sessions)
-    end.
+    %% 缓存只保存状态推导结果，避免将旧消息的宽限截止时间带到新消息
+    PresenceMode = presence_eligibility_enabled(),
+    {Eligibility, Held} = guild_push_activity_cache:get(
+        Sessions,
+        maps:get(member_presence, State, undefined),
+        PresenceMode,
+        fun() ->
+            {Computed, Hold} =
+                case PresenceMode of
+                    true -> build_push_presence_eligibility(Sessions, State);
+                    false -> build_legacy_session_eligibility(Sessions)
+                end,
+            {Computed, held_sessions(Hold)}
+        end
+    ),
+    {Eligibility, grace_hold(Held)}.
 
 -spec grace_guild_pid() -> pid() | undefined.
 grace_guild_pid() ->

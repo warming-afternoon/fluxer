@@ -341,6 +341,7 @@ thread_sessions(Event, Data, ThreadId, Thread, SessionIdOpt, State) ->
             false -> undefined
         end,
     Ctx = {Thread, guild_thread_permissions:parent_id(Thread), MessageId, State},
+    Candidates = delivery_candidates(Event, Data, ThreadId, Thread, State),
     {Pairs, _Memo} = maps:fold(
         fun(Sid, Session, {Acc, Memo}) ->
             case
@@ -357,9 +358,40 @@ thread_sessions(Event, Data, ThreadId, Thread, SessionIdOpt, State) ->
             end
         end,
         {[], #{}},
-        maps:get(sessions, State, #{})
+        Candidates
     ),
     Pairs.
+
+%% 从帖子成员与直接提及用户中查找在线设备，减少论坛事件的全会话扫描
+-spec delivery_candidates(atom(), map(), integer(), map(), guild_state()) -> map().
+delivery_candidates(Event, Data, ThreadId, Thread, State) ->
+    Sessions = maps:get(sessions, State, #{}),
+    ParentId = guild_thread_permissions:parent_id(Thread),
+    case is_thread_only_type(channel_type(ParentId, State)) of
+        false ->
+            Sessions;
+        true ->
+            %% 加入和退出关系始终读取最新存储，归档事件使用成员快照
+            Members =
+                case thread(ThreadId, State) of
+                    undefined ->
+                        snowflake_id:parse_list(maps:get(<<"_fluxer_member_ids">>, Thread, []));
+                    _ ->
+                        guild_thread_store:member_ids(store(State), ThreadId)
+                end,
+            %% 只有消息创建允许直接提及的非成员进入候选集合
+            Mentions =
+                case Event of
+                    message_create ->
+                        snowflake_id:parse_list([
+                            Id
+                         || #{<<"id">> := Id} <- maps:get(<<"mentions">>, Data, [])
+                        ]);
+                    _ ->
+                        []
+                end,
+            guild_online_session_index:for_users(Sessions, Members ++ Mentions)
+    end.
 
 %% 普通论坛事件要求成员资格，消息创建允许带权限检查的直接提及例外
 -spec delivery_interested(atom(), map(), map(), integer(), map(), guild_state()) -> boolean().

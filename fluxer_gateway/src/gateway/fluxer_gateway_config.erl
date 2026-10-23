@@ -81,6 +81,9 @@ env_gateway_base_config() ->
         ),
         <<"thread_sync_rate">> => env_int("FLUXER_GATEWAY_THREAD_SYNC_RATE", 80),
         <<"thread_sync_jitter_ms">> => env_int("FLUXER_GATEWAY_THREAD_SYNC_JITTER_MS", 500),
+        <<"push_outbox_max_inflight">> => env_int(
+            "FLUXER_GATEWAY_PUSH_OUTBOX_MAX_INFLIGHT", 96
+        ),
         <<"push_outbox_request_timeout_ms">> => env_int(
             "FLUXER_GATEWAY_PUSH_OUTBOX_REQUEST_TIMEOUT_MS", 100000
         ),
@@ -195,7 +198,7 @@ build_push_config(Service, Public, Instance) ->
             Service, <<"push_enrolled_clear_notifications_enabled">>, true
         ),
         push_outbox_max_queue => get_int(Service, <<"push_outbox_max_queue">>, 10000),
-        push_outbox_max_inflight => get_int(Service, <<"push_outbox_max_inflight">>, 64),
+        push_outbox_max_inflight => get_int(Service, <<"push_outbox_max_inflight">>, 96),
         push_outbox_request_timeout_ms => get_int(
             Service, <<"push_outbox_request_timeout_ms">>, 100000
         ),

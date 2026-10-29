@@ -34,6 +34,11 @@ export class GatewayRpcClient {
 	}
 
 	static async resetForTests(): Promise<void> {
+		await GatewayRpcClient.shutdown();
+	}
+
+	/** 关闭已经创建的网关连接，供独立进程退出时复用 */
+	static async shutdown(): Promise<void> {
 		if (!GatewayRpcClient.instance) {
 			return;
 		}

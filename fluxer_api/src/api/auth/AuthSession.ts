@@ -31,8 +31,14 @@ export interface SessionOrigin {
 }
 
 interface CreateAuthSessionParams {
+	/** 创建会话的原生账户 */
 	user: User;
+
+	/** 发起登录的客户端来源 */
 	origin: SessionOrigin;
+
+	/** 仅供内部持久化交换恢复使用，外部调用不可传入 */
+	preparedToken?: string;
 }
 
 interface LogoutAuthSessionsParams {
@@ -75,7 +81,7 @@ export function resolveSessionOrigin(ctx: ApiContext, request: Request): Session
 
 export async function createAuthSession(
 	ctx: ApiContext,
-	{user, origin}: CreateAuthSessionParams,
+	{user, origin, preparedToken}: CreateAuthSessionParams,
 ): Promise<[token: string, AuthSession]> {
 	const {users} = ctx.services;
 	if (user.isBot) throw new BotUserAuthSessionCreationDeniedError();
@@ -84,7 +90,7 @@ export async function createAuthSession(
 	user = await AuthUtility.handleBanStatus(ctx, user);
 	user = await AuthUtility.reactivateOnSignIn(ctx, user, getKVAccountDeletionQueue());
 	const now = new Date();
-	const token = await AuthUtility.generateAuthToken(ctx);
+	const token = preparedToken ?? (await AuthUtility.generateAuthToken(ctx));
 	let clientCountry: string | null = null;
 	try {
 		const geoip = await lookupGeoip(origin.ip);

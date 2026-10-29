@@ -5,6 +5,7 @@ import type {UserRow} from '@app/api/database/types/UserTypes';
 import {emitActivity} from '@app/api/infrastructure/activity/ActivityEvents';
 import {currentAccountChangeSource} from '@app/api/infrastructure/activity/ActivityMeta';
 import type {AdminActionKind, ChangeSource} from '@app/api/infrastructure/activity/Contract.generated';
+import {publishIntegrationEvent} from '@app/integration/IntegrationEvents';
 
 function timeMs(value: Date | null | undefined): number | null {
 	return value ? value.getTime() : null;
@@ -26,6 +27,7 @@ export async function emitAccountChangedIfRelevant(
 ): Promise<void> {
 	if (!previous || !isRelevantChange(previous, updated)) return;
 	const userId = updated.user_id.toString();
+	await publishIntegrationEvent('events.auth.v1.user_invalidated', {user_id: userId});
 	const data = {
 		user_id: userId,
 		source: source ?? currentAccountChangeSource(),

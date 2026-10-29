@@ -37,6 +37,7 @@ import {UnfurlController} from '@app/api/unfurl/UnfurlController';
 import {UserController} from '@app/api/user/controllers/UserController';
 import {VoiceP2pConnectionReportController} from '@app/api/voice/VoiceP2pConnectionReportController';
 import {WebhookController} from '@app/api/webhook/WebhookController';
+import {DiscordPasswordController} from '@app/integration/DiscordPasswordController';
 
 export function registerControllers(routes: HonoApp, config: APIConfig): void {
 	InternalRpcController(routes);
@@ -68,6 +69,7 @@ export function registerControllers(routes: HonoApp, config: APIConfig): void {
 		TestHarnessController(routes);
 	}
 	UserController(routes);
+	if (process.env.INTEGRATION_NATS_URL) DiscordPasswordController(routes);
 	VoiceP2pConnectionReportController(routes);
 	StoreBillingController(routes);
 	WebhookController(routes);

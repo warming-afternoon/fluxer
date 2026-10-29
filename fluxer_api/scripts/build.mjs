@@ -2,7 +2,7 @@
 
 import {cpSync, readdirSync, readFileSync, rmSync} from 'node:fs';
 import {isBuiltin} from 'node:module';
-import {dirname, join, resolve} from 'node:path';
+import {dirname, isAbsolute, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {build} from 'esbuild';
 
@@ -30,6 +30,7 @@ const workspacePlugin = {
 	name: 'fluxer-workspace',
 	setup(pluginBuild) {
 		pluginBuild.onResolve({filter: /^[^./]/}, (args) => {
+			if (args.kind === 'entry-point' || isAbsolute(args.path)) return undefined;
 			if (WORKSPACE_PREFIXES.some((prefix) => args.path.startsWith(prefix))) {
 				return undefined;
 			}
@@ -45,7 +46,11 @@ const workspacePlugin = {
 rmSync(OUT_DIR, {recursive: true, force: true});
 
 await build({
-	entryPoints: [join(API_ROOT, 'src/AppEntrypoint.ts'), join(API_ROOT, 'src/WorkerEntrypoint.ts')],
+	entryPoints: [
+		join(API_ROOT, 'src/AppEntrypoint.ts'),
+		join(API_ROOT, 'src/WorkerEntrypoint.ts'),
+		join(API_ROOT, 'src/IntegrationEntrypoint.ts'),
+	],
 	outdir: OUT_DIR,
 	bundle: true,
 	platform: 'node',

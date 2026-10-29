@@ -10,6 +10,7 @@ import {AuthSession, AuthSessionTombstone} from '@app/api/models/AuthSession';
 import {AuthSessions, AuthSessionsByAppChannel, AuthSessionsByUserId, AuthSessionTombstones} from '@app/api/Tables';
 import {awaitAll} from '@app/api/utils/ConcurrencyUtils';
 import {isValidTimestamp} from '@app/api/utils/TimestampUtils';
+import {publishIntegrationEvent} from '@app/integration/IntegrationEvents';
 import {SnowflakeType} from '@fluxer/schema/src/primitives/SchemaPrimitives';
 import {z} from 'zod';
 
@@ -152,6 +153,12 @@ const FETCH_AUTH_SESSION_TOMBSTONES_BY_USER_ID_CQL = AuthSessionTombstones.selec
 });
 
 export class AuthSessionRepository {
+	/** 集成鉴权绕过短期会话缓存读取权威状态 */
+	async getAuthoritativeAuthSession(sessionIdHash: Buffer): Promise<AuthSession | null> {
+		const row = await this.fetchAuthSessionByToken(sessionIdHash);
+		return row ? new AuthSession(row) : null;
+	}
+
 	async createAuthSession(sessionData: AuthSessionRow): Promise<AuthSession> {
 		const batch = new BatchBuilder();
 		batch.addPrepared(AuthSessions.insert(sessionData));
@@ -252,6 +259,14 @@ export class AuthSessionRepository {
 			);
 		}
 		await executeSessionGroups(groups);
+		await Promise.all(
+			revoked.map((hash) =>
+				publishIntegrationEvent('events.auth.v1.session_invalidated', {
+					user_id: userId.toString(),
+					session_id_hash: hash.toString('base64url'),
+				}),
+			),
+		);
 		await forgetAuthSessionActivity(revoked);
 		await invalidateAuthSessionCache(sessionIdHashes);
 	}
@@ -285,6 +300,7 @@ export class AuthSessionRepository {
 			});
 		});
 		await executeSessionGroups(groups);
+		await publishIntegrationEvent('events.auth.v1.user_invalidated', {user_id: userId.toString()});
 		await forgetAuthSessionActivity(sessionIdHashes);
 		await invalidateAuthSessionCache(sessionIdHashes);
 	}

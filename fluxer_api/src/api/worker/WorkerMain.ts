@@ -70,6 +70,7 @@ import {createWorkerProcessErrorHandler} from '@app/api/worker/WorkerProcessErro
 import {WorkerRunner} from '@app/api/worker/WorkerRunner';
 import {WorkerService} from '@app/api/worker/WorkerService';
 import {workerTasks} from '@app/api/worker/WorkerTaskRegistry';
+import {shutdownIntegrationEvents} from '@app/integration/IntegrationEvents';
 import {createRegisteredMetricsHandler} from '@fluxer/hono/src/middleware/Metrics';
 import {createServer, setupGracefulShutdown} from '@fluxer/hono/src/Server';
 import type {ServerType} from '@hono/node-server';
@@ -360,6 +361,7 @@ export async function startWorkerMain(): Promise<void> {
 		await cleanupStep('storage change feed', shutdownStorageChangeFeed);
 		await cleanupStep('shared lists', stopSharedListWatch);
 		await cleanupStep('activity events', () => shutdownActivityEvents());
+		await cleanupStep('integration events', shutdownIntegrationEvents);
 		await cleanupStep('metadata caches and database executor', shutdownDatabaseQueryExecutor);
 		await cleanupStep('jetstream', async () => {
 			await jsConnectionManager?.drain();

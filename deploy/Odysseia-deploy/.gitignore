@@ -1,0 +1,6 @@
+.env
+*.resolved.json
+*.generated.json
+Caddyfile.generated
+wireguard/*.conf
+*.cql.generated

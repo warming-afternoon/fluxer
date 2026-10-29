@@ -58,6 +58,7 @@ import {VisionarySlotInitializer} from '@app/api/stripe/VisionarySlotInitializer
 import {VoiceDataInitializer} from '@app/api/voice/VoiceDataInitializer';
 import {JetStreamWorkerQueue} from '@app/api/worker/JetStreamWorkerQueue';
 import {WorkerService} from '@app/api/worker/WorkerService';
+import {shutdownIntegrationEvents} from '@app/integration/IntegrationEvents';
 import {registerMetricsSection} from '@fluxer/hono/src/middleware/Metrics';
 import type {LoggerInterface} from '@fluxer/logger/src/LoggerInterface';
 import {getClient, initCassandra, shutdownCassandra} from '@pkgs/cassandra/src/Client';
@@ -424,6 +425,7 @@ export function createShutdown(config: APIConfig, logger: LoggerInterface): () =
 		for (const unregister of unregisterMetricsSections.splice(0)) unregister();
 		await shutdownActivityEvents();
 		jobQueue = null;
+		await shutdownIntegrationEvents();
 		if (jsConnectionManager) {
 			try {
 				await jsConnectionManager.drain();

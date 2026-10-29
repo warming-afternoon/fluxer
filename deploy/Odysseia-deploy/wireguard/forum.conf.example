@@ -1,0 +1,9 @@
+[Interface]
+Address = 10.77.0.2/32
+PrivateKey = REPLACE_FORUM_PRIVATE_KEY
+
+[Peer]
+PublicKey = REPLACE_FLUXER_PUBLIC_KEY
+Endpoint = FLUXER_PUBLIC_HOST:51820
+AllowedIPs = 10.77.0.1/32
+PersistentKeepalive = 25

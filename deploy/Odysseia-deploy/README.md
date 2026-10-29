@@ -11,13 +11,15 @@
 | NATS 账号 | 权限 |
 | --- | --- |
 | `forum-service` | 会话解析、Discord 登录交换和短期证明、当前会话撤销、批量身份/资料查询、失效事件、自己的服务信息回复、预建内容消费者拉取 |
-| `discord-sync` | 创建/查询 Discord 绑定、查询资料；不能调用任何会话签发接口 |
+| `discord-sync` | 创建/查询 Discord 绑定、查询资料、探测 Forum 和 integration 服务信息；不能调用任何会话签发接口 |
 | `fluxer-integration` | 接收明确列出的 RPC，发布失效/绑定事件，限次限时回复 |
 | `fluxer-api` | API 发布会话失效事件；不能订阅或调用身份 RPC |
 | `fluxer-worker` | worker 使用独立凭据发布会话失效事件；不能订阅或调用身份 RPC |
 | `integration-admin` | 管理指定内容流及消费者；仅离线预建时使用 |
 
 服务注册是凭据、subject 合约、队列订阅和健康接口的组合，没有额外注册中心。Forum 使用一个服务账号。外部服务不直接写 Fluxer 或 Forum 数据库。
+
+Bot 可向 `rpc.forum.v1.service_info` 与 `rpc.integration.v1.service_info` 发送 `{version:1,request_id:<随机标识>}`，回复限定在自己的 `_INBOX.bot.` 命名空间。健康探测不包含会话或用户资料，不需要管理账号或任何鉴权 RPC 权限。
 
 ## 准备与启动
 

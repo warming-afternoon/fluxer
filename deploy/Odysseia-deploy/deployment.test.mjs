@@ -118,6 +118,18 @@ test('集成健康检查指向独立端口且不对宿主机发布', () => {
 	assert.equal(service.depends_on['nats-integration'].condition, 'service_healthy');
 });
 
+test('Bot 仅增加双向服务健康探测，不获得会话 RPC 权限', () => {
+	const acl = fs.readFileSync(path.join(directory, 'nats/integration.conf'), 'utf8');
+	const bot = acl.slice(acl.indexOf('user: "discord-sync"'), acl.indexOf('user: "fluxer-integration"'));
+	assert.match(bot, /"rpc\.forum\.v1\.service_info"/);
+	assert.match(bot, /"rpc\.integration\.v1\.service_info"/);
+	assert.match(bot, /subscribe: \{allow: \["_INBOX\.bot\.>"\]\}/);
+	assert.doesNotMatch(bot, /rpc\.auth\.|_INBOX\.forum|\$JS\.API/);
+	const forum = acl.slice(acl.indexOf('user: "forum-service"'), acl.indexOf('user: "discord-sync"'));
+	assert.match(forum, /"rpc\.forum\.v1\.service_info"/);
+	assert.match(forum, /allow_responses: \{max: 1, expires: "5s"\}/);
+});
+
 test('首次部署及生成器默认均为单 API，多实例仅由显式参数启用', () => {
 	assert.deepEqual(
 		Object.keys(compose.services).filter((name) => /^api(?:-b|-\d+)?$/.test(name)),

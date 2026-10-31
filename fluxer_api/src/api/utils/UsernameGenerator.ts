@@ -5,8 +5,9 @@ import {readFileSync} from 'node:fs';
 import {resolveAssetPath} from '@app/api/utils/AssetPaths';
 import {UsernameType} from '@fluxer/schema/src/primitives/UserValidators';
 
-const scales = readFileSync(resolveAssetPath('words', 'scales.txt'), 'utf-8').trim().split('\n').filter(Boolean);
-const tails = readFileSync(resolveAssetPath('words', 'tails.txt'), 'utf-8').trim().split('\n').filter(Boolean);
+// 同时识别 LF 和 CRLF，保留整文件 trim 与空行过滤的既有语义。
+const scales = readFileSync(resolveAssetPath('words', 'scales.txt'), 'utf-8').trim().split(/\r?\n/).filter(Boolean);
+const tails = readFileSync(resolveAssetPath('words', 'tails.txt'), 'utf-8').trim().split(/\r?\n/).filter(Boolean);
 
 type IndexPicker = (size: number) => number;
 

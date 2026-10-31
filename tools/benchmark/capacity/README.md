@@ -1,3 +1,7 @@
+## Complete campaign workflow
+
+The reusable libraries below now connect to a configurable continuous campaign CLI in [campaign/README.md](campaign/README.md). `validate`, `plan` and `offline-example` do not start a live workload; actual targets require explicit `run --live`. The generic single-process driver does not claim byte-identical reproduction of the historical distributed R22 deployment. See the campaign guide for current source availability, admission, ACK/cursor audit, observation, continuation, failure handling and remaining native/source-IP limitations.
+
 # Portable capacity tooling
 
 These are reviewed, parameterized **library modules**, not the full historical R22 coordinator or a load-running command. Imports do not start monitoring, connect to services, change networking, stop processes, or run a workload. Existing `tools/benchmark` corpus, ACK/cursor and HTTP helpers remain intact; these modules do not duplicate their deployment workflows.
@@ -54,6 +58,6 @@ All real operations remain explicit caller actions. The modules do not declare a
 
 The supplied R21 execution index is intact, and generic algorithms were selected from its runtime sources. R22's supplied `offline-contract.mjs` specifies full 1 MiB/15 MiB terminal frames and true truncation rejection; the worker port applies and tests that rule without running its string-rewrite/deployment scripts. R22 `finish-contract.mjs` supplies the conservative extra-headroom rule, with machine-specific thresholds removed.
 
-Still absent are the generated final `MixedAudienceCoordinatorMentionsOnlyR22.mjs`, `run-staircase-diagnostics-r22.mjs`, generated `ConfigurationSourcesMentionsOnlyR*`/related runner closure, final analysis files including fixed-written-ring readers, and streaming compressed-per-value/CRC implementations. The raw bitmap audit is **not** a substitute claimed as those missing sources. Clock-52's Windows/WSL machinery, instrumented NIFs, private deployment assets and hardcoded experiment generators are intentionally excluded. Exact file gaps and lineage hashes are listed in the delivery's source audit.
+The subsequent R22 source supplement supplied the final coordinator and runner. Their portable execution contracts are now integrated under campaign/transport/audit/observation. The historical dynamic application-IP helper and instrumented native scheduler/clock deployment remain unsupported; raw bitmap and sharded hash auditing do not claim compressed-stream CRC or complete through-close frame evidence.
 
 Focused offline checks were run; no real capacity, service, deployment, network namespace, process stop, database or device validation was performed for this revision. Tests live in the external delivery validation materials, not in product patches. See each module's bilingual README for contracts and limits.

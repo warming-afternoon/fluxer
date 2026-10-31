@@ -1,0 +1,177 @@
+{
+	"capacity": {
+		"runId": "configured-campaign",
+		"attemptId": "REPLACE_WITH_NEW_ATTEMPT",
+		"environment": "REPLACE_WITH_TEST_ENVIRONMENT",
+		"scenarioSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+		"outputRoot": "/REPLACE_WITH_PRIVATE_OUTPUT_ROOT",
+		"workerIds": ["worker-a"],
+		"actors": [
+			{
+				"id": "101",
+				"cohort": "member",
+				"threadId": "301"
+			},
+			{
+				"id": "102",
+				"cohort": "browser",
+				"threadId": "301"
+			}
+		],
+		"authorIds": ["101"],
+		"maxMessagesPerStage": 100000,
+		"phases": [
+			{
+				"id": "warmup",
+				"kind": "warmup",
+				"durationSeconds": 120,
+				"targetFanoutRate": 20,
+				"ackIntervalMs": 120000,
+				"drainNs": "1200000000"
+			},
+			{
+				"id": "steady-low",
+				"kind": "steady",
+				"durationSeconds": 360,
+				"targetFanoutRate": 30,
+				"ackIntervalMs": 120000,
+				"drainNs": "1200000000"
+			},
+			{
+				"id": "steady-high",
+				"kind": "steady",
+				"durationSeconds": 360,
+				"targetFanoutRate": 40,
+				"ackIntervalMs": 120000,
+				"drainNs": "1200000000"
+			}
+		]
+	},
+	"campaign": {
+		"sequenceStart": "0",
+		"startLeadNs": "4000000000",
+		"maxInterstageGapNs": "20000000000",
+		"checkpointSettleNs": "1200000000",
+		"finalAckTimeoutNs": "180000000000",
+		"failureTailTimeoutNs": "180000000000",
+		"operationTimeoutNs": "60000000000"
+	},
+	"assessment": {
+		"maxScheduleLagMs": 1000,
+		"maxHttpLatencyMs": 1000,
+		"maxWsLatencyMs": 2000,
+		"resourceLimits": {
+			"gateway.cpuCores": {
+				"max": 3
+			},
+			"node.cpuPercent": {
+				"max": 90
+			}
+		},
+		"nextStageLimits": {
+			"gateway.cpuCores": {
+				"max": 2.5
+			}
+		},
+		"trend": {
+			"rollingWindowSeconds": 60,
+			"rollingStepSeconds": 10,
+			"endpointToleranceMs": 3000,
+			"minSupplyRatio": 0.99,
+			"minReceiveRatio": 0.995,
+			"minPassingWindowFraction": 0.95,
+			"maxShortfallSeconds": 120,
+			"backlogWindowSeconds": 120,
+			"maxBacklogSlopeRatio": 0.005,
+			"maxBacklogIncreaseSeconds": 1,
+			"maxPendingAgeMs": 1000,
+			"maxTailMs": 2000,
+			"maxEndBacklogSeconds": 2,
+			"maxLatencyGrowthRatio": 2,
+			"maxLatencyGrowthMs": 250,
+			"endpointSupplyRatio": 0.995,
+			"latencySlopeMsPerSecond": 1,
+			"latencyTailJitterMs": 25,
+			"scheduledLagMaxMs": 1000,
+			"generatorCpuMaxPercent": 90,
+			"generatorLoopP99MaxMs": 100,
+			"generatorLoopFraction": 0.25,
+			"latencyComparisonWindows": 2,
+			"latencyTailWindowCount": 3,
+			"scheduledLagConsecutiveWindows": 3,
+			"rollingReceiveRatio": 0.99
+		}
+	},
+	"actorOwners": {
+		"101": "worker-a",
+		"102": "worker-a"
+	},
+	"transport": {
+		"apiBase": "https://REPLACE.invalid/api",
+		"gatewayUrl": "wss://REPLACE.invalid/gateway",
+		"loginConcurrency": 1,
+		"identifyGapMs": 100,
+		"readyTimeoutMs": 30000,
+		"httpTimeoutMs": 10000,
+		"closeTimeoutMs": 10000,
+		"sendConcurrency": 4,
+		"membershipPageSize": 100,
+		"maxMembershipRows": 100000,
+		"telemetryIntervalMs": 1000,
+		"maxEvidenceEvents": 1000000,
+		"watchAckTimeoutMs": 1000,
+		"watchRetryDelayMs": 1000,
+		"watchMaxAttempts": 3,
+		"watchRenewalMs": 30000,
+		"watchLeaseMs": 60000,
+		"maxFrameBytes": 1048576,
+		"maxResponseBytes": 1048576,
+		"maxBitmapBytes": 16777216,
+		"windowSeconds": 30,
+		"cassandra": {
+			"contactPoints": ["REPLACE.invalid"],
+			"port": 9042,
+			"localDataCenter": "REPLACE",
+			"keyspace": "REPLACE",
+			"maxRows": 100000,
+			"fetchSize": 500,
+			"queryConcurrency": 8,
+			"readTimeoutMs": 10000
+		}
+	},
+	"observation": {
+		"clockDomain": "REPLACE_WITH_VERIFIED_SHARED_CLOCK_DOMAIN",
+		"intervalMs": 1000,
+		"providerTimeoutMs": 1000,
+		"maxSamples": 10000,
+		"maxSampleBytes": 16384,
+		"maxTotalBytes": 16777216,
+		"maxErrors": 100,
+		"maxGapNs": "3000000000",
+		"maxAgeNs": "2000000000",
+		"requiredMetrics": ["gateway.cpuCores", "node.cpuPercent"],
+		"providers": [
+			{
+				"type": "http-json",
+				"id": "gateway",
+				"url": "https://REPLACE.invalid/private-observation",
+				"fields": {
+					"gateway.cpuCores": ["cpuCores"]
+				},
+				"timeoutMs": 1000,
+				"maxResponseBytes": 16384,
+				"sourceClockDomain": "REPLACE_WITH_VERIFIED_SHARED_CLOCK_DOMAIN",
+				"timestampPath": ["monoNs"],
+				"sourceIdentityPath": ["bootId"],
+				"expectedSourceIdentity": "REPLACE_WITH_CURRENT_VERIFIED_BOOT_ID"
+			},
+			{
+				"type": "own-node",
+				"id": "generator",
+				"clockDomain": "REPLACE_WITH_VERIFIED_SHARED_CLOCK_DOMAIN",
+				"resolutionMs": 10,
+				"generatorProcess": true
+			}
+		]
+	}
+}

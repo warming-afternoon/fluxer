@@ -1,6 +1,6 @@
 # 可移植容量工具模块
 
-这里是经过筛选、参数化的**工具库**，不是完整历史 R22 coordinator，也不是一条可直接启动压测的命令。导入模块不会启动监控、连接服务、修改网络、停止进程或生成负载。既有 `tools/benchmark` 的语料、ACK/游标、HTTP helper 保留，不重复搬运部署流程。
+这里保留经过筛选、参数化的**底层工具库**；新增完整连续运行流程和 CLI 见 [campaign/README.zh-CN.md](campaign/README.zh-CN.md)。运行真实目标必须显式使用 `run --live`，默认验证、计划及离线示例不启动压测。新的通用实现不宣称逐字复现历史 R22 多进程部署。导入模块不会启动监控、连接服务、修改网络、停止进程或生成负载。既有 `tools/benchmark` 的语料、ACK/游标、HTTP helper 保留，不重复搬运部署流程。
 
 ## 单一配置入口
 
@@ -54,6 +54,6 @@ console.log({plannedUnique: plan.plannedUnique, previewDirectory});
 
 补充包的R21执行源码索引完整，通用算法从对应源码逐项抽取。R22 `offline-contract.mjs` 明确1MiB/15MiB终帧完整及真实截断拒绝；worker端口按该规则修正和测试，没有执行原字符串改写/部署脚本。R22 `finish-contract.mjs` 的额外保守余量规则被参数化，不保留机器档位阈值。
 
-仍缺最终生成的 `MixedAudienceCoordinatorMentionsOnlyR22.mjs`、`run-staircase-diagnostics-r22.mjs`、`ConfigurationSourcesMentionsOnlyR*`及相关runner闭包、包含fixed-written-ring读取器的最终analysis源码、逐值流式压缩恢复/CRC实现。原始位图审计**不冒充**这些缺失工具。clock-52的Windows/WSL装置、instrumented NIF、私有部署资产和固定实验生成器明确排除。交付包来源审计列出具体文件缺项和hash。
+后续 R22 增量包已提供最终 coordinator、阶梯 runner 和分析源，本次将其运行契约接入 `campaign/`、`transport/`、`audit/`、`observation/`，不再把这些文件笼统列为缺失。实际支持与配置例子以 campaign 文档为准。历史动态应用侧 IP 审计助手仍未提供；真实源 IP 绑定/多进程拓扑和 instrumented native scheduler/NIF 不由当前单进程通用驱动伪装。原始位图与分片 SHA 审计不冒充 gzip/CRC 或全部 through-close 帧观测。Windows/WSL 服务、私有部署资产和固定实验生成器明确不执行、不迁入。
 
 本轮只运行相关离线正确性检查，没有启动实际容量阶梯、服务、部署、网络namespace、进程停止、数据库或设备验证。测试位于交付验证材料，不进入产品补丁。各子目录双语README说明完整接口和限制。

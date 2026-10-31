@@ -13,10 +13,12 @@ import {
 	type RoleID,
 	type UserID,
 } from '@app/api/BrandedTypes';
+import {ThreadMentionDecisionRepository} from '@app/api/channel/repositories/ThreadMentionDecisionRepository';
 import type {GatewayMentionSourceEntry, IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import {Logger} from '@app/api/Logger';
 import {ThreadMentionScope} from '@app/api/worker/tasks/ThreadMentionScope';
 import {getWorkerDependencies} from '@app/api/worker/WorkerContext';
+import {THREAD_CHANNEL_TYPES} from '@fluxer/constants/src/ThreadConstants';
 import type {WorkerTaskHandler, WorkerTaskHelpers} from '@pkgs/worker/src/contracts/WorkerTask';
 import {z} from 'zod';
 
@@ -169,6 +171,7 @@ async function enqueueGuildMentionSourcePages({
 	userIds,
 	addJob,
 	threadScope,
+	threadSources,
 }: {
 	gatewayService: IGatewayService;
 	guildId: GuildID;
@@ -181,6 +184,7 @@ async function enqueueGuildMentionSourcePages({
 	userIds: Array<UserID>;
 	addJob: WorkerTaskHelpers['addJob'];
 	threadScope: ThreadMentionScope | null;
+	threadSources?: Map<string, {direct: boolean; role: boolean}>;
 }): Promise<{totalMentioned: number; chunkCount: number; pageCount: number}> {
 	let cursor: string | undefined;
 	let chunkIndex = 0;
@@ -199,7 +203,13 @@ async function enqueueGuildMentionSourcePages({
 			...(cursor !== undefined && {cursor}),
 		});
 		pageCount++;
-		const mentions = threadScope ? await threadScope.filter(page.mentions) : page.mentions;
+		const rechecked = threadSources
+			? page.mentions.flatMap((entry) => {
+					const source = threadSources.get(entry.userId.toString());
+					return source ? [{...entry, ...source, everyone: false}] : [];
+				})
+			: page.mentions;
+		const mentions = threadScope ? await threadScope.filter(rechecked) : rechecked;
 		totalMentioned += mentions.length;
 		const chunks = chunkEntries(mentions.map(toMentionChunkEntry), MENTION_CHUNK_SIZE);
 		chunkIndex = await enqueueMentionChunks({
@@ -249,19 +259,41 @@ const handleMentions: WorkerTaskHandler = async (payload, helpers) => {
 	const userIds =
 		validated.mentionUserIds?.map((userId) => createUserID(BigInt(userId))) ?? Array.from(message.mentionedUserIds);
 	if (channel.guildId) {
+		const isThread = THREAD_CHANNEL_TYPES.has(channel.type);
+		let threadSources: Map<string, {direct: boolean; role: boolean}> | undefined;
+		if (isThread) {
+			const decision = await new ThreadMentionDecisionRepository().get(channelId, messageId);
+			threadSources = new Map();
+			if (decision) {
+				if (
+					decision.message_id !== messageId.toString() ||
+					decision.channel_id !== channelId.toString() ||
+					decision.author_id !== authorId.toString()
+				)
+					throw new Error('Thread mention decision binding mismatch');
+				for (const id of decision.direct_user_ids) threadSources.set(id, {direct: true, role: false});
+				for (const id of decision.role_user_ids)
+					threadSources.set(id, {direct: threadSources.get(id)?.direct ?? false, role: true});
+			} else {
+				// 旧队列没有固定决策时只保留实际直接提及，禁止补做角色展开。
+				for (const id of message.mentionedUserIds) threadSources.set(id.toString(), {direct: true, role: false});
+			}
+			if (threadSources.size === 0) return;
+		}
 		const threadScope = await ThreadMentionScope.load({channelRepository, gatewayService}, channel, messageId);
 		const result = await enqueueGuildMentionSourcePages({
 			gatewayService,
 			guildId: channel.guildId,
 			channelId,
 			authorId,
-			mentionEveryone,
-			mentionHere,
-			roleIds,
-			userIds,
+			mentionEveryone: isThread ? false : mentionEveryone,
+			mentionHere: isThread ? false : mentionHere,
+			roleIds: isThread ? [] : roleIds,
+			userIds: threadSources ? Array.from(threadSources.keys(), (id) => createUserID(BigInt(id))) : userIds,
 			messageId,
 			addJob: helpers.addJob,
 			threadScope,
+			threadSources,
 		});
 		await threadScope?.finish();
 		if (result.totalMentioned === 0) {

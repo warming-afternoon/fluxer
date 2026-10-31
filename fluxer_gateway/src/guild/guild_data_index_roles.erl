@@ -44,11 +44,14 @@ put_roles(Roles, Data) when is_map(Data) ->
      || Role <- map_utils:ensure_list(Roles),
         is_map(Role)
     ],
-    Data#{
+    Updated = Data#{
         <<"roles">> => RoleList,
         <<"role_index">> => guild_data_index:build_id_index(RoleList),
         role_perms_cache => build_role_perms_cache(RoleList)
-    };
+    },
+    guild_thread_role_index:roles_changed(
+        Updated, maps:keys(maps:get(<<"role_index">>, Updated))
+    );
 put_roles(_, Data) ->
     Data.
 

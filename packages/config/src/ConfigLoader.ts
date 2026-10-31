@@ -144,6 +144,13 @@ function defaultConfig(): MasterConfig {
 				},
 			},
 			gateway: {
+				thread_mentions: {
+					enabled: false,
+					expected_api_instances: 0,
+					expected_worker_instances: 0,
+					expected_api_instance_ids: [],
+					expected_worker_instance_ids: [],
+				},
 				clear_batch_enabled: true,
 				rpc_auth_token: '',
 			},

@@ -260,6 +260,8 @@ export const RpcRequest = z.discriminatedUnion('type', [
 			.describe('IDs of the threads, walked in order'),
 		limit: z.number().int().min(1).max(RPC_THREAD_MEMBERS_PAGE_MAX).optional().describe('Maximum members to return'),
 		after_user_id: SnowflakeType.optional().describe('Member cursor within the first thread'),
+		// 删除准备只允许同一状态版本的单帖子分页，旧调用不受影响。
+		expected_state_version: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
 	}),
 	z.object({
 		type: z.literal('forum_unreads').describe('Request type for counting unread messages in forum posts'),
@@ -640,6 +642,18 @@ export const RpcResponse = z.discriminatedUnion('type', [
 				has_more: z.boolean().describe('Whether more members are available'),
 				next_thread_id: SnowflakeStringType.nullish().describe('Thread the next page starts in'),
 				next_after_user_id: SnowflakeStringType.nullish().describe('Member cursor within that thread'),
+				// 仅版本绑定的生命周期准备请求返回可信快照元数据。
+				state_version: z.number().int().nonnegative().optional(),
+				member_count: z.number().int().nonnegative().optional(),
+				thread_context: z
+					.object({
+						id: SnowflakeStringType,
+						guild_id: SnowflakeStringType,
+						parent_id: SnowflakeStringType,
+						type: z.number().int(),
+						thread_metadata: z.object({archived: z.boolean()}),
+					})
+					.optional(),
 			})
 			.describe('Thread members result'),
 	}),

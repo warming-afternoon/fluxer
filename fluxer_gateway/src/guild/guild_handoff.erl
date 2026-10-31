@@ -17,10 +17,14 @@
 
 -spec export_handoff_state(guild_state()) -> map().
 export_handoff_state(State) ->
-    Threads = maps:merge(
+    Threads0 = maps:merge(
         guild_thread_flip:export_handoff(State),
         guild_thread_subscriptions:export_handoff(State)
     ),
+    Threads = case guild_thread_lifecycle:handoff_safe(State) of
+        true -> Threads0;
+        false -> Threads0#{thread_lifecycle_busy => true}
+    end,
     Threads#{
         thread_watch_handoff => guild_thread_watches:export(State),
         id => maps:get(id, State),
@@ -45,6 +49,7 @@ derived_data_keys() ->
         members_sorted_ids,
         member_list_revision,
         members_ets,
+        thread_role_counts,
         role_perms_cache,
         overwrite_perms_cache,
         <<"role_index">>,
@@ -52,6 +57,8 @@ derived_data_keys() ->
     ].
 
 -spec validate_handoff_state(term()) -> ok | {error, [atom()]}.
+validate_handoff_state(#{thread_lifecycle_busy := true}) ->
+    {error, [thread_lifecycle_busy]};
 validate_handoff_state(Exported) when is_map(Exported) ->
     RequiredKeys = [id, data, sessions, voice_states],
     Missing = [K || K <- RequiredKeys, not maps:is_key(K, Exported)],

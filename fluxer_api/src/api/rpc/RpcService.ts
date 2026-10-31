@@ -596,6 +596,7 @@ export class RpcService {
 						threadIds: request.thread_ids.map(createChannelID),
 						limit: request.limit ?? THREAD_MEMBERS_RPC_DEFAULT_LIMIT,
 						after: request.after_user_id !== undefined ? createUserID(request.after_user_id) : undefined,
+						expectedStateVersion: request.expected_state_version,
 					}),
 				};
 			case 'forum_unreads': {

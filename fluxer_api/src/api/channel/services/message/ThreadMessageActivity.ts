@@ -19,11 +19,7 @@ import type {ThreadMember} from '@app/api/models/ThreadMember';
 import type {ThreadState} from '@app/api/models/ThreadState';
 import {addThreadMembersWithinCap} from '@app/api/worker/tasks/ThreadMentionScope';
 import {Permissions} from '@fluxer/constants/src/ChannelConstants';
-import {
-	MAX_ACTIVE_THREADS_PER_GUILD,
-	MAX_THREAD_MEMBERS,
-	ThreadMemberFlags,
-} from '@fluxer/constants/src/ThreadConstants';
+import {MAX_ACTIVE_THREADS_PER_GUILD, ThreadMemberFlags} from '@fluxer/constants/src/ThreadConstants';
 import {MaxActiveThreadsError} from '@fluxer/errors/src/domains/channel/MaxActiveThreadsError';
 import {ThreadArchivedError} from '@fluxer/errors/src/domains/channel/ThreadArchivedError';
 import {ThreadLockedError} from '@fluxer/errors/src/domains/channel/ThreadLockedError';
@@ -57,17 +53,13 @@ export class ThreadMessageActivity {
 		return transition.state;
 	}
 
-	private allMembers(thread: Channel): Promise<Array<ThreadMember>> {
-		return this.channelRepository.threads.listMembers(thread.id, {limit: MAX_THREAD_MEMBERS});
-	}
-
 	async beforeWebhookSend(thread: Channel): Promise<void> {
 		const state = await this.channelRepository.threads.getState(thread.id);
 		if (!state || state.guildId !== thread.guildId) throw new UnknownChannelError();
 		if (state.locked) throw new ThreadLockedError();
 		const next = await this.unarchive(thread, state);
 		if (next !== state) {
-			await this.dispatch(thread, [threadUpdateEvent(await this.view(thread, next), await this.allMembers(thread))]);
+			await this.dispatch(thread, [threadUpdateEvent(await this.view(thread, next), undefined, true)]);
 		}
 	}
 
@@ -92,7 +84,7 @@ export class ThreadMessageActivity {
 		const events: Array<ThreadDispatchEvent> = [];
 		const updated = member === null ? null : await this.markInteracted(member);
 		if (unarchived) {
-			events.push(threadUpdateEvent(await this.view(channel, state, params.parent), await this.allMembers(channel)));
+			events.push(threadUpdateEvent(await this.view(channel, state, params.parent), undefined, true));
 		} else if (updated) {
 			events.push(threadMemberUpdateEvent(updated));
 		}

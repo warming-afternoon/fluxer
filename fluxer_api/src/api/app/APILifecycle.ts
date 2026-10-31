@@ -25,6 +25,7 @@ import {
 	stopSharedListWatch,
 } from '@app/api/infrastructure/activity/SharedLists';
 import {shutdownStorageChangeFeed} from '@app/api/infrastructure/StorageServiceFactory';
+import {ThreadMentionComponentLease} from '@app/api/infrastructure/ThreadMentionComponentLease';
 import {JobLedgerRepository} from '@app/api/jobs/JobLedgerRepository';
 import {ipBanCache} from '@app/api/middleware/IpBanMiddleware';
 import {startRequestErrorTelemetry, stopRequestErrorTelemetry} from '@app/api/middleware/RequestErrorTelemetry';
@@ -32,6 +33,7 @@ import {initializeServiceSingletons, shutdownReportService} from '@app/api/middl
 import {
 	closeOwnedKVClient,
 	ensureVoiceResourcesInitialized,
+	getGatewayService,
 	getKVClient,
 	getSnowflakeService,
 	setInjectedWorkerService,
@@ -66,6 +68,7 @@ import {
 } from '@pkgs/postgres/src/Client';
 
 let jsConnectionManager: JetStreamConnectionManager | null = null;
+let threadMentionComponentLease: ThreadMentionComponentLease | null = null;
 const unregisterMetricsSections: Array<() => void> = [];
 
 interface RefreshCacheLifecycle {
@@ -306,6 +309,8 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 					}
 				}
 			});
+			threadMentionComponentLease = new ThreadMentionComponentLease(getGatewayService(), 'api');
+			threadMentionComponentLease.start();
 			logger.info('API service initialization complete');
 		} catch (error) {
 			logger.error({error}, 'API service initialization failed');
@@ -318,6 +323,8 @@ export function createInitializer(config: APIConfig, logger: LoggerInterface): (
 export function createShutdown(config: APIConfig, logger: LoggerInterface): () => Promise<void> {
 	return async (): Promise<void> => {
 		stopAPIReadiness();
+		threadMentionComponentLease?.stop();
+		threadMentionComponentLease = null;
 		logger.info('Shutting down API service...');
 		// 在网关、任务发布器和数据库连接关闭前结束已接收的读状态变更。
 		await shutdownDatabaseQueryExecutor();

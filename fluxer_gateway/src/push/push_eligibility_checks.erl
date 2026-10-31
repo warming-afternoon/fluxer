@@ -142,7 +142,7 @@ check_thread_muted_and_notifications(
                 LargeGuildMetadata
             ),
             push_eligibility:should_allow_notification(
-                Level,
+                thread_message_level(Level),
                 thread_mention_scope(ThreadMember, MessageData),
                 UserId,
                 Settings,
@@ -225,7 +225,12 @@ explicit_thread_level(_Flags) ->
 thread_mention_scope(undefined, MessageData) ->
     MessageData#{<<"mention_everyone">> => false, <<"mention_here">> => false};
 thread_mention_scope(_ThreadMember, MessageData) ->
-    MessageData.
+    MessageData#{<<"mention_everyone">> => false, <<"mention_here">> => false}.
+
+%% 旧全部和父全部值不能恢复普通帖子设备通知，关闭设置仍优先。
+-spec thread_message_level(integer()) -> integer().
+thread_message_level(Level) ->
+    max(Level, ?MESSAGE_NOTIFICATIONS_ONLY_MENTIONS).
 
 -spec strip_thread_eligibility(map()) -> map().
 strip_thread_eligibility(#{?THREAD_PUSH_KEY := Thread} = MessageData) when is_map(Thread) ->
@@ -516,15 +521,46 @@ check_thread(MessageData, Settings, Metadata) ->
 
 thread_member_inherits_the_parent_level_test() ->
     Member = #{100 => #{<<"flags">> => 1}},
-    ?assert(check_thread(thread_message(Member), #{}, undefined)),
+    ?assertNot(check_thread(thread_message(Member), #{}, undefined)),
     ParentMentions = #{channel_overrides => #{<<"200">> => #{message_notifications => 1}}},
     ?assertNot(check_thread(thread_message(Member), ParentMentions, undefined)),
     ThreadOverride = #{channel_overrides => #{<<"500">> => #{message_notifications => 1}}},
-    ?assert(check_thread(thread_message(Member), ThreadOverride, undefined)).
+    ?assertNot(check_thread(thread_message(Member), ThreadOverride, undefined)).
+
+%% 启用帖子提及规则后，旧全部和父全部不能恢复普通消息或everyone通知。
+-spec thread_mentions_only_legacy_settings_test() -> term().
+thread_mentions_only_legacy_settings_test() ->
+    Key = {fluxer_gateway, runtime_config},
+    Old = persistent_term:get(Key, #{}),
+    persistent_term:put(Key, Old#{thread_mentions => #{enabled => true}}),
+    try
+        lists:foreach(
+            fun(Flags) ->
+                Members = #{100 => #{<<"flags">> => Flags}},
+                ?assertNot(check_thread(thread_message(Members), #{}, undefined)),
+                ?assertNot(
+                    check_thread(
+                        thread_message(Members, #{<<"mention_everyone">> => true}),
+                        #{},
+                        undefined
+                    )
+                ),
+                Direct = thread_message(Members, #{<<"mentions">> => [#{<<"id">> => <<"100">>}]}),
+                ?assert(check_thread(Direct, #{}, undefined))
+            end,
+            [0, 1, 2, 4]
+        ),
+        Off = thread_message(#{100 => #{<<"flags">> => 8}}, #{
+            <<"mentions">> => [#{<<"id">> => <<"100">>}]
+        }),
+        ?assertNot(check_thread(Off, #{}, undefined))
+    after
+        persistent_term:put(Key, Old)
+    end.
 
 explicit_thread_level_beats_the_parent_level_test() ->
     ParentMentions = #{channel_overrides => #{<<"200">> => #{message_notifications => 1}}},
-    ?assert(
+    ?assertNot(
         check_thread(thread_message(#{100 => #{<<"flags">> => 2}}), ParentMentions, undefined)
     ),
     ?assertNot(check_thread(thread_message(#{100 => #{<<"flags">> => 8}}), #{}, undefined)),
@@ -537,7 +573,7 @@ explicit_thread_level_beats_the_parent_level_test() ->
 large_guild_clamp_applies_to_inherited_thread_levels_only_test() ->
     Large = #{member_count => 3000, features => []},
     ?assertNot(check_thread(thread_message(#{100 => #{<<"flags">> => 0}}), #{}, Large)),
-    ?assert(check_thread(thread_message(#{100 => #{<<"flags">> => 2}}), #{}, Large)).
+    ?assertNot(check_thread(thread_message(#{100 => #{<<"flags">> => 2}}), #{}, Large)).
 
 thread_mutes_apply_at_every_layer_test() ->
     Member = #{100 => #{<<"flags">> => 2}},
@@ -561,9 +597,14 @@ thread_mutes_apply_at_every_layer_test() ->
     Expired = #{<<"end_time">> => rfc3339_in_ms(-60000)},
     ?assert(
         check_thread(
-            thread_message(#{
-                100 => #{<<"flags">> => 2, <<"muted">> => true, <<"mute_config">> => Expired}
-            }),
+            thread_message(
+                #{
+                    100 => #{
+                        <<"flags">> => 2, <<"muted">> => true, <<"mute_config">> => Expired
+                    }
+                },
+                #{<<"mentions">> => [#{<<"id">> => <<"100">>}]}
+            ),
             #{},
             undefined
         )
@@ -575,7 +616,7 @@ thread_non_members_need_a_direct_or_role_mention_test() ->
     ?assertNot(check_thread(Everyone, #{}, undefined)),
     Direct = thread_message(#{}, #{<<"mentions">> => [#{<<"id">> => <<"100">>}]}),
     ?assert(check_thread(Direct, #{}, undefined)),
-    ?assert(
+    ?assertNot(
         check_thread(
             thread_message(#{100 => #{<<"flags">> => 0}}, #{<<"mention_everyone">> => true}),
             #{},

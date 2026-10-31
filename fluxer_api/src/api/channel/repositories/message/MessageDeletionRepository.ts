@@ -2,6 +2,7 @@
 
 import type {ChannelID, MessageID, UserID} from '@app/api/BrandedTypes';
 import type {MessageDataRepository} from '@app/api/channel/repositories/message/MessageDataRepository';
+import {ThreadMentionDecisionRepository} from '@app/api/channel/repositories/ThreadMentionDecisionRepository';
 import {BatchBuilder, deleteOneOrMany, fetchMany, fetchOne, upsertOne} from '@app/api/database/CassandraQueryExecution';
 import {Db} from '@app/api/database/CassandraTypes';
 import type {ChannelMessageBucketRow, ChannelStateRow} from '@app/api/database/types/MessageTypes';
@@ -55,6 +56,7 @@ export class MessageDeletionRepository {
 		authorId?: UserID,
 		pinnedTimestamp?: Date,
 	): void {
+		new ThreadMentionDecisionRepository().appendMessageDelete(batch, channelId, messageId);
 		batch.addPrepared(
 			Messages.deleteByPk({
 				channel_id: channelId,

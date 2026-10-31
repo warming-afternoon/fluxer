@@ -1313,6 +1313,77 @@ export class GatewayService {
 		return result.channel_ids.map((id: string) => createChannelID(BigInt(id)));
 	}
 
+	/** 专用协议路由让旧网关明确拒绝帖子消息，避免退回全帖子广播。 */
+	async dispatchThreadMessage({guildId, data}: {guildId: GuildID; data: unknown}): Promise<void> {
+		await this.call('guild.dispatch_thread_message', {
+			guild_id: guildId.toString(),
+			event: 'MESSAGE_CREATE',
+			data,
+			protocol_version: 1,
+		});
+	}
+
+	/** 查询网关及后台角色决策能力，旧版本不作为已就绪处理。 */
+	async getThreadMentionCapabilities(): Promise<{
+		version: number;
+		api_version: number;
+		worker_version: number;
+		protocol_ready: boolean;
+	}> {
+		return this.call('guild.thread_mention_capabilities', {api_version: 1});
+	}
+
+	/** 登记实际启动完成的组件，网关按部署预期数量核对全栈能力。 */
+	async registerThreadMentionComponent(instanceId: string, component: 'api' | 'worker'): Promise<void> {
+		await this.call('guild.register_thread_mention_component', {
+			instance_id: instanceId,
+			component,
+			version: 1,
+			lease_ms: 60000,
+		});
+	}
+
+	/** 请求消息绑定的有界角色决策，不能通过旧角色枚举接口回退。 */
+	async resolveThreadMentionDecision(params: {
+		guildId: GuildID;
+		channelId: ChannelID;
+		messageId: MessageID;
+		authorId: UserID;
+		roleIds: Array<string>;
+		userIds: Array<string>;
+	}): Promise<unknown> {
+		return this.call('guild.resolve_thread_mention_decision', {
+			guild_id: params.guildId.toString(),
+			channel_id: params.channelId.toString(),
+			message_id: params.messageId.toString(),
+			author_id: params.authorId.toString(),
+			role_ids: params.roleIds,
+			user_ids: params.userIds,
+			protocol_version: 1,
+			api_version: 1,
+			worker_version: 1,
+		});
+	}
+
+	/** 破坏性清理前固定网关成员受众，失败不得继续删除数据库成员。 */
+	async prepareThreadLifecycle(
+		guildId: GuildID,
+		threadId: ChannelID,
+		stateVersion: number,
+		resumeTicket?: string,
+	): Promise<string> {
+		const result = await this.call<{ticket: string}>('guild.prepare_thread_lifecycle', {
+			guild_id: guildId.toString(),
+			thread_id: threadId.toString(),
+			operation: 'delete',
+			state_version: stateVersion,
+			...(resumeTicket !== undefined ? {ticket: resumeTicket} : {}),
+		});
+		if (typeof result.ticket !== 'string' || result.ticket.length === 0 || result.ticket.length > 256)
+			throw new Error('Invalid thread lifecycle ticket');
+		return result.ticket;
+	}
+
 	async resolveMentionSourcesPage({
 		guildId,
 		channelId,

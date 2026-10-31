@@ -85,7 +85,10 @@ publish_read_model(_Result, _OldState) ->
 handle_call_internal({session_connect, Request}, {CallerPid, _}, State) ->
     handle_session_connect_call(Request, CallerPid, State);
 handle_call_internal(export_handoff_state, _From, State) ->
-    {reply, {ok, guild_handoff:export_handoff_state(State)}, State};
+    case guild_thread_lifecycle:handoff_safe(State) of
+        true -> {reply, {ok, guild_handoff:export_handoff_state(State)}, State};
+        false -> {reply, {error, thread_lifecycle_busy}, State}
+    end;
 handle_call_internal({get_guild_id}, _From, State) ->
     {reply, maps:get(id, State, undefined), State};
 handle_call_internal({get_voice_guild_state}, _From, State) ->
@@ -121,6 +124,10 @@ call_handler(Tag) -> query_call_handler(Tag).
 
 %% 将服务器只读调用交给查询处理器。
 -spec query_call_handler(atom()) -> query | voice | subscription | undefined.
+query_call_handler(prepare_thread_lifecycle) -> query;
+query_call_handler(dispatch_thread_delete) -> query;
+query_call_handler(thread_mention_metrics) -> query;
+query_call_handler(resolve_thread_mention_decision) -> query;
 query_call_handler(resolve_mention_sources_page) -> query;
 query_call_handler(get_counts) -> query;
 query_call_handler(get_viewer_counts) -> query;
@@ -253,6 +260,8 @@ cast_handler(update_dm_partners) -> dm_partners;
 cast_handler(_) -> undefined.
 
 -spec handle_info_internal(term(), guild_state()) -> info_reply().
+handle_info_internal({thread_lifecycle_timeout, Ticket}, State) ->
+    {noreply, guild_thread_lifecycle:timeout(Ticket, State)};
 handle_info_internal({guild_health_probe, Ref}, State) when is_reference(Ref) ->
     gen_server:cast(guild_health, {pong, self(), Ref, erlang:monotonic_time(millisecond)}),
     {noreply, State};
@@ -579,6 +588,8 @@ safe_cleanup(Fun, Label) ->
 -spec cleanup_per_guild_ets(guild_state()) -> ok.
 cleanup_per_guild_ets(State) ->
     Data = maps:get(data, State, #{}),
+    guild_thread_role_index:destroy(Data),
+    _ = guild_thread_lifecycle:cleanup(State),
     safe_delete_ets(maps:get(members_ets, Data, undefined)),
     safe_delete_ets(maps:get(thread_store, Data, undefined)),
     safe_delete_ets(maps:get(member_presence, State, undefined)),

@@ -2,9 +2,11 @@
 
 import {resolveDefaultAttachmentDecayConfig} from '@app/api/attachment/AttachmentDecayService';
 import type {ChannelID, GuildID, MessageID, UserID} from '@app/api/BrandedTypes';
-import {createUserID} from '@app/api/BrandedTypes';
+import {createChannelID, createMessageID, createUserID} from '@app/api/BrandedTypes';
 import {Config} from '@app/api/Config';
 import type {ChannelRepository} from '@app/api/channel/ChannelRepository';
+import {ThreadMentionDecisionRepository} from '@app/api/channel/repositories/ThreadMentionDecisionRepository';
+import {getAttachedThreadMentionDecision} from '@app/api/channel/services/message/ThreadMentionDecisionService';
 import {requestSvcJson} from '@app/api/infrastructure/SvcErrorReply';
 import {Logger} from '@app/api/Logger';
 import type {Channel} from '@app/api/models/Channel';
@@ -123,7 +125,7 @@ export class MessageResponseDataService {
 			include_reactions: true,
 		});
 		if (typeof response === 'object' && 'FoundApiMany' in response) {
-			return response.FoundApiMany;
+			return this.withThreadWarnings(response.FoundApiMany);
 		}
 		throw new Error(`[message-response-service] unexpected ListResponses response: ${JSON.stringify(response)}`);
 	}
@@ -158,7 +160,7 @@ export class MessageResponseDataService {
 		});
 		if (response === 'NotFound') return null;
 		if (typeof response === 'object' && 'FoundApi' in response) {
-			return response.FoundApi;
+			return (await this.withThreadWarnings([response.FoundApi]))[0]!;
 		}
 		throw new Error(`[message-response-service] unexpected GetResponseById response: ${JSON.stringify(response)}`);
 	}
@@ -181,7 +183,9 @@ export class MessageResponseDataService {
 			tts: params.tts,
 		});
 		if (typeof response === 'object' && 'FoundApi' in response) {
-			return response.FoundApi;
+			const decision = getAttachedThreadMentionDecision(params.message);
+			if (decision) return {...response.FoundApi, thread_mention_warnings: decision.warnings};
+			return (await this.withThreadWarnings([response.FoundApi]))[0]!;
 		}
 		throw new Error(`[message-response-service] unexpected BuildResponse response: ${JSON.stringify(response)}`);
 	}
@@ -228,7 +232,29 @@ export class MessageResponseDataService {
 			}
 			responses.push(...response.FoundApiMany);
 		}
-		return responses;
+		return this.withThreadWarnings(responses);
+	}
+
+	/** 提示按频道分组批量读取，私有角色候选永不进入公开响应。 */
+	private async withThreadWarnings(messages: Array<MessageResponse>): Promise<Array<MessageResponse>> {
+		const groups = new Map<string, Array<MessageResponse>>();
+		for (const message of messages) {
+			if (message.mention_roles.length === 0) continue;
+			const group = groups.get(message.channel_id) ?? [];
+			group.push(message);
+			groups.set(message.channel_id, group);
+		}
+		for (const [channelId, group] of groups) {
+			const warnings = await new ThreadMentionDecisionRepository().getWarnings(
+				createChannelID(BigInt(channelId)),
+				group.map((message) => createMessageID(BigInt(message.id))),
+			);
+			for (const message of group) {
+				const markers = warnings.get(message.id);
+				if (markers) Object.assign(message, {thread_mention_warnings: markers});
+			}
+		}
+		return messages;
 	}
 
 	async buildMessagesForChannels(params: {

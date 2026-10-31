@@ -14,6 +14,7 @@ import {MessageTimeoutIndicator} from '@app/features/channel/components/MessageT
 import {MessageUsername} from '@app/features/channel/components/MessageUsername';
 import {useMessageViewContext} from '@app/features/channel/components/MessageViewContext';
 import {ReplyPreview} from '@app/features/channel/components/ReplyPreview';
+import {ThreadMentionWarning} from '@app/features/channel/components/ThreadMentionWarning';
 import {TimestampWithTooltip} from '@app/features/channel/components/TimestampWithTooltip';
 import {createSystemMessage} from '@app/features/devtools/utils/CommandUtils';
 import Emoji from '@app/features/emoji/state/Emoji';
@@ -628,6 +629,7 @@ export const UserMessage = observer(() => {
 				</CompactMessageLayout>
 				<div className={styles.container} data-flx="channel.user-message.container--2">
 					<MessageAttachments data-flx="channel.user-message.message-attachments--2" />
+					<ThreadMentionWarning message={message} channel={channel} />
 					{!previewContext && (
 						<CrosspostPublishNudge
 							message={message}
@@ -711,6 +713,7 @@ export const UserMessage = observer(() => {
 						</TimestampWithTooltip>
 					))}
 				<MessageAttachments data-flx="channel.user-message.message-attachments--3" />
+				<ThreadMentionWarning message={message} channel={channel} />
 				{message.content.length === 0 &&
 					!isEditing &&
 					(message.editedTimestamp || message.isEditing) &&

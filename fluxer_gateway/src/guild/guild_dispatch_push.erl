@@ -11,7 +11,7 @@
 
 -define(MAX_FORMAT_MEMBERS, 50).
 -define(MAX_ROLE_MENTION_THREAD_ADDS, 250).
--define(MAX_THREAD_MEMBERS, 1000).
+-define(MAX_THREAD_MEMBERS, 100000).
 -define(CONCURRENCY_LIMIT_KEY, guild_push_concurrency_limit).
 -define(DEFAULT_PUSH_CONCURRENCY, 2).
 -define(MAX_PUSH_CONCURRENCY, 8).
@@ -24,6 +24,7 @@
 -define(GRACE_HOLD_CALL_TIMEOUT_MS, 5000).
 -define(PUSH_COUNTERS, guild_push_counters).
 -define(PUSH_COUNTER_KEYS, [
+    thread_mentions_early_skip,
     worker_started,
     worker_completed,
     worker_failed,
@@ -55,8 +56,13 @@ maybe_send_push_notifications(message_create, FinalData, GuildId, UpdatedState) 
         maps:get(disable_push_notifications, UpdatedState, false) orelse
             push_message_params:suppresses_notifications(FinalData)
     of
-        true -> ok;
-        false -> maybe_spawn_push(FinalData, GuildId, UpdatedState)
+        true ->
+            ok;
+        false ->
+            case guild_thread_mention_policy:prepare(FinalData, UpdatedState) of
+                skip -> count_push_event(thread_mentions_early_skip);
+                {send, PushData} -> maybe_spawn_push(PushData, GuildId, UpdatedState)
+            end
     end;
 maybe_send_push_notifications(_Event, _FinalData, _GuildId, _UpdatedState) ->
     ok.
@@ -255,7 +261,8 @@ spawn_push(FinalData, GuildId, UpdatedState, Gate) ->
             missing_members_table(FinalData, GuildId, UpdatedState, Gate)
     end.
 
--spec compact_push_state(ets:tid(), map(), guild_id(), guild_state()) -> guild_state().
+-spec compact_push_state(ets:tid() | undefined, map(), guild_id(), guild_state()) ->
+    guild_state().
 compact_push_state(MembersTab, Data, GuildId, UpdatedState) ->
     Sessions = maps:get(sessions, UpdatedState, #{}),
     {SessionEligibility, Hold} = build_push_session_eligibility(Sessions, UpdatedState),
@@ -306,7 +313,33 @@ missing_members_table(FinalData, GuildId, UpdatedState, Gate) ->
         "guild_push_members_table_unavailable: guild_id=~p phase=spawn",
         [GuildId]
     ),
-    spawn_legacy_push(FinalData, GuildId, UpdatedState, Gate).
+    case guild_thread_mention_policy:candidates(FinalData) of
+        Ids when is_list(Ids) ->
+            Data = maps:get(data, UpdatedState, #{}),
+            Members = maps:get(members_normalized, Data, #{}),
+            FormatIds = maps:keys(format_member_id_set(FinalData)),
+            Snapshot = maps:with(Ids ++ FormatIds, Members),
+            Compact = compact_push_state(undefined, Data, GuildId, UpdatedState),
+            spawn_push_worker(
+                fun() ->
+                    Temp = ets:new(thread_mention_fallback, [set]),
+                    try
+                        true = ets:insert(Temp, maps:to_list(Snapshot)),
+                        collect_and_send_compact_push_notifications(
+                            FinalData,
+                            GuildId,
+                            Compact#{members_ets => Temp}
+                        )
+                    after
+                        ets:delete(Temp)
+                    end
+                end,
+                GuildId,
+                Gate
+            );
+        undefined ->
+            spawn_legacy_push(FinalData, GuildId, UpdatedState, Gate)
+    end.
 
 -spec spawn_legacy_push(event_data(), guild_id(), guild_state(), push_gate()) -> ok.
 spawn_legacy_push(FinalData, GuildId, UpdatedState, Gate) ->
@@ -559,7 +592,16 @@ scan_table_unavailable(GuildId) ->
 -spec compact_scan_context(event_data(), integer(), guild_state()) -> map().
 compact_scan_context(MessageData, ChannelId, State) ->
     MentionRoles = maps:get(<<"mention_roles">>, MessageData, []),
+    CandidateIds = guild_thread_mention_policy:candidates(MessageData),
+    %% 提及身份已经有界，只按需读取这些用户；普通频道沿用原契约。
+    Scope =
+        case CandidateIds of
+            Ids when is_list(Ids) -> guild_thread_push:mention_view(ChannelId, Ids, State);
+            undefined -> guild_thread_push:scope(ChannelId, State)
+        end,
     #{
+        mention_candidate_ids => CandidateIds,
+        role_candidates => maps:get(<<"__thread_role_candidates">>, MessageData, undefined),
         mention_everyone => maps:get(<<"mention_everyone">>, MessageData, false) =:= true,
         direct_mentions => direct_mention_id_set(MessageData),
         mention_roles => mention_role_id_set(MentionRoles),
@@ -567,13 +609,20 @@ compact_scan_context(MessageData, ChannelId, State) ->
         format_members => format_member_id_set(MessageData),
         channel_id => ChannelId,
         thread_recipient => guild_thread_gate:recipient_active(ChannelId, State),
-        thread_scope => guild_thread_push:scope(ChannelId, State),
+        thread_scope => Scope,
         session_eligibility => maps:get(session_eligibility, State),
         grace_sessions => held_sessions(maps:get(grace_hold, State, none))
     }.
 
 -spec scan_push_members(ets:tid(), map(), guild_state()) ->
     {ok, map()} | {error, table_unavailable}.
+scan_push_members(
+    _MembersTab, #{mention_candidate_ids := Ids, thread_scope := undefined}, _State
+) when
+    is_list(Ids)
+->
+    %% 存储失效不能退回全社区扫描或绕过帖子通知设置。
+    {ok, initial_scan_acc()};
 scan_push_members(MembersTab, Context, State) ->
     try
         Context1 = with_thread_role_adds(MembersTab, Context, State),
@@ -662,12 +711,25 @@ with_thread_role_adds(MembersTab, #{thread_scope := Scope} = Context, State) whe
         role_adds => thread_role_adds(
             Scope,
             Context,
-            {ets, MembersTab},
+            role_candidate_source(MembersTab, Context),
             thread_role_visible(maps:get(channel_id, Context), State)
         )
     };
 with_thread_role_adds(_MembersTab, Context, _State) ->
     Context.
+
+%% 角色增补只读取持久化决策中的有界身份，不重新展开当前角色集合。
+-spec role_candidate_source(ets:tid(), map()) -> member_source().
+role_candidate_source(Tab, #{role_candidates := Ids}) when is_list(Ids) ->
+    {map,
+        maps:from_list([
+            {Id, Member}
+         || Id <- Ids,
+            Member <- [lookup_member(Id, {ets, Tab})],
+            is_map(Member)
+        ])};
+role_candidate_source(Tab, _) ->
+    {ets, Tab}.
 
 -spec fold_members(fun((user_id(), map(), Acc) -> Acc), Acc, member_source()) -> Acc.
 fold_members(Fun, Acc0, {ets, MembersTab}) ->
@@ -716,7 +778,7 @@ thread_role_visible(ChannelId, State) ->
 -spec thread_role_adds(
     map(), map(), member_source(), fun((user_id(), map()) -> boolean())
 ) -> #{user_id() => true}.
-thread_role_adds(#{thread := Thread, members := Members}, Mentions, Source, Visible) ->
+thread_role_adds(#{thread := Thread, members := Members} = Scope, Mentions, Source, Visible) ->
     MentionRoles = maps:get(mention_roles, Mentions),
     case map_size(MentionRoles) > 0 andalso thread_accepts_role_adds(Thread) of
         false ->
@@ -740,9 +802,15 @@ thread_role_adds(#{thread := Thread, members := Members}, Mentions, Source, Visi
                 [],
                 Source
             ),
-            Room = max(0, ?MAX_THREAD_MEMBERS - map_size(Members)),
+            Room = max(
+                0, ?MAX_THREAD_MEMBERS - maps:get(member_count, Scope, map_size(Members))
+            ),
+            %% 先冻结稳定排序及额度，权限失败不让后续身份补位。
+            Selected = lists:sublist(
+                lists:sort(Candidates), min(?MAX_ROLE_MENTION_THREAD_ADDS, Room)
+            ),
             take_role_adds(
-                lists:sort(Candidates),
+                Selected,
                 Source,
                 Visible,
                 min(?MAX_ROLE_MENTION_THREAD_ADDS, Room),
@@ -2180,7 +2248,7 @@ thread_push_candidates_are_members_and_mentioned_users_test() ->
     ?assert(thread_push_candidate(3, RoleMember, Scope, Context#{role_adds => #{3 => true}})),
     ?assert(thread_push_candidate(3, #{}, undefined, Context)).
 
-thread_role_adds_cap_at_first_visible_role_holders_test() ->
+thread_role_adds_freeze_quota_before_visibility_test() ->
     Scope = #{thread => #{<<"id">> => 500, <<"type">> => 11}, members => #{1 => #{}}},
     Context = (thread_scope_context())#{mention_roles => #{9 => true}},
     RoleMember = #{<<"roles">> => [<<"9">>]},
@@ -2200,7 +2268,7 @@ thread_role_adds_cap_at_first_visible_role_holders_test() ->
     ),
     Visible = fun(UserId, _Member) -> UserId =/= 8 end,
     Adds = thread_role_adds(Scope, Context, {map, Rows}, Visible),
-    ?assertEqual(?MAX_ROLE_MENTION_THREAD_ADDS, map_size(Adds)),
+    ?assertEqual(?MAX_ROLE_MENTION_THREAD_ADDS - 1, map_size(Adds)),
     ?assert(maps:is_key(5, Adds)),
     ?assert(maps:is_key(1000, Adds)),
     ?assertNot(maps:is_key(1000 + ?MAX_ROLE_MENTION_THREAD_ADDS - 1, Adds)),
@@ -2221,10 +2289,16 @@ thread_role_adds_cap_at_thread_member_room_test() ->
     Scope = #{thread => #{<<"id">> => 500, <<"type">> => 11}, members => Existing},
     Context = (thread_scope_context())#{mention_roles => #{9 => true}},
     RoleMember = #{<<"roles">> => [<<"9">>]},
-    Rows = maps:from_list([{Id, RoleMember} || Id <- lists:seq(5000, 5099)]),
+    Rows = maps:from_list([
+        {Id, RoleMember}
+     || Id <- lists:seq(?MAX_THREAD_MEMBERS + 5000, ?MAX_THREAD_MEMBERS + 5099)
+    ]),
     Visible = fun(_UserId, _Member) -> true end,
     Adds = thread_role_adds(Scope, Context, {map, Rows}, Visible),
-    ?assertEqual(lists:seq(5000, 5004), lists:sort(maps:keys(Adds))),
+    ?assertEqual(
+        lists:seq(?MAX_THREAD_MEMBERS + 5000, ?MAX_THREAD_MEMBERS + 5004),
+        lists:sort(maps:keys(Adds))
+    ),
     Full = maps:from_list([{Id, #{}} || Id <- lists:seq(1, ?MAX_THREAD_MEMBERS)]),
     ?assertEqual(
         #{}, thread_role_adds(Scope#{members => Full}, Context, {map, Rows}, Visible)

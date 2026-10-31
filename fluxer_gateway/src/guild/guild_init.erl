@@ -32,7 +32,7 @@ init_base_state(GuildState) ->
     MemberTab = ets:new(guild_members_data, [set, public, {read_concurrency, true}]),
     populate_member_ets(MemberTab, NormalizedData),
     BaseState = TransferSafe#{
-        data => NormalizedData#{members_ets => MemberTab},
+        data => guild_thread_role_index:install(NormalizedData#{members_ets => MemberTab}),
         voice_states => VoiceStates,
         presence_subscriptions => #{},
         member_list_subscriptions => guild_member_list_subs:new(),
@@ -142,7 +142,7 @@ handle_reload(NewData, State) ->
     ),
     {ThreadExtras, ReloadData1} = guild_thread_load:take_extras(ReloadData),
     NormalizedNewData0 = guild_data_index:normalize_map(ReloadData1),
-    NormalizedNewData = reuse_members_table(OldData, NormalizedNewData0),
+    NormalizedNewData = guild_thread_role_index:rebuild(OldData, reuse_members_table(OldData, NormalizedNewData0)),
     NewState0 = guild_member_list_engine_inputs:forget_all(
         guild_thread_flip:converge(
             guild_thread_flip:reinstall(

@@ -19,6 +19,7 @@
 -define(CONNECT_SNAPSHOT_HEAVY_MEMBER_KEYS, [
     <<"members">>,
     members_normalized,
+    thread_role_counts,
     <<"member_role_index">>,
     members_sorted_ids,
     member_list_revision

@@ -19,6 +19,7 @@ export interface ThreadDispatchEvent {
 
 function internalThreadFields(view: ThreadView) {
 	return {
+		_fluxer_state_version: view.state.stateVersion,
 		_fluxer_member_ids_preview: view.state.memberIdsPreview.map((id) => id.toString()),
 	};
 }
@@ -38,18 +39,28 @@ export function threadCreateEvent(
 	};
 }
 
-export function threadUpdateEvent(view: ThreadView, unarchivedMembers?: Array<ThreadMember>): ThreadDispatchEvent {
+export function threadUpdateEvent(
+	view: ThreadView,
+	unarchivedMembers?: Array<ThreadMember>,
+	reloadMembers = false,
+): ThreadDispatchEvent {
 	return {
 		event: 'THREAD_UPDATE',
 		data: {
 			...mapThreadToResponse(view),
 			...internalThreadFields(view),
 			...(unarchivedMembers ? {_fluxer_members: unarchivedMembers.map(mapThreadMemberToRpcResponse)} : {}),
+			...(reloadMembers ? {_fluxer_reload_members: true} : {}),
 		},
 	};
 }
 
-export function threadDeleteEvent(state: ThreadState, memberIds: Array<UserID> = []): ThreadDispatchEvent {
+export function threadDeleteEvent(
+	state: ThreadState,
+	memberIds: Array<UserID> = [],
+	lifecycleTicket?: string,
+	preparedVersion = state.stateVersion,
+): ThreadDispatchEvent {
 	return {
 		event: 'THREAD_DELETE',
 		data: {
@@ -57,7 +68,9 @@ export function threadDeleteEvent(state: ThreadState, memberIds: Array<UserID> =
 			guild_id: state.guildId.toString(),
 			parent_id: state.parentId.toString(),
 			type: state.type,
+			_fluxer_state_version: preparedVersion,
 			...(memberIds.length > 0 ? {_fluxer_member_ids: memberIds.map((id) => id.toString())} : {}),
+			...(lifecycleTicket ? {_fluxer_lifecycle_ticket: lifecycleTicket} : {}),
 		},
 	};
 }

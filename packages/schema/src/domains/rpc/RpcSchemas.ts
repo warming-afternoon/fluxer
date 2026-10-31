@@ -88,6 +88,11 @@ export const RpcRequest = z.discriminatedUnion('type', [
 	z.object({
 		type: z.literal('guild_member_bounds').describe('Read-only guild member ID bounds for load scheduling'),
 		guild_id: SnowflakeType,
+		/** 区间端点仅作在线调度提示，不能作为快照或人数证明。 */
+		after_user_id: SnowflakeType.optional(),
+
+		/** 保留调用方原有包含式上界，根区间允许不传。 */
+		through_user_id: SnowflakeType.optional(),
 	}),
 	z.object({
 		type: z.literal('guild_member_range').describe('Read-only bounded guild member page'),
@@ -395,6 +400,14 @@ export const RpcResponseGuildCollectionData = z.object({
 		.describe('Forum and media channels of the guild, merged into channels when active'),
 	has_more: z.boolean().describe('Whether more data is available for this collection'),
 	next_after_user_id: SnowflakeStringType.nullish().describe('Cursor for the next member chunk'),
+	/** 映射用户之前的数据库页覆盖起点。 */
+	page_first_user_id: SnowflakeStringType.nullish(),
+
+	/** 映射用户之前的数据库页覆盖终点，可能大于最后一个有效映射用户。 */
+	page_last_user_id: SnowflakeStringType.nullish(),
+
+	/** 未过滤未知用户引用之前的页行数。 */
+	page_row_count: z.number().int().min(0).max(1000).optional(),
 });
 
 export type RpcResponseGuildCollectionData = z.infer<typeof RpcResponseGuildCollectionData>;

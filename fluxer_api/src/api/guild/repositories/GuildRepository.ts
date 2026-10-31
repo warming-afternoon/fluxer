@@ -339,19 +339,35 @@ export class GuildRepository {
 		return rows.map((row) => new GuildMember(row));
 	}
 
-	/** Bounds are scheduling hints; the caller keeps outer ranges unbounded. */
-	async getMemberIdBounds(guildId: GuildID): Promise<{minUserId: UserID | null; maxUserId: UserID | null}> {
+	/** 仅用区间内两个有界索引端点选择调度pivot，不统计人数或缩减覆盖边界。 */
+	async getMemberIdBounds(
+		guildId: GuildID,
+		afterUserId?: UserID,
+		throughUserId?: UserID,
+	): Promise<{minUserId: UserID | null; maxUserId: UserID | null}> {
+		if (afterUserId !== undefined && throughUserId !== undefined && afterUserId >= throughUserId) {
+			return {minUserId: null, maxUserId: null};
+		}
+		const where: Array<WhereExpr<GuildMemberRow>> = [GuildMembers.where.eq('guild_id')];
+		const params: {guild_id: GuildID; user_id?: UserID; through_user_id?: UserID} = {guild_id: guildId};
+		if (afterUserId !== undefined) {
+			where.push(GuildMembers.where.gt('user_id'));
+			params.user_id = afterUserId;
+		}
+		if (throughUserId !== undefined) {
+			where.push(GuildMembers.where.lte('user_id', 'through_user_id'));
+			params.through_user_id = throughUserId;
+		}
 		const page = (direction: 'ASC' | 'DESC') =>
 			GuildMembers.select({
 				columns: ['user_id'],
-				where: GuildMembers.where.eq('guild_id'),
+				where,
 				orderBy: {col: 'user_id', direction},
 				limit: 1,
-			}).bind({guild_id: guildId});
-		const [first, last] = await Promise.all([
-			fetchMany<Pick<GuildMemberRow, 'user_id'>>(page('ASC')),
-			fetchMany<Pick<GuildMemberRow, 'user_id'>>(page('DESC')),
-		]);
+			}).bind(params);
+		// 一个探针槽内顺序读两个端点，避免与其他页并发时突破原DB读取并发。
+		const first = await fetchMany<Pick<GuildMemberRow, 'user_id'>>(page('ASC'));
+		const last = await fetchMany<Pick<GuildMemberRow, 'user_id'>>(page('DESC'));
 		return {minUserId: first[0]?.user_id ?? null, maxUserId: last[0]?.user_id ?? null};
 	}
 

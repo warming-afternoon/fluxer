@@ -1,0 +1,13 @@
+# Message-local thread delivery context
+
+`guild_thread_gate:thread_sessions/6` retains the adaptive member/online candidate selection. Its final fold lazily prepares a delivery context after the first session passes the sender, map, viewer and pending checks. This context reuses the parent type, parsed thread ID, loaded-thread presence, snapshot members and store identity within that synchronous call.
+
+Membership is read directly for each original eligibility and interest check. The fold carries no member-result map; repeated devices and repeated checks retain direct ETS semantics. Candidate membership never substitutes for final authorization.
+
+Reuse applies only when the store is absent or its protected/private ETS table belongs to the current process. A public table or another owner uses the original per-session path. This conservatively preserves semantics if a different process can change membership. Invalid table identifiers also use the original path and its original error behavior. The guild handler has no receive or state mutation within this filtering call.
+
+The context is lazy so an empty candidate set, hidden viewers or pending sessions do not trigger reads or parsing that the original fold skipped. Existing bot and member-list short circuits, direct mentions, passive subscriptions and missing-thread snapshots remain in the same decision order. Role mentions do not broaden recipients. Browser watches continue to check the live lease for each SID; lease results are never memoized.
+
+Final `thread_access` still runs on each interested session and retains the existing permission memo and parent quick path. Message restrictions and private-thread access remain part of that check. There is no cache across messages, no changes to session/lease/ACK state, and no change to relay order.
+
+The bounded oracle harness in `guild_message_reuse_tests.erl`, enabled by `ADAPTIVE_ORACLE`, compares exact candidate maps and sorted final SID/session pairs against the pre-integration dev gate. It covers large and small sets, equal/zero cardinality, unknown counts, member changes, archive/delete/import/reconnect, permissions, multi-device sessions, leases, snapshots and direct member changes. Test exports belong only to the isolated harness. The supplied fixture is not added to the product test tree; see the delivery package for the executed validation commands and results.

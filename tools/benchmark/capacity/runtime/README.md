@@ -1,0 +1,19 @@
+# Portable worker runtime contracts
+
+These opt-in modules extract reusable contracts from the supplied, SHA-indexed R21 runtime sources. They are not the missing generated `MixedAudienceCoordinatorMentionsOnlyR22.mjs`, a complete benchmark runner, a deployment tool, or a new capacity result.
+
+- `JsonLineWorkerPort` retains request-before-send, exact worker/request identity and bounded pending/output/control queues. It reuses the existing `probes/ChildJsonLines.mjs` parser for UTF-8, frame limits and exact partial bytes. Supply an `onPartial(Buffer)` sink that synchronously appends failure evidence at a caller-selected location. The required sink may not silently discard bytes; a sink exception marks completion failed. Await both the expected response and `port.completion`. A response alone can precede a later nonzero exit. The compatibility `exit` event now means child **close after stdout/stderr drainage**, not the earlier child-process exit event. A successful process completion never proves a clean WebSocket close.
+- `ThrottledAckQueue` implements periodic per-user/channel latest-cursor ACK and final drain. It differs from the existing three-second `FrontendAckQueue`, which remains unchanged. The injected `send` must resolve only after authoritative persisted ACK confirmation; an HTTP status alone is not proof. Snowflakes stay decimal strings and comparisons use BigInt. `close()` reports `drained`, `failedDuringClose` and retained dirty cursors; do not treat any returned object as success. The queue retains at most configured `maxKeys` entries (default 100000), and emits no network traffic without an injected sender.
+- `WatchRetryController` extracts the worker nonce/cycle/generation checks that cancel outdated retry after a matching watch ACK, including a callback already queued when its timer is cleared. The caller must validate protocol ACK/lease contents before calling `acknowledge`; this helper is not a WebSocket client or complete lease-renewal implementation.
+- `orderedActorsByWorker` follows actual initialize ownership Map insertion order, never credential-file order. Optional per-worker/cohort expectations are parameterized; the historical eight-worker/4000-actor constants are removed. The returned Map can feed `config/StagePlan.mjs` directly.
+
+`cancel()` requests EOF on only this port's owned child input and rejects pending responses. It does not scan processes, kill containers or claim that a noncooperative child has stopped; use the separate identity-bound ownership adapter if forceful shutdown is required. No module starts on import, enables production observation, contains credentials/instance addresses, or assumes a WSL path.
+
+## Provenance and revisions
+
+- `capacity-tooling-r21/runtime/attempt5/future-host/MixedAudienceCoordinatorR20.mjs`: original `JsonLineWorkerPort` API and response bookkeeping. Known R22 `offline-contract.mjs` requires complete 1 MiB/15 MiB frames and rejection of a true truncated frame. The supplied R20 `exit` callback has been deliberately replaced by the already-reviewed shared close/drain parser; this is a new adaptation, not a claim that the absent generated R22 coordinator was recovered.
+- `future-runtime/ThrottledAckQueue.mjs`: periodic ACK scheduling, decimal cursors and drain. Added bounds/explicit result flags and closed enqueue on cancel.
+- `future-runtime/MixedAudienceWorker.mjs`: matching ACK clears retry and stale callback nonce/cycle guard; extracted as an independent injected-timer controller, without the rest of the private worker.
+- `future-runtime/ActorRoster.mjs`: actual-owner insertion order, with configurable sizes rather than the historical scenario constants.
+
+Run only offline correctness fixtures from the delivery validation directory unless a real benchmark run is separately authorized. Tests do not establish live WebSocket, ACK, cursor or capacity success.

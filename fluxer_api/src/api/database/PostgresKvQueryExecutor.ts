@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import type {ChannelID, GuildID} from '@app/api/BrandedTypes';
 import {getKvMeta, getTableMetadata} from '@app/api/database/CassandraMetaRegistry';
 import type {
 	CassandraParams,
@@ -11,8 +12,17 @@ import type {
 	WhereExpr,
 } from '@app/api/database/CassandraTypes';
 import {isConditionalQuery, validateTtlSeconds} from '@app/api/database/CassandraTypes';
+import {type ChannelMetadata, ChannelMetadataCache} from '@app/api/database/ChannelMetadataCache';
+import {type GuildAvailability, GuildAvailabilityCache} from '@app/api/database/GuildAvailabilityCache';
 import {LocalDate} from '@app/api/database/LocalDate';
+import {PostgresChannelMetadataInvalidation} from '@app/api/database/PostgresChannelMetadataInvalidation';
+import {PostgresReadStateBatcher} from '@app/api/database/PostgresReadStateBatcher';
+import type {ReadStateMutation, ReadStateMutationResult} from '@app/api/database/ReadStateMutation';
+import type {ChannelRow, ReadStateRow} from '@app/api/database/types/ChannelTypes';
+import type {GuildRow} from '@app/api/database/types/GuildTypes';
 import {Logger} from '@app/api/Logger';
+import {Channels, Guilds} from '@app/api/Tables';
+import {GuildFeatures} from '@fluxer/constants/src/GuildConstants';
 import {type IPostgresClient, type PostgresQueryable, quoteIdentifier} from '@pkgs/postgres/src/Client';
 
 type Row = Record<string, unknown>;
@@ -128,7 +138,7 @@ const POSTGRES_KV_ALTER_LOCK_TIMEOUT = '10s';
 const POSTGRES_KV_SCHEMA_ATTEMPTS = 3;
 const KV_WRITE_PARALLELISM = 4;
 const POSTGRES_KV_SCHEMA_RETRY_DELAY_MS = 250;
-const POSTGRES_KV_CONCURRENT_DDL_CODES = new Set(['23505', '42P07', '42710', '55P03']);
+const POSTGRES_KV_CONCURRENT_DDL_CODES = new Set(['23505', '42P07', '42710', '55P03', '40P01']);
 const NUMERIC_ROW_KEY_BIGINT_PATTERN = '^\\{"__fluxer_type":"bigint","value":"(-?[0-9]+)"\\}$';
 const NUMERIC_ROW_KEY_NUMBER_PATTERN = '^(-?[0-9]+(?:\\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)$';
 const EXPIRED_STORED_ROW = 'kv.expires_at IS NOT NULL AND kv.expires_at <= now()';
@@ -150,6 +160,11 @@ const NON_NUMERIC_ROW_KEY_RANGES = [
 	`kv.row_key COLLATE "C" >= ':' AND kv.row_key COLLATE "C" < '${BIGINT_ROW_KEY_PREFIX}'`,
 	`kv.row_key COLLATE "C" >= '${BIGINT_ROW_KEY_PREFIX}:'`,
 ];
+const FETCH_GUILD_AVAILABILITY = Guilds.select({
+	columns: ['guild_id', 'features'],
+	where: Guilds.where.eq('guild_id'),
+	limit: 1,
+});
 
 export async function postgresKvPassRecorded(client: IPostgresClient, marker: string): Promise<boolean> {
 	const result = await client.query(
@@ -178,6 +193,70 @@ function numericKeySegmentExpr(segment: number): string {
 	const value = `split_part(kv.row_key, chr(31), ${segment})`;
 	const digits = `substr(${value}, ${BIGINT_ROW_KEY_PREFIX.length + 1}, greatest(length(${value}) - ${BIGINT_ROW_KEY_PREFIX.length + 2}, 0))`;
 	return `(CASE WHEN left(${value}, ${BIGINT_ROW_KEY_PREFIX.length}) = '${BIGINT_ROW_KEY_PREFIX}' AND right(${value}, 2) = '"}' AND ${digits} ~ '^-?[0-9]+$' THEN ${digits}::numeric WHEN ${value} ~ '${NUMERIC_ROW_KEY_NUMBER_PATTERN}' THEN ${value}::numeric END)`;
+}
+
+/** 复用索引与分页查询的数值表达式，避免 bigint 用户 ID 经 Number 转换丢失精度 */
+function guildMemberUserIdExpr(prefix: string): string {
+	// 仅转换带 bigint 类型标记的整数，避免其他逻辑表的数据影响索引创建。
+	return `(CASE WHEN ${prefix}row_data -> 'user_id' ->> '__fluxer_type' = 'bigint' AND ${prefix}row_data -> 'user_id' ->> 'value' ~ '^-?[0-9]+$' THEN (${prefix}row_data -> 'user_id' ->> 'value')::numeric END)`;
+}
+
+interface GuildMemberPageBounds {
+	/** 固定查询的社区 ID */
+	guildId: bigint;
+
+	/** 可选的排他用户 ID 游标 */
+	after?: bigint;
+
+	/** 可选的包含式用户ID上界。 */
+	through?: bigint;
+
+	/** 有界端点探针支持沿同一个数值索引反向读取。 */
+	direction: 'ASC' | 'DESC';
+
+	/** 数据库最多返回的成员数量 */
+	limit: number;
+}
+
+/** 仅为明确支持的成员有界分页与端点探针提取边界，其余查询保留通用执行路径 */
+function guildMemberPageBounds(meta: KvQueryMeta, params: CassandraParams): GuildMemberPageBounds | null {
+	// 限制表、主键、排序和条数，避免专用 SQL 改变其他查询的语义。
+	if (
+		meta.action !== 'select' ||
+		meta.table.name !== 'guild_members' ||
+		meta.unordered ||
+		meta.table.primaryKey.length !== 2 ||
+		meta.table.primaryKey[0] !== 'guild_id' ||
+		meta.table.primaryKey[1] !== 'user_id' ||
+		typeof meta.limit !== 'number' ||
+		!Number.isSafeInteger(meta.limit) ||
+		meta.limit < 0 ||
+		(meta.orderBy &&
+			(meta.orderBy.col !== 'user_id' || (meta.orderBy.direction !== 'ASC' && meta.orderBy.direction !== 'DESC')))
+	)
+		return null;
+	// 只接受社区等值条件、可选的排他下界与包含式上界。
+	const where = whereClauses(meta);
+	const guild = where.find((clause) => clause.kind === 'eq' && clause.col === 'guild_id');
+	const after = where.find((clause) => clause.kind === 'gt' && clause.col === 'user_id');
+	const through = where.find((clause) => clause.kind === 'lte' && clause.col === 'user_id');
+	if (!guild || where.length !== 1 + (after ? 1 : 0) + (through ? 1 : 0)) return null;
+	const guildId = params[guild.param];
+	const afterId = after ? params[after.param] : undefined;
+	const throughId = through ? params[through.param] : undefined;
+	if (
+		typeof guildId !== 'bigint' ||
+		(after && typeof afterId !== 'bigint') ||
+		(through && typeof throughId !== 'bigint')
+	)
+		return null;
+	return {
+		guildId,
+		after: afterId as bigint | undefined,
+		through: throughId as bigint | undefined,
+		direction: meta.orderBy?.direction ?? 'ASC',
+		limit: meta.limit,
+	};
 }
 
 function planStatementName(prefix: string, plan: CandidatePlan): string {
@@ -1077,6 +1156,13 @@ CREATE TABLE IF NOT EXISTS ${table} (
 		await db.query(
 			`CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`${kvTable}_expires_idx`)} ON ${table} (expires_at) WHERE expires_at IS NOT NULL`,
 		);
+		// 成员分页与精确计数使用专用部分索引，沿用当前事务和迁移锁。
+		await db.query(
+			`CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`${kvTable}_guild_members_user_numeric_idx`)} ON ${table} ((row_data -> 'guild_id'), ${guildMemberUserIdExpr('')}) WHERE table_name = 'guild_members'`,
+		);
+		await db.query(
+			`CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`${kvTable}_guild_members_count_cover_idx`)} ON ${table} (row_key COLLATE "C") INCLUDE (expires_at) WHERE table_name = 'guild_members'`,
+		);
 		await repairInvalidPostgresKvIndexes(db, kvTable);
 		const migrated = await db.query(`SELECT 1 FROM ${table} WHERE table_name = $1 AND row_key = $2 LIMIT 1`, [
 			POSTGRES_KV_MIGRATION_TABLE,
@@ -1181,6 +1267,11 @@ async function migratePostgresKvIndexes(db: PostgresQueryable, kvTable: string):
 		`${kvTable}_${POSTGRES_KV_SORT_ID_MIGRATION}`,
 	]);
 	if (locked.rows[0]?.locked !== true) return;
+	// Schema initialization (both TS and Rust) and metadata trigger installation
+	// take this same lock before relation locks. Serialize their DDL with concurrent
+	// indexes without reusing the ownership try-lock (which would skip migration).
+	// The dedicated session releases both advisory locks when it closes.
+	await db.query('SELECT pg_advisory_lock($1, hashtext($2))', [POSTGRES_KV_SCHEMA_LOCK_NAMESPACE, kvTable]);
 	await db.query("SELECT set_config('statement_timeout', '0', false)");
 	const retired = await db.query<{index_name: string; valid: boolean}>(
 		`SELECT cls.relname AS index_name, idx.indisvalid AS valid FROM pg_index idx JOIN pg_class cls ON cls.oid = idx.indexrelid
@@ -1312,9 +1403,105 @@ async function inParallel<T>(items: ReadonlyArray<T>, run: (item: T, index: numb
 
 export class PostgresKvQueryExecutor {
 	private readonly table: string;
+	private readonly readStateBatcher: PostgresReadStateBatcher;
+	private readonly guildAvailability: GuildAvailabilityCache;
+	private guildAvailabilityEnabled = false;
+	private readonly channelMetadata: ChannelMetadataCache;
+	private readonly channelInvalidation: PostgresChannelMetadataInvalidation;
 
-	constructor(private readonly client: IPostgresClient) {
+	constructor(
+		private readonly client: IPostgresClient,
+		readStateBatchingEnabled = true,
+	) {
 		this.table = quoteIdentifier(client.kvTable());
+		this.channelMetadata = new ChannelMetadataCache(async (ids) => {
+			const rows = await this.executeQuery<Pick<ChannelRow, 'channel_id' | 'guild_id' | 'type'>>(
+				Channels.select({
+					columns: ['channel_id', 'guild_id', 'type'],
+					where: [Channels.where.in('channel_id', 'channel_ids'), Channels.where.eq('soft_deleted')],
+				}).bind({channel_ids: ids, soft_deleted: false}),
+			);
+			return new Map(
+				rows.map((row) => [row.channel_id, {channelId: row.channel_id, guildId: row.guild_id ?? null, type: row.type}]),
+			);
+		});
+		this.guildAvailability = new GuildAvailabilityCache(async (id) => {
+			const [row] = await this.executeQuery<Pick<GuildRow, 'guild_id' | 'features'>>(
+				FETCH_GUILD_AVAILABILITY.bind({
+					guild_id: id,
+				}),
+			);
+			return row
+				? {
+						guildId: row.guild_id,
+						unavailableForEveryone: row.features?.has(GuildFeatures.UNAVAILABLE_FOR_EVERYONE) ?? false,
+						unavailableForNonStaff: row.features?.has(GuildFeatures.UNAVAILABLE_FOR_EVERYONE_BUT_STAFF) ?? false,
+					}
+				: null;
+		});
+		this.channelInvalidation = new PostgresChannelMetadataInvalidation(
+			client,
+			this.channelMetadata,
+			this.guildAvailability,
+		);
+		this.readStateBatcher = new PostgresReadStateBatcher(
+			client,
+			{
+				key: (userId, channelId) => keyFromColumns(['user_id', 'channel_id'], {user_id: userId, channel_id: channelId}),
+				encode: (row) => encodeRow({...row}),
+				decode: (value) => decodeRow(value) as unknown as ReadStateRow,
+			},
+			readStateBatchingEnabled ? {} : {delayMs: 0, batchSize: 1},
+		);
+	}
+
+	clearMetadataCachesForTesting(): void {
+		this.channelMetadata.clear();
+		this.guildAvailability.clear();
+	}
+
+	/** 已读状态在数据库层共享缓冲区，不依赖 HTTP 请求如何分组 */
+	executeReadStateMutations(mutations: ReadonlyArray<ReadStateMutation>): Promise<Array<ReadStateMutationResult>> {
+		return this.readStateBatcher.enqueue(mutations);
+	}
+
+	/** 报告跨请求组批和积压水位 */
+	renderReadStateMetrics(): string {
+		return (
+			this.readStateBatcher.renderMetrics() +
+			this.channelMetadata.renderMetrics() +
+			this.guildAvailability.renderMetrics()
+		);
+	}
+
+	/** 启用失败只停用缓存，不影响数据库和已读批处理服务 */
+	async startChannelMetadataCache(enabled = true, guildAvailabilityEnabled = false): Promise<void> {
+		this.guildAvailabilityEnabled = guildAvailabilityEnabled;
+		if (!enabled && !guildAvailabilityEnabled) return;
+		try {
+			await this.channelInvalidation.start(enabled, guildAvailabilityEnabled);
+		} catch (error) {
+			await this.channelInvalidation.shutdown();
+			logWarn(
+				{errorName: error instanceof Error ? error.name : 'UnknownError'},
+				'Metadata caches disabled: notification initialization failed',
+			);
+		}
+	}
+
+	/** PostgreSQL 共用稳定字段缓存，未启用时使用原批量读取 */
+	getChannelMetadata(ids: ReadonlyArray<ChannelID>): Promise<Map<ChannelID, ChannelMetadata>> {
+		return this.channelMetadata.getMany(ids);
+	}
+
+	getGuildAvailability(id: GuildID): Promise<GuildAvailability | null> | null {
+		return this.guildAvailabilityEnabled ? this.guildAvailability.get(id) : null;
+	}
+
+	/** 先结束已接收的状态更新，再交由生命周期关闭连接池 */
+	async shutdown(): Promise<void> {
+		await this.channelInvalidation.shutdown();
+		await this.readStateBatcher.shutdown();
 	}
 
 	async executeQuery<T = Row, P extends CassandraParams = CassandraParams>(
@@ -1833,12 +2020,36 @@ DO UPDATE SET partition_key = EXCLUDED.partition_key, row_data = CASE WHEN ${EXP
 		);
 	}
 
+	/** 优先下推明确的成员分页，其余查询沿用候选行过滤与排序 */
 	private async select(
 		meta: KvQueryMeta,
 		params: CassandraParams,
 		plan: QueryPlan,
 		db: PostgresQueryable,
 	): Promise<Array<Row>> {
+		// 将排序和条数限制交给数据库，避免每页读取整个成员分区。
+		const memberPage = guildMemberPageBounds(meta, params);
+		if (memberPage) {
+			const userId = guildMemberUserIdExpr('kv.');
+			const bindings: Array<unknown> = [JSON.stringify(encodeValue(memberPage.guildId))];
+			let cursor = '';
+			if (memberPage.after !== undefined) {
+				bindings.push(memberPage.after.toString());
+				cursor += ` AND ${userId} > $${bindings.length}::numeric`;
+			}
+			if (memberPage.through !== undefined) {
+				bindings.push(memberPage.through.toString());
+				cursor += ` AND ${userId} <= $${bindings.length}::numeric`;
+			}
+			bindings.push(memberPage.limit);
+			const result = await db.query<StoredRow>(
+				`SELECT kv.row_key, kv.row_data FROM ${this.table} kv WHERE kv.table_name = 'guild_members' AND kv.row_data -> 'guild_id' = $1::jsonb${cursor} AND (kv.expires_at IS NULL OR kv.expires_at > now()) ORDER BY ${userId} ${memberPage.direction} LIMIT $${bindings.length}`,
+				bindings,
+			);
+			return this.matchingRows(meta, result.rows, params).map((row) =>
+				projectRow(row, meta.columns as ReadonlyArray<string> | undefined),
+			);
+		}
 		if (
 			meta.unordered &&
 			typeof meta.limit === 'number' &&
@@ -1867,6 +2078,7 @@ DO UPDATE SET partition_key = EXCLUDED.partition_key, row_data = CASE WHEN ${EXP
 		return rows.map((row) => projectRow(row, meta.columns as ReadonlyArray<string> | undefined));
 	}
 
+	/** 保留精确计数语义，并使成员计数的通用计划可识别覆盖索引 */
 	private async count(meta: KvQueryMeta, params: CassandraParams, db: PostgresQueryable): Promise<Array<Row>> {
 		const plan = buildCandidatePlan(meta, params);
 		if (!plan.exact) {
@@ -1874,12 +2086,15 @@ DO UPDATE SET partition_key = EXCLUDED.partition_key, row_data = CASE WHEN ${EXP
 		}
 		if (plan.candidates.kind === 'none') return [{count: 0}];
 		if (plan.candidates.kind === 'scan') logFullScan(meta);
+		// 保留原参数及过滤条件，额外的固定表谓词让通用计划识别部分覆盖索引。
+		const guildMemberCount = meta.table.name === 'guild_members';
+		const tablePredicate = guildMemberCount ? " AND kv.table_name = 'guild_members'" : '';
 		let total = 0;
 		for (const fragments of planFragmentGroups(plan.candidates)) {
 			const result = await db.query<{count: string}>(
-				`SELECT count(*) AS count FROM ${fromPlan(this.table, fragments)} WHERE kv.table_name = $1${fragments.predicate} AND (kv.expires_at IS NULL OR kv.expires_at > now())`,
+				`SELECT count(*) AS count FROM ${fromPlan(this.table, fragments)} WHERE kv.table_name = $1${fragments.predicate}${tablePredicate} AND (kv.expires_at IS NULL OR kv.expires_at > now())`,
 				[meta.table.name, ...fragments.params],
-				planStatementName('kv_count', plan.candidates),
+				planStatementName(guildMemberCount ? 'kv_count_guild_members' : 'kv_count', plan.candidates),
 			);
 			total += Number(result.rows[0]?.count ?? 0);
 		}

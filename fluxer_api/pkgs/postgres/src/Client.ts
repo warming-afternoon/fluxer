@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import type {Pool, PoolClient, PoolConfig, QueryResult, QueryResultRow} from 'pg';
 import pg from 'pg';
+import {type PostgresNotificationCallbacks, PostgresNotificationListener} from './PostgresNotificationListener';
 
 const MAX_DIAGNOSTIC_FIELD_LENGTH = 128;
 const INVALID_PASSWORD_CODE = '28P01';
@@ -53,6 +54,8 @@ export interface IPostgresClient extends PostgresQueryable {
 	transaction<T>(fn: (client: PostgresQueryable) => Promise<T>): Promise<T>;
 	session<T>(fn: (client: PostgresQueryable) => Promise<T>): Promise<T>;
 	kvTable(): string;
+	/** 可选的专用通知连接，测试后端可以不提供 */
+	listen?(channel: string, callbacks: PostgresNotificationCallbacks): Promise<{close(): Promise<void>}>;
 }
 
 interface DefaultClientState {
@@ -120,9 +123,11 @@ class PostgresClient implements IPostgresClient {
 	private connection: Promise<void> | null = null;
 	private disconnection: Promise<void> | null = null;
 	private activeOperations = 0;
+	private readinessAcquiring = false;
 	private resolveOperationsDrained: (() => void) | null = null;
 	private readonly acquiredConnections = new WeakMap<PoolClient, AcquiredPostgresConnection>();
 	private readonly sessions = new Set<PoolClient>();
+	private readonly listeners = new Set<PostgresNotificationListener>();
 
 	constructor(
 		config: PostgresConfig,
@@ -229,6 +234,8 @@ class PostgresClient implements IPostgresClient {
 	private async closePool(): Promise<void> {
 		await this.connection;
 		for (const client of this.sessions) void client.end().catch(() => {});
+		await Promise.all([...this.listeners].map((listener) => listener.close()));
+		this.listeners.clear();
 		if (this.activeOperations > 0) {
 			await new Promise<void>((resolve) => {
 				this.resolveOperationsDrained = resolve;
@@ -250,6 +257,51 @@ class PostgresClient implements IPostgresClient {
 
 	private statementName(name: string | undefined): string | undefined {
 		return this.config.preparedStatements === false ? undefined : name;
+	}
+
+	/** 在统一时限内验证连接池取连接和真实查询，超时后丢弃探测连接 */
+	async checkReadiness(): Promise<void> {
+		await this.withPool(async (pool) => {
+			// 超时后仍在等待的取连接操作不可取消，因此只允许保留一个排队探测。
+			if (this.readinessAcquiring) throw new Error('Postgres readiness connection acquisition pending');
+			this.readinessAcquiring = true;
+			let client: PoolClient | undefined;
+			let expired = false;
+			let healthy = false;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					Promise.resolve()
+						.then(() => pool.connect())
+						.finally(() => {
+							this.readinessAcquiring = false;
+						})
+						.then(async (connection) => {
+							// 连接池排队也计入时限；迟到的连接立即归还，避免泄漏。
+							if (expired) {
+								connection.release(true);
+								return;
+							}
+							client = connection;
+							const acquired = this.getAcquiredConnection(connection);
+							if (acquired.error) throw acquired.error;
+							await connection.query('SELECT 1');
+							if (acquired.error) throw acquired.error;
+							healthy = true;
+						}),
+					new Promise<never>((_, reject) => {
+						timeout = setTimeout(() => {
+							expired = true;
+							reject(new Error('Postgres readiness timeout'));
+						}, 1000);
+					}),
+				]);
+			} finally {
+				clearTimeout(timeout);
+				// 销毁超时连接会结束挂起查询，不影响池中的业务连接。
+				client?.release(!healthy || expired);
+			}
+		});
 	}
 
 	async transaction<T>(fn: (client: PostgresQueryable) => Promise<T>): Promise<T> {
@@ -305,6 +357,39 @@ class PostgresClient implements IPostgresClient {
 
 	kvTable(): string {
 		return this.config.kvTable ?? 'fluxer_kv';
+	}
+
+	/** 建立查询池以外的通知连接，失败时清理所有重连资源 */
+	async listen(channel: string, callbacks: PostgresNotificationCallbacks): Promise<{close(): Promise<void>}> {
+		this.getPool();
+		assertIdentifier(channel);
+		const listener = new PostgresNotificationListener(
+			{
+				connectionString: this.config.url || undefined,
+				host: this.config.url ? undefined : (this.config.host ?? '127.0.0.1'),
+				port: this.config.url ? undefined : (this.config.port ?? 5432),
+				database: this.config.url ? undefined : (this.config.database ?? 'fluxer'),
+				user: this.config.url ? undefined : (this.config.username ?? 'fluxer'),
+				password: this.config.url ? undefined : (this.config.password ?? 'fluxer'),
+				ssl: this.config.ssl ? {rejectUnauthorized: true, ca: normalizePem(this.config.sslCa)} : undefined,
+			},
+			channel,
+			callbacks,
+		);
+		this.listeners.add(listener);
+		try {
+			await listener.start();
+		} catch (error) {
+			this.listeners.delete(listener);
+			await listener.close();
+			throw error;
+		}
+		return {
+			close: async () => {
+				this.listeners.delete(listener);
+				await listener.close();
+			},
+		};
 	}
 
 	private async withPool<T>(operation: (pool: Pool) => Promise<T>): Promise<T> {
@@ -406,4 +491,12 @@ export function getDefaultPostgresClient(): IPostgresClient {
 		throw new Error('Postgres client is not initialized. Call initPostgres() first.');
 	}
 	return defaultClientState.client;
+}
+
+/** 使用已初始化的真实数据库客户端探测就绪状态 */
+export async function checkPostgresReadiness(): Promise<void> {
+	getDefaultPostgresClient();
+	const client = defaultClientState.client;
+	assert(client, 'Default Postgres client is not initialized');
+	await client.checkReadiness();
 }

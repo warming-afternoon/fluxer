@@ -28,6 +28,12 @@ export interface ThreadStateRow {
 	member_ids_preview: Array<UserID> | null;
 	has_starter: boolean;
 	state_version: number;
+	deleting?: boolean | null;
+	delete_ticket?: string | null;
+	delete_prepared_state_version?: number | null;
+
+	/** 网关 owner 已处理删除后才允许清理持久关系，重试不再依赖内存快照。 */
+	delete_dispatched?: boolean | null;
 }
 
 export const THREAD_STATE_COLUMNS = [
@@ -47,6 +53,10 @@ export const THREAD_STATE_COLUMNS = [
 	'member_ids_preview',
 	'has_starter',
 	'state_version',
+	'deleting',
+	'delete_ticket',
+	'delete_prepared_state_version',
+	'delete_dispatched',
 ] as const satisfies ReadonlyArray<keyof ThreadStateRow>;
 
 export interface ThreadStatsRow {

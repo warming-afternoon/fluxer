@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {ChannelID, MessageID, UserID} from '@app/api/BrandedTypes';
+import {Config} from '@app/api/Config';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import {Logger} from '@app/api/Logger';
 import type {ReadState} from '@app/api/models/ReadState';
@@ -29,6 +30,8 @@ function hadUnreadThrough(previous: ReadState | null, messageId: MessageID, unre
 }
 
 export class ReadStateService {
+	private readonly afterWriteQueues = new Map<string, Promise<void>>();
+
 	constructor(
 		private repository: ReadStateRepository,
 		private gatewayService: IGatewayService,
@@ -69,28 +72,34 @@ export class ReadStateService {
 			manual ?? false,
 			marker,
 		);
-		if (!implicit) {
-			await this.clearPushChannelNotifications({userId, channelId, messageId});
-		} else if (hadUnreadThrough(previous, messageId, implicit.unreadThrough)) {
-			void this.clearPushChannelNotifications({userId, channelId, messageId});
-		}
-		if (emitGateway) {
-			await this.dispatchMessageAck({
-				userId,
-				channelId,
-				messageId: readState.lastMessageId ?? messageId,
-				mentionCount: readState.mentionCount,
-				manual,
-				version: readState.version,
-				readState,
-			}).catch((error) => {
-				Logger.error(
-					{userId: userId.toString(), channelId: channelId.toString(), error},
-					'Failed to dispatch MESSAGE_ACK',
-				);
-				return null;
-			});
-		}
+		await this.afterWrite(userId, channelId, async () => {
+			if (!implicit && emitGateway && Config.readState?.combinedGatewayRpcEnabled) {
+				await this.notifyCombinedReadState({userId, channelId, messageId, readState, manual});
+				return;
+			}
+			if (!implicit) {
+				await this.clearPushChannelNotifications({userId, channelId, messageId});
+			} else if (hadUnreadThrough(previous, messageId, implicit.unreadThrough)) {
+				void this.clearPushChannelNotifications({userId, channelId, messageId});
+			}
+			if (emitGateway) {
+				await this.dispatchMessageAck({
+					userId,
+					channelId,
+					messageId: readState.lastMessageId ?? messageId,
+					mentionCount: readState.mentionCount,
+					manual,
+					version: readState.version,
+					readState,
+				}).catch((error) => {
+					Logger.error(
+						{userId: userId.toString(), channelId: channelId.toString(), error},
+						'Failed to dispatch MESSAGE_ACK',
+					);
+					return null;
+				});
+			}
+		});
 		return readState;
 	}
 
@@ -169,29 +178,49 @@ export class ReadStateService {
 			const readStatesByChannel = new Map(updatedReadStates.map((readState) => [readState.channelId, readState]));
 			await Promise.all(
 				readStates.map(({channelId, messageId}) =>
-					Promise.all([
-						this.dispatchMessageAck({
-							userId,
-							channelId,
-							messageId: readStatesByChannel.get(channelId)?.lastMessageId ?? messageId,
-							mentionCount: readStatesByChannel.get(channelId)?.mentionCount ?? 0,
-							version: readStatesByChannel.get(channelId)?.version,
-							readState: readStatesByChannel.get(channelId),
-						}).catch((error) => {
-							Logger.error(
-								{userId: userId.toString(), channelId: channelId.toString(), error},
-								'Failed to dispatch MESSAGE_ACK for bulk ack',
-							);
-							return null;
-						}),
-						this.clearPushChannelNotifications({userId, channelId, messageId}),
-					]),
+					this.afterWrite(userId, channelId, async () => {
+						const state = readStatesByChannel.get(channelId);
+						if (state && Config.readState?.combinedGatewayRpcEnabled) {
+							await this.notifyCombinedReadState({userId, channelId, messageId, readState: state});
+							return;
+						}
+						await Promise.all([
+							this.dispatchMessageAck({
+								userId,
+								channelId,
+								messageId: readStatesByChannel.get(channelId)?.lastMessageId ?? messageId,
+								mentionCount: readStatesByChannel.get(channelId)?.mentionCount ?? 0,
+								version: readStatesByChannel.get(channelId)?.version,
+								readState: readStatesByChannel.get(channelId),
+							}).catch((error) => {
+								Logger.error(
+									{userId: userId.toString(), channelId: channelId.toString(), error},
+									'Failed to dispatch MESSAGE_ACK for bulk ack',
+								);
+								return null;
+							}),
+							this.clearPushChannelNotifications({userId, channelId, messageId}),
+						]);
+					}),
 				),
 			);
 			return updatedReadStates;
 		} catch (error) {
 			Logger.error({userId: userId.toString(), error}, 'Bulk ack messages failed');
 			throw error;
+		}
+	}
+
+	/** 同一用户与频道的提交后通知按顺序发送，防止手动回退被较早的确认覆盖 */
+	private async afterWrite(userId: UserID, channelId: ChannelID, task: () => Promise<void>): Promise<void> {
+		const key = `${userId}:${channelId}`;
+		const previous = this.afterWriteQueues.get(key) ?? Promise.resolve();
+		const current = previous.catch(() => undefined).then(task);
+		this.afterWriteQueues.set(key, current);
+		try {
+			await current;
+		} finally {
+			if (this.afterWriteQueues.get(key) === current) this.afterWriteQueues.delete(key);
 		}
 	}
 
@@ -223,6 +252,38 @@ export class ReadStateService {
 		});
 		await this.repository.upsertPinAck(userId, channelId, timestamp, marker);
 		await this.dispatchPinsAck({userId, channelId, timestamp, marker});
+	}
+
+	/** 单条和批量显式确认复用同一已读网关通知，保持权威游标与原清理游标。 */
+	private async notifyCombinedReadState(params: {
+		userId: UserID;
+		channelId: ChannelID;
+		messageId: MessageID;
+		readState: ReadState;
+		manual?: boolean;
+	}): Promise<void> {
+		const {userId, channelId, messageId, readState, manual} = params;
+		try {
+			await this.gatewayService.acknowledgeReadState({
+				userId,
+				channelId,
+				messageId,
+				data: {
+					channel_id: channelId.toString(),
+					message_id: (readState.lastMessageId ?? messageId).toString(),
+					mention_count: readState.mentionCount,
+					manual,
+					version: readState.version?.toString(),
+					...threadScope(readState),
+				},
+			});
+		} catch (error) {
+			// 与原副作用路径一致，数据库已完成后网关错误仅记录，不重试和重复派发。
+			Logger.error(
+				{error, userId: userId.toString(), channelId: channelId.toString()},
+				'Failed combined read-state gateway notification',
+			);
+		}
 	}
 
 	private async dispatchMessageAck(params: {

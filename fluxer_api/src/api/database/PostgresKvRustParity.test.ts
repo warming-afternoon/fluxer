@@ -14,6 +14,8 @@ const RUST_SOURCE = fs.readFileSync(path.join(REPO_ROOT, 'fluxer_svc/src/postgre
 const RUST_INDEX_SUFFIXES = ['expires_idx', 'partition_idx', 'row_key_c_idx', 'sort_id_fill'];
 
 const API_ONLY_INDEX_SUFFIXES = [
+	'guild_members_count_cover_idx',
+	'guild_members_user_numeric_idx',
 	'message_reactions_message_idx',
 	'messages_message_idx',
 	'partition_row_idx',
@@ -55,8 +57,8 @@ function lockNamespace(source: string, pattern: RegExp): number {
 
 describe('Postgres KV schema parity between the API and fluxer_svc', () => {
 	it('creates the same indexes apart from the ones the API builds or retires on its own', () => {
-		const typescript = indexSuffixes(TYPESCRIPT_SOURCE, /\$\{kvTable\}_([a-z_]+)/g);
-		const rust = indexSuffixes(RUST_SOURCE, /\{kv_table\}_([a-z_]+)/g);
+		const typescript = indexSuffixes(TYPESCRIPT_SOURCE, /\$\{kvTable\}_([a-z_]+(?:_idx|_fill))\b/g);
+		const rust = indexSuffixes(RUST_SOURCE, /\{kv_table\}_([a-z_]+(?:_idx|_fill))\b/g);
 		expect(rust).toEqual(RUST_INDEX_SUFFIXES);
 		expect(typescript.filter((suffix) => !rust.includes(suffix))).toEqual(API_ONLY_INDEX_SUFFIXES);
 		expect(rust.filter((suffix) => !typescript.includes(suffix))).toEqual([]);

@@ -68,6 +68,8 @@ export interface MasterConfig {
 	};
 	database: {
 		backend: DatabaseBackend;
+		/** Shared overrides; omitted values preserve each backend's defaults. */
+		metadata_cache?: {channel_enabled?: boolean; guild_enabled?: boolean};
 		cassandra: {
 			hosts: Array<string>;
 			port: number;
@@ -88,6 +90,11 @@ export interface MasterConfig {
 			max_connections: number;
 			kv_table: string;
 			prepared_statements: boolean;
+			/** 是否主动等待跨请求已读组批 */
+			read_state_batching_enabled: boolean;
+			/** 是否启用带数据库失效通知的频道元数据缓存 */
+			channel_metadata_cache_enabled: boolean;
+			guild_availability_cache_enabled: boolean;
 		};
 	};
 	s3?: {
@@ -110,6 +117,18 @@ export interface MasterConfig {
 			headers_timeout_ms: number;
 			request_timeout_ms: number;
 			max_inflight_requests: number;
+			instances?: number;
+
+			/** 是否合并频道上下文、成员及权限的网关查询。 */
+			combined_channel_auth_enabled?: boolean;
+
+			/** 是否合并单节点的全局与路由限流往返。 */
+			combined_rate_limit_enabled?: boolean;
+
+			/** 是否合并已读清通知与派发网关调用。 */
+			read_state_combined_gateway_rpc_enabled?: boolean;
+			/** 是否为会话已读请求只读取认证所需用户字段。 */
+			read_state_narrow_auth_enabled?: boolean;
 			automated_message_deletion_delay_days: number;
 			ip_ban_exempt_ips: Array<string>;
 			donation_proxy_key: string;
@@ -162,6 +181,26 @@ export interface MasterConfig {
 			};
 		};
 		gateway: {
+			/** 所有 API 和提及后台升级并排空旧任务后才能启用。 */
+			thread_mentions?: {
+				/** 显式开启完整角色提及协议。 */
+				enabled: boolean;
+
+				/** 预期 API 实例数量，必须与清单一致。 */
+				expected_api_instances: number;
+
+				/** 预期 worker 实例数量，必须与清单一致。 */
+				expected_worker_instances: number;
+
+				/** 稳定的 API 实例身份清单。 */
+				expected_api_instance_ids: Array<string>;
+
+				/** 稳定的 worker 实例身份清单。 */
+				expected_worker_instance_ids: Array<string>;
+			};
+			/** 是否发送逐项保留结果的清理批次；升级前先启用全部接收端。 */
+			clear_batch_enabled?: boolean;
+
 			rpc_auth_token?: string;
 		};
 		admin: {

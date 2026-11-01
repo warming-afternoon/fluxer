@@ -484,6 +484,18 @@ How long the bundled object store keeps files in the uploads bucket before it de
 
 Leave these unset to use the bundled Postgres.
 
+### `FLUXER_READ_STATE_BATCHING_ENABLED`
+
+Batch PostgreSQL read-state writes across requests; false keeps bounded transactions without the collection window. With rexctl, use `rexctl config set FLUXER_READ_STATE_BATCHING_ENABLED`.
+
+### `FLUXER_CHANNEL_METADATA_CACHE_ENABLED`
+
+Cache PostgreSQL channel metadata with database-notification invalidation; Cassandra uses its existing path. With rexctl, use `rexctl config set FLUXER_CHANNEL_METADATA_CACHE_ENABLED`.
+
+### `FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED`
+
+Enable guild availability metadata caching independently; empty preserves the backend default. With rexctl, use `rexctl config set FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED`.
+
 ### `FLUXER_POSTGRES_HOST`
 
 The hostname or address of the Postgres database. Set it when Postgres runs outside the stack. The default is `postgres`. With rexctl, use `rexctl config set FLUXER_POSTGRES_HOST`.
@@ -752,6 +764,14 @@ Extra headers added to every message sent through the fallback provider, as a JS
 
 ## Push notifications
 
+### `FLUXER_PUSH_SUBSCRIPTION_BATCHING_ENABLED`
+
+Coalesce clear-notification subscription lookups in a 5 ms window; false restores per-job queries. With rexctl, use `rexctl config set FLUXER_PUSH_SUBSCRIPTION_BATCHING_ENABLED`.
+
+### `FLUXER_PUSH_CLEAR_BATCH_ENABLED`
+
+Accept clear batches as well as individual requests. Keep enabled until all batch senders are disabled and outstanding work is drained. The default is `true`. With rexctl, use `rexctl config set FLUXER_PUSH_CLEAR_BATCH_ENABLED`.
+
 ### `FLUXER_PUSH_APNS_ENABLED`
 
 Whether the push service sends mobile notifications through Apple Push Notification service with your own credentials. Use `true` or `false`. When it's empty, APNs is off. With rexctl, use `rexctl config set FLUXER_PUSH_APNS_ENABLED`.
@@ -1003,6 +1023,42 @@ The Controller API key Fluxer sends as a bearer token with each purge request, i
 How long each Controller purge request may take, in milliseconds from 1000 to 10000. When it's empty, Fluxer uses `10000`. With rexctl, use `rexctl config set FLUXER_CACHE_PURGE_CONTROLLER_TIMEOUT_MS`.
 
 ## Gateway
+
+### `FLUXER_COMBINED_CHANNEL_AUTH_ENABLED`
+
+Combine channel authorization RPCs. Upgrade every Gateway RPC receiver and guild-hosting process before enabling; false restores separate calls. The default is `true`. With rexctl, use `rexctl config set FLUXER_COMBINED_CHANNEL_AUTH_ENABLED`.
+
+### `FLUXER_READ_STATE_COMBINED_GATEWAY_RPC_ENABLED`
+
+Combine notification clearing and `MESSAGE_ACK` dispatch. Upgrade every Gateway RPC receiver before enabling. The default is `true`. With rexctl, use `rexctl config set FLUXER_READ_STATE_COMBINED_GATEWAY_RPC_ENABLED`.
+
+### `FLUXER_INTERNAL_API_RPC_URLS`
+
+Comma-separated direct internal API RPC targets for read-only routing. The multi-API renderer fills these from actual replicas. With rexctl, use `rexctl config set FLUXER_INTERNAL_API_RPC_URLS`.
+
+### `FLUXER_GATEWAY_PUSH_OUTBOX_MAX_INFLIGHT`
+
+Maximum concurrent push outbox requests. The default is `96`. With rexctl, use `rexctl config set FLUXER_GATEWAY_PUSH_OUTBOX_MAX_INFLIGHT`.
+
+### `FLUXER_GATEWAY_GUILD_MEMBER_LOAD_CONCURRENCY`
+
+Maximum concurrent guild member page loads. The default is `4`. With rexctl, use `rexctl config set FLUXER_GATEWAY_GUILD_MEMBER_LOAD_CONCURRENCY`.
+
+### `FLUXER_GATEWAY_THREAD_MEMBER_LOAD_CONCURRENCY`
+
+Maximum concurrent thread member page loads. The default is `2`. With rexctl, use `rexctl config set FLUXER_GATEWAY_THREAD_MEMBER_LOAD_CONCURRENCY`.
+
+### `FLUXER_GATEWAY_THREAD_SYNC_RATE`
+
+Full thread directory syncs per second; queued work is rate limited. The default is `80`. With rexctl, use `rexctl config set FLUXER_GATEWAY_THREAD_SYNC_RATE`.
+
+### `FLUXER_GATEWAY_THREAD_SYNC_JITTER_MS`
+
+Maximum initial thread directory sync jitter in milliseconds. The default is `500`. With rexctl, use `rexctl config set FLUXER_GATEWAY_THREAD_SYNC_JITTER_MS`.
+
+### `FLUXER_GATEWAY_CLEAR_BATCH_ENABLED`
+
+Group notification clears. Upgrade all Push receivers before enabling; disable senders and drain outstanding work before disabling receivers. The default is `true`. With rexctl, use `rexctl config set FLUXER_GATEWAY_CLEAR_BATCH_ENABLED`.
 
 ### `FLUXER_GATEWAY_MEDIA_PROXY_ENDPOINT`
 
@@ -1351,6 +1407,22 @@ The keys Fluxer signs Bluesky account linking requests with, as a JSON array of 
 ## Memory and performance
 
 rexctl sets some of these from the machine's memory and CPU on every start. A value you set wins.
+
+### `FLUXER_COMBINED_RATE_LIMIT_ENABLED`
+
+Combine global and route checks in one standalone KV script; Cluster remains sequential. False restores separate checks. The default is `true`. With rexctl, use `rexctl config set FLUXER_COMBINED_RATE_LIMIT_ENABLED`.
+
+### `FLUXER_READ_STATE_NARROW_AUTH_ENABLED`
+
+Use the narrow identity read only on the supported POST read-state endpoints; false restores full authentication reads. The default is `true`. With rexctl, use `rexctl config set FLUXER_READ_STATE_NARROW_AUTH_ENABLED`.
+
+### `FLUXER_API_INSTANCES`
+
+Declare API topology size; this does not create replicas. Use render-multi-api.mjs for an explicitly sized multi-API candidate. The default is `1`. With rexctl, use `rexctl config set FLUXER_API_INSTANCES`.
+
+### `FLUXER_CADDY_GOMEMLIMIT`
+
+Go soft memory budget, below the default 384mb container limit. Raise both limits together for a measured deployment. The default is `256MiB`. With rexctl, use `rexctl config set FLUXER_CADDY_GOMEMLIMIT`.
 
 ### `FLUXER_TOKIO_WORKER_THREADS`
 

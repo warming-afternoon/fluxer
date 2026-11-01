@@ -1115,6 +1115,7 @@ export class MessageSendService {
 					mentionChannels: mentionData?.mentionChannels,
 				});
 				await this.deps.mentionService.handleMentionTasks({
+					channel,
 					guildId: channel.guildId,
 					message,
 					authorId: webhookActorId,

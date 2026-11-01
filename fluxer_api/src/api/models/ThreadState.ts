@@ -22,6 +22,10 @@ export class ThreadState {
 	readonly memberIdsPreview: Array<UserID>;
 	readonly hasStarter: boolean;
 	readonly stateVersion: number;
+	readonly deleting: boolean;
+	readonly deleteTicket: string | null;
+	readonly deletePreparedVersion: number | null;
+	readonly deleteDispatched: boolean;
 
 	constructor(row: ThreadStateRow) {
 		this.threadId = row.thread_id;
@@ -40,6 +44,10 @@ export class ThreadState {
 		this.memberIdsPreview = row.member_ids_preview ?? [];
 		this.hasStarter = row.has_starter ?? false;
 		this.stateVersion = row.state_version;
+		this.deleting = row.deleting ?? false;
+		this.deleteTicket = row.delete_ticket ?? null;
+		this.deletePreparedVersion = row.delete_prepared_state_version ?? null;
+		this.deleteDispatched = row.delete_dispatched ?? false;
 	}
 
 	get isPrivate(): boolean {
@@ -68,6 +76,10 @@ export class ThreadState {
 			member_ids_preview: this.memberIdsPreview.length > 0 ? this.memberIdsPreview : null,
 			has_starter: this.hasStarter,
 			state_version: this.stateVersion,
+			deleting: this.deleting,
+			delete_ticket: this.deleteTicket,
+			delete_prepared_state_version: this.deletePreparedVersion,
+			delete_dispatched: this.deleteDispatched,
 		};
 	}
 }

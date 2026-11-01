@@ -147,14 +147,19 @@ export class ThreadMessageResponses {
 		return this.buildStarter(params);
 	}
 
+	/** 按已验证的消息历史权限过滤帖子预览，避免批量接口绕过截止时间。 */
 	async getFirstMessages(params: {
 		userId: UserID;
 		access: MessageResponseAccessContext;
 		threadIds: Array<ChannelID>;
 	}): Promise<Map<string, MessageResponse>> {
-		if (params.threadIds.length === 0) return new Map();
+		const cutoff = params.access.messageHistoryCutoff ? new Date(params.access.messageHistoryCutoff).getTime() : null;
+		const readableIds = params.threadIds.filter(
+			(id) => params.access.canReadMessageHistory || (cutoff !== null && snowflakeToDate(id).getTime() >= cutoff),
+		);
+		if (readableIds.length === 0) return new Map();
 		const messages = await Promise.all(
-			params.threadIds.map((threadId) =>
+			readableIds.map((threadId) =>
 				this.channelRepository.messages.getMessage(threadId, channelIdToMessageId(threadId)),
 			),
 		);

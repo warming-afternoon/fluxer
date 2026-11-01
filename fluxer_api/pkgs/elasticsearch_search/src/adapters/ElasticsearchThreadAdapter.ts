@@ -44,11 +44,16 @@ function cursorFilter(cursor: ThreadSearchCursor, op: 'gt' | 'lt'): Elasticsearc
 	};
 }
 
+/** 构造线程搜索条件，将显式帖子范围与现有权限条件合并 */
 function buildThreadFilters(filters: ThreadSearchFilters): Array<ElasticsearchFilter | undefined> {
 	const clauses: Array<ElasticsearchFilter | undefined> = [
 		esTermFilter('guildId', filters.guildId),
 		esTermFilter('parentId', filters.parentId),
 	];
+	// 空范围必须返回空结果，不能退化为整个社区的帖子
+	if (filters.threadIds !== undefined) {
+		clauses.push(filters.threadIds.length > 0 ? esTermsFilter('id', filters.threadIds) : {match_none: {}});
+	}
 	if (filters.publicOnly) {
 		clauses.push(
 			filters.privateThreadIds && filters.privateThreadIds.length > 0

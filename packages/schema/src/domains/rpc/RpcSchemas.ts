@@ -88,6 +88,22 @@ export const RpcRequest = z.discriminatedUnion('type', [
 		after_user_id: SnowflakeType.optional().describe('Cursor for member collection pagination'),
 	}),
 	z.object({
+		type: z.literal('guild_member_bounds').describe('Read-only guild member ID bounds for load scheduling'),
+		guild_id: SnowflakeType,
+		/** 区间端点仅作在线调度提示，不能作为快照或人数证明。 */
+		after_user_id: SnowflakeType.optional(),
+
+		/** 保留调用方原有包含式上界，根区间允许不传。 */
+		through_user_id: SnowflakeType.optional(),
+	}),
+	z.object({
+		type: z.literal('guild_member_range').describe('Read-only bounded guild member page'),
+		guild_id: SnowflakeType,
+		limit: z.number().int().min(1).max(1000).optional(),
+		after_user_id: SnowflakeType.optional().describe('Exclusive lower cursor'),
+		through_user_id: SnowflakeType.optional().describe('Inclusive upper bound'),
+	}),
+	z.object({
 		type: z.literal('voice_state_upsert').describe('Request type for persisting a guild voice state snapshot'),
 		guild_id: SnowflakeType.describe('ID of the guild for this voice state'),
 		voice_state: VoiceStateResponse.describe('Voice state payload to persist'),
@@ -229,6 +245,14 @@ export const RpcRequest = z.discriminatedUnion('type', [
 		type: z.literal('get_channel_threads_config').describe('Request type for fetching channel threads configuration'),
 	}),
 	z.object({
+		type: z.literal('thread_watch_contexts').describe('批量获取浏览帖子的可信上下文'),
+		// 所属服务器标识
+		guild_id: SnowflakeType,
+
+		// 待获取的帖子标识
+		thread_ids: z.array(SnowflakeType).min(1).max(100),
+	}),
+	z.object({
 		type: z.literal('list_thread_members').describe('Request type for listing the members of a thread'),
 		guild_id: SnowflakeType.describe('ID of the guild'),
 		thread_ids: z
@@ -238,6 +262,8 @@ export const RpcRequest = z.discriminatedUnion('type', [
 			.describe('IDs of the threads, walked in order'),
 		limit: z.number().int().min(1).max(RPC_THREAD_MEMBERS_PAGE_MAX).optional().describe('Maximum members to return'),
 		after_user_id: SnowflakeType.optional().describe('Member cursor within the first thread'),
+		// 删除准备只允许同一状态版本的单帖子分页，旧调用不受影响。
+		expected_state_version: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
 	}),
 	z.object({
 		type: z.literal('forum_unreads').describe('Request type for counting unread messages in forum posts'),
@@ -389,6 +415,14 @@ export const RpcResponseGuildCollectionData = z.object({
 		.describe('Forum and media channels of the guild, merged into channels when active'),
 	has_more: z.boolean().describe('Whether more data is available for this collection'),
 	next_after_user_id: SnowflakeStringType.nullish().describe('Cursor for the next member chunk'),
+	/** 映射用户之前的数据库页覆盖起点。 */
+	page_first_user_id: SnowflakeStringType.nullish(),
+
+	/** 映射用户之前的数据库页覆盖终点，可能大于最后一个有效映射用户。 */
+	page_last_user_id: SnowflakeStringType.nullish(),
+
+	/** 未过滤未知用户引用之前的页行数。 */
+	page_row_count: z.number().int().min(0).max(1000).optional(),
 });
 
 export type RpcResponseGuildCollectionData = z.infer<typeof RpcResponseGuildCollectionData>;
@@ -405,6 +439,14 @@ export const RpcResponse = z.discriminatedUnion('type', [
 	z.object({
 		type: z.literal('guild_collection').describe('Response type for guild collection chunks'),
 		data: RpcResponseGuildCollectionData.describe('Guild collection chunk data'),
+	}),
+	z.object({
+		type: z.literal('guild_member_bounds'),
+		data: z.object({min_user_id: SnowflakeStringType.nullable(), max_user_id: SnowflakeStringType.nullable()}),
+	}),
+	z.object({
+		type: z.literal('guild_member_range'),
+		data: RpcResponseGuildCollectionData,
 	}),
 	z.object({
 		type: z.literal('voice_state_upsert').describe('Response type for voice state persistence upsert'),
@@ -584,6 +626,28 @@ export const RpcResponse = z.discriminatedUnion('type', [
 			.describe('Channel threads config result'),
 	}),
 	z.object({
+		type: z.literal('thread_watch_contexts').describe('帖子浏览上下文结果'),
+		// 仅包含当前服务器内真实存在的公开线程
+		data: z.object({
+			// 帖子权限判断需要的最小服务端上下文
+			threads: z.array(
+				z.object({
+					// 帖子标识
+					id: SnowflakeStringType,
+
+					// 所属服务器标识
+					guild_id: SnowflakeStringType,
+
+					// 父频道标识
+					parent_id: SnowflakeStringType,
+
+					// 公开线程类型
+					type: z.literal(11),
+				}),
+			),
+		}),
+	}),
+	z.object({
 		type: z.literal('list_thread_members').describe('Response type for a page of thread members'),
 		data: z
 			.object({
@@ -591,6 +655,18 @@ export const RpcResponse = z.discriminatedUnion('type', [
 				has_more: z.boolean().describe('Whether more members are available'),
 				next_thread_id: SnowflakeStringType.nullish().describe('Thread the next page starts in'),
 				next_after_user_id: SnowflakeStringType.nullish().describe('Member cursor within that thread'),
+				// 仅版本绑定的生命周期准备请求返回可信快照元数据。
+				state_version: z.number().int().nonnegative().optional(),
+				member_count: z.number().int().nonnegative().optional(),
+				thread_context: z
+					.object({
+						id: SnowflakeStringType,
+						guild_id: SnowflakeStringType,
+						parent_id: SnowflakeStringType,
+						type: z.number().int(),
+						thread_metadata: z.object({archived: z.boolean()}),
+					})
+					.optional(),
 			})
 			.describe('Thread members result'),
 	}),

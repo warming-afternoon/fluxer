@@ -139,6 +139,10 @@ const MessageBaseResponseSchema = z.object({
 	tts: z.boolean().describe('Whether the message was sent as text-to-speech'),
 	mentions: z.array(z.lazy(() => UserPartialResponse)).describe('The users mentioned in the message'),
 	mention_roles: z.array(z.string()).describe('The role IDs mentioned in the message'),
+	thread_mention_warnings: z
+		.array(z.enum(['role_group_too_large', 'role_union_too_large', 'role_index_unavailable']))
+		.optional()
+		.describe('Reasons role device notifications and automatic thread joins were skipped'),
 	mention_channels: z
 		.array(MessageChannelMentionResponse)
 		.nullish()
@@ -157,6 +161,12 @@ const MessageBaseResponseSchema = z.object({
 	message_snapshots: z.array(MessageSnapshotResponse).nullish().describe('Snapshots of forwarded messages'),
 	nonce: z.string().nullish().describe('A client-provided value for message deduplication'),
 	call: MessageCallResponse.nullish().describe('Call information if this message represents a call'),
+	// 消息所属帖子的公共模型，不代表关注关系或由此消息创建的子帖。
+	channel_context: z
+		.lazy(() => ThreadChannelResponse)
+		.optional()
+		.describe('Public context of the thread containing this message; does not imply membership or a watch'),
+
 	thread: z
 		.lazy(() => ThreadChannelResponse)
 		.optional()
@@ -348,6 +358,9 @@ export interface Message {
 	readonly edited_timestamp?: string;
 	readonly mentions: ReadonlyArray<MessageMention>;
 	readonly mention_roles: ReadonlyArray<string>;
+	readonly thread_mention_warnings?: ReadonlyArray<
+		'role_group_too_large' | 'role_union_too_large' | 'role_index_unavailable'
+	>;
 	readonly mention_channels?: ReadonlyArray<ChannelMention>;
 	readonly users?: ReadonlyArray<UserPartial>;
 	readonly embeds?: ReadonlyArray<MessageEmbed>;
@@ -358,6 +371,9 @@ export interface Message {
 	readonly referenced_message?: Message | null;
 	readonly message_snapshots?: ReadonlyArray<MessageSnapshot>;
 	readonly call?: MessageCall | null;
+	// 消息所属帖子的公共模型，不携带自身成员关系。
+	readonly channel_context?: ThreadChannelResponse;
+
 	readonly thread?: ThreadChannelResponse;
 	readonly state?: string;
 	readonly nonce?: string;

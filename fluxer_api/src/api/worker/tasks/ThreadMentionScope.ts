@@ -63,7 +63,10 @@ export class ThreadMentionScope {
 		return new ThreadMentionScope(deps, channel, state, messageId);
 	}
 
-	async filter(entries: Array<GatewayMentionSourceEntry>): Promise<Array<GatewayMentionSourceEntry>> {
+	async filter(
+		entries: Array<GatewayMentionSourceEntry>,
+		roleAddUserIds: ReadonlySet<UserID> = new Set(),
+	): Promise<Array<GatewayMentionSourceEntry>> {
 		const {state} = this;
 		if (state === null || entries.length === 0) return [];
 		const candidates = entries;
@@ -83,7 +86,7 @@ export class ThreadMentionScope {
 				kept.push(entry);
 				continue;
 			}
-			if (!entry.role || !canAddRoleMembers) continue;
+			if (!entry.role || !canAddRoleMembers || !roleAddUserIds.has(entry.userId)) continue;
 			if (this.roleAdds + roleAdds.length >= MAX_ROLE_MENTION_THREAD_ADDS) {
 				this.roleCapped = true;
 				continue;

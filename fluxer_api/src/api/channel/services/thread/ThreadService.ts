@@ -2,6 +2,7 @@
 
 import {ThreadCreationService} from '@app/api/channel/services/thread/ThreadCreationService';
 import {ThreadDeletionService} from '@app/api/channel/services/thread/ThreadDeletionService';
+import {ThreadDirectoryService} from '@app/api/channel/services/thread/ThreadDirectoryService';
 import {ThreadForumService} from '@app/api/channel/services/thread/ThreadForumService';
 import {ThreadListService} from '@app/api/channel/services/thread/ThreadListService';
 import {ThreadMemberService} from '@app/api/channel/services/thread/ThreadMemberService';
@@ -15,6 +16,7 @@ export class ThreadService {
 	readonly lists: ThreadListService;
 	readonly deletion: ThreadDeletionService;
 	readonly forum: ThreadForumService;
+	readonly directory: ThreadDirectoryService;
 
 	constructor(deps: ThreadServiceDeps) {
 		const context = new ThreadServiceContext(deps);
@@ -24,5 +26,6 @@ export class ThreadService {
 		this.lists = new ThreadListService(context);
 		this.deletion = new ThreadDeletionService(context);
 		this.forum = new ThreadForumService(context);
+		this.directory = new ThreadDirectoryService(context);
 	}
 }

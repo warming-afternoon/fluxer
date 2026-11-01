@@ -15,6 +15,7 @@ import {
 	threadDeleteEvent,
 	threadUpdateEvent,
 } from '@app/api/channel/services/thread/ThreadDispatch';
+import {prepareThreadDeletion} from '@app/api/channel/services/thread/ThreadLifecyclePreparation';
 import {serializeThreadForAudit, type ThreadView} from '@app/api/channel/services/thread/ThreadMappers';
 import {loadThreadView} from '@app/api/channel/services/thread/ThreadViews';
 import {enqueueThreadSearchSync} from '@app/api/channel/threads/ThreadJobs';
@@ -35,7 +36,6 @@ import {
 	ChannelFlags,
 	MAX_ACTIVE_THREADS_PER_GUILD,
 	MAX_PINNED_THREADS_PER_FORUM,
-	MAX_THREAD_MEMBERS,
 	settableChannelFlags,
 } from '@fluxer/constants/src/ThreadConstants';
 import {
@@ -203,11 +203,9 @@ export class ThreadModifyService {
 			serializeThreadForAudit(after),
 		);
 		if (changes.length > 0) {
-			const unarchivedMembers =
-				transition.previous.archived && !next.archived
-					? await this.deps.channelRepository.threads.listMembers(channel.id, {limit: MAX_THREAD_MEMBERS})
-					: undefined;
-			await dispatchThreadEvents(this.deps.gatewayService, next.guildId, [threadUpdateEvent(after, unarchivedMembers)]);
+			await dispatchThreadEvents(this.deps.gatewayService, next.guildId, [
+				threadUpdateEvent(after, undefined, transition.previous.archived && !next.archived),
+			]);
 			await this.deps.guildAuditLogService.record({
 				guildId: after.state.guildId,
 				targetId: after.channel.id,
@@ -252,25 +250,29 @@ export class ThreadModifyService {
 		assertThreadAllowed(canDeleteThread(thread.actor));
 		thread.enforceMfa(ThreadPermissionFlags.MANAGE_THREADS);
 		const view = await loadThreadView(this.deps.channelRepository, channel, thread.state, thread.parent);
-		const members = await this.deps.channelRepository.threads.listMembers(channel.id, {limit: MAX_THREAD_MEMBERS});
+		const prepared = await prepareThreadDeletion(
+			this.deps.channelRepository.threads,
+			this.deps.gatewayService,
+			thread.state,
+		);
 		await this.deps.utils.purgeChannelAttachments(channel);
 		await deleteChannelMessageSearchDocuments(channel.id, {context: {source: 'thread_delete'}});
-		await this.deps.channelRepository.threads.purgeThread(channel.id);
 		await getKVThreadAutoArchiveQueue().remove(thread.state.guildId, channel.id);
 		await deleteThreadSearchDocuments([channel.id]);
 		requestCache.channels.delete(channel.id);
-		await dispatchThreadEvents(this.deps.gatewayService, thread.state.guildId, [
-			threadDeleteEvent(
-				thread.state,
-				members.map((member) => member.userId),
-			),
-			...(await clearThreadSourceFlag(
-				this.deps.channelRepository,
-				this.deps.cacheService,
-				thread.state,
-				thread.parent,
-			)),
-		]);
+		if (!thread.state.deleteDispatched) {
+			await dispatchThreadEvents(this.deps.gatewayService, thread.state.guildId, [
+				threadDeleteEvent(thread.state, [], prepared.ticket, prepared.preparedVersion),
+				...(await clearThreadSourceFlag(
+					this.deps.channelRepository,
+					this.deps.cacheService,
+					thread.state,
+					thread.parent,
+				)),
+			]);
+			await this.deps.channelRepository.threads.markDeleteDispatched(channel.id, prepared.ticket);
+		}
+		await this.deps.channelRepository.threads.purgeThread(channel.id);
 		await this.deps.guildAuditLogService.record({
 			guildId: view.state.guildId,
 			targetId: view.channel.id,

@@ -61,6 +61,7 @@ export class MessageProcessingService {
 	}): Promise<void> {
 		const {message, guild, user, mentionHere = false} = params;
 		await this.mentionService.handleMentionTasks({
+			channel: params.channel,
 			guildId: guild ? createGuildID(BigInt(guild.id)) : null,
 			message,
 			authorId: user.id,

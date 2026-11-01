@@ -53,6 +53,9 @@ await build({
 	splitting: true,
 	target: 'node26',
 	charset: 'ascii',
+	// Strip source comments as well: charset does not escape their Unicode text.
+	// Preserve the ASCII-only bundle invariant while keeping source maps for debugging.
+	minifyWhitespace: true,
 	sourcemap: true,
 	sourcesContent: false,
 	logLevel: 'info',

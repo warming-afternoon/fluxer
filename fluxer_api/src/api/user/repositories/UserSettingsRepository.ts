@@ -18,6 +18,10 @@ const FETCH_USER_GUILD_SETTINGS_CQL = UserGuildSettingsTable.selectCql({
 	where: [UserGuildSettingsTable.where.eq('user_id'), UserGuildSettingsTable.where.eq('guild_id')],
 	limit: 1,
 });
+const FETCH_USER_GUILD_SETTINGS_BATCH_CQL = UserGuildSettingsTable.selectCql({
+	where: [UserGuildSettingsTable.where.in('user_id', 'user_ids'), UserGuildSettingsTable.where.eq('guild_id')],
+});
+const GUILD_SETTINGS_BATCH_SIZE = 200;
 const FETCH_ALL_USER_GUILD_SETTINGS_CQL = UserGuildSettingsTable.selectCql({
 	where: UserGuildSettingsTable.where.eq('user_id'),
 });
@@ -51,6 +55,26 @@ export class UserSettingsRepository {
 			guild_id: guildId ? guildId : 0n,
 		});
 		return settings ? new UserGuildSettings(settings) : null;
+	}
+
+	/** 顺序批查完整主键，并还原输入顺序、重复项及缺失设置 */
+	async findGuildSettingsBatch(
+		userIds: Array<UserID>,
+		guildId: GuildID | null,
+	): Promise<Array<UserGuildSettings | null>> {
+		if (userIds.length === 0) return [];
+		const uniqueIds = [...new Set(userIds)];
+		const settingsByUser = new Map<UserID, UserGuildSettings>();
+		// 去重后的完整主键每批最多两百个，不增加连接池或并行查询。
+		for (let offset = 0; offset < uniqueIds.length; offset += GUILD_SETTINGS_BATCH_SIZE) {
+			const rows = await fetchMany<UserGuildSettingsRow>(FETCH_USER_GUILD_SETTINGS_BATCH_CQL, {
+				user_ids: uniqueIds.slice(offset, offset + GUILD_SETTINGS_BATCH_SIZE),
+				guild_id: guildId ?? 0n,
+			});
+			for (const row of rows) settingsByUser.set(row.user_id, new UserGuildSettings(row));
+		}
+		// RPC 调用方按输入下标匹配用户，不能直接使用数据库返回顺序。
+		return userIds.map((userId) => settingsByUser.get(userId) ?? null);
 	}
 
 	async findAllGuildSettings(userId: UserID): Promise<Array<UserGuildSettings>> {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {createHash} from 'node:crypto';
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import {isIpBanExempt} from '@app/api/ban/IpBanExemptions';
 import {emitActivity} from '@app/api/infrastructure/activity/ActivityEvents';
 import {workerMeta} from '@app/api/infrastructure/activity/ActivityMeta';
@@ -77,7 +78,7 @@ export function recordAuthFailure(ip: string | null, tokenHash: string | null): 
 
 export const RequestErrorTelemetry = createMiddleware<HonoEnv>(async (ctx, next) => {
 	await next();
-	if (ctx.get('user')) return;
+	if (getRequestIdentity(ctx)) return;
 	recordRequestStatus(ctx.req.raw, ctx.res.status);
 });
 

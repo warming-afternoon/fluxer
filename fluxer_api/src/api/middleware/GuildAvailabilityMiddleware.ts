@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import {type ChannelID, createChannelID, createGuildID, type GuildID} from '@app/api/BrandedTypes';
+import {getChannelMetadata, getGuildAvailability} from '@app/api/database/CassandraQueryExecution';
 import type {Guild} from '@app/api/models/Guild';
 import type {User} from '@app/api/models/User';
 import type {HonoEnv} from '@app/api/types/HonoEnv';
@@ -40,11 +42,11 @@ function extractChannelId(path: string): ChannelID | null {
 	return createChannelID(BigInt(channelId));
 }
 
-function isStaffUser(user: User): boolean {
+function isStaffUser(user: Pick<User, 'flags'>): boolean {
 	return (user.flags & UserFlags.STAFF) === UserFlags.STAFF;
 }
 
-function isGuildUnavailableForUser(guild: Guild, user: User): boolean {
+function isGuildUnavailableForUser(guild: Guild, user: Pick<User, 'flags'>): boolean {
 	if (guild.features.has(GuildFeatures.UNAVAILABLE_FOR_EVERYONE)) {
 		return true;
 	}
@@ -63,13 +65,16 @@ async function resolveGuildIdForRequest(ctx: Context<HonoEnv>, path: string): Pr
 	if (channelId === null) {
 		return null;
 	}
+	// 只消费稳定字段，不把元数据放入要求完整频道对象的请求缓存。
+	const metadata = getChannelMetadata([channelId]);
+	if (metadata !== null) return (await metadata).get(channelId)?.guildId ?? null;
 	const channel = await ctx.get('channelRepository').channelData.findUnique(channelId);
 	ctx.get('requestCache')?.channels.set(channelId, channel);
 	return channel?.guildId ?? null;
 }
 
 export const GuildAvailabilityMiddleware = createMiddleware<HonoEnv>(async (ctx, next) => {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user) {
 		await next();
 		return;
@@ -77,6 +82,17 @@ export const GuildAvailabilityMiddleware = createMiddleware<HonoEnv>(async (ctx,
 	const normalizedPath = normalizeRequestPath(ctx.req.path);
 	const guildId = await resolveGuildIdForRequest(ctx, normalizedPath);
 	if (guildId === null) {
+		await next();
+		return;
+	}
+	const availability = getGuildAvailability(guildId);
+	if (availability !== null) {
+		const snapshot = await availability;
+		if (snapshot && (snapshot.unavailableForEveryone || (snapshot.unavailableForNonStaff && !isStaffUser(user)))) {
+			throw new MissingAccessError();
+		}
+		// Missing guilds preserve UnknownGuildError's original pass-through behavior.
+		// The snapshot must never enter the full Guild request cache.
 		await next();
 		return;
 	}

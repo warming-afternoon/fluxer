@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import type {GuildID, UserID} from '@app/api/BrandedTypes';
 import {executeConditional, fetchOne} from '@app/api/database/CassandraQueryExecution';
 import type {GuildThreadStateRow} from '@app/api/database/types/ThreadTypes';
@@ -57,7 +58,7 @@ export function viewerActive(viewer: ThreadViewer, _guildId: GuildID | bigint | 
 }
 
 export function viewerFromCtx(ctx: Context<HonoEnv>): ThreadViewer {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx)!;
 	const bot = user.isBot;
 	const capable =
 		bot || (ctx.get('authTokenType') === 'session' && ctx.get('clientFeatures').has(CHANNEL_THREADS_CLIENT_FEATURE));

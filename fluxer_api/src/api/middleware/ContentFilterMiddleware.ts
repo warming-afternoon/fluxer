@@ -140,7 +140,7 @@ const ContentFilterMiddleware = createMiddleware(async (ctx, next) => {
 	if (strings.length === 0) {
 		return next();
 	}
-	const userId = ctx.get('user')?.id ?? null;
+	const userId = ctx.get('user')?.id ?? ctx.get('readStatePrincipal')?.id ?? null;
 	for (const text of strings) {
 		if (text.length < 3) continue;
 		if (phraseBlocklistCache.containsBannedPhrase(text)) {

@@ -3,9 +3,17 @@
 import {randomUUID} from 'node:crypto';
 import {ensureDeletionQueueState} from '@app/api/app/DeletionQueueStartup';
 import type {APIConfig} from '@app/api/config/APIConfig';
-import {hasDatabaseQueryExecutor, setDatabaseQueryExecutor} from '@app/api/database/CassandraQueryExecution';
+import {
+	hasDatabaseQueryExecutor,
+	hasInjectedDatabaseQueryExecutorForTesting,
+	renderReadStateMetrics,
+	setDatabaseQueryExecutor,
+	shutdownDatabaseQueryExecutor,
+	startCassandraMetadataCaches,
+} from '@app/api/database/CassandraQueryExecution';
 import {ensurePostgresKvSchema, PostgresKvQueryExecutor} from '@app/api/database/PostgresKvQueryExecutor';
 import {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
+import {startAPIReadiness, stopAPIReadiness} from '@app/api/infrastructure/APIReadiness';
 import {
 	jetStreamActivityPublisher,
 	renderActivityMetrics,
@@ -18,6 +26,7 @@ import {
 	stopSharedListWatch,
 } from '@app/api/infrastructure/activity/SharedLists';
 import {shutdownStorageChangeFeed} from '@app/api/infrastructure/StorageServiceFactory';
+import {ThreadMentionComponentLease} from '@app/api/infrastructure/ThreadMentionComponentLease';
 import {JobLedgerRepository} from '@app/api/jobs/JobLedgerRepository';
 import {ipBanCache} from '@app/api/middleware/IpBanMiddleware';
 import {startRequestErrorTelemetry, stopRequestErrorTelemetry} from '@app/api/middleware/RequestErrorTelemetry';
@@ -25,6 +34,7 @@ import {initializeServiceSingletons, shutdownReportService} from '@app/api/middl
 import {
 	closeOwnedKVClient,
 	ensureVoiceResourcesInitialized,
+	getGatewayService,
 	getKVClient,
 	getSnowflakeService,
 	setInjectedWorkerService,
@@ -36,6 +46,7 @@ import {
 	getInstanceConfigRepository,
 	getKVAccountDeletionQueue,
 	getReportRepository,
+	getUserActivityBuffer,
 	getUserRepository,
 	type ServiceSingletonDependencies,
 	shutdownInstanceConfigRepository,
@@ -52,7 +63,12 @@ import type {LoggerInterface} from '@fluxer/logger/src/LoggerInterface';
 import {getClient, initCassandra, shutdownCassandra} from '@pkgs/cassandra/src/Client';
 import {ensureGeoipDatabaseOnStartup} from '@pkgs/geoip/src/GeoipStartup';
 import {JetStreamConnectionManager} from '@pkgs/nats/src/JetStreamConnectionManager';
-import {getDefaultPostgresClient, initPostgres, shutdownPostgres} from '@pkgs/postgres/src/Client';
+import {
+	checkPostgresReadiness,
+	getDefaultPostgresClient,
+	initPostgres,
+	shutdownPostgres,
+} from '@pkgs/postgres/src/Client';
 
 let jsConnectionManager: JetStreamConnectionManager | null = null;
 let jobQueue: ApiJobQueue | null = null;
@@ -65,6 +81,7 @@ const searchReady = new Promise<void>((resolve) => {
 });
 const SEARCH_INIT_RETRY_MIN_MS = 5_000;
 const SEARCH_INIT_RETRY_MAX_MS = 60_000;
+let threadMentionComponentLease: ThreadMentionComponentLease | null = null;
 const unregisterMetricsSections: Array<() => void> = [];
 
 interface RefreshCacheLifecycle {
@@ -188,6 +205,7 @@ export function createInitializer(
 	return async (): Promise<void> => {
 		try {
 			logger.info('Initializing API service...');
+			const databaseExecutorInjected = hasInjectedDatabaseQueryExecutorForTesting();
 			const geoipStartupResult = await ensureGeoipDatabaseOnStartup({
 				geoip: config.geoip,
 				s3Config: {
@@ -212,7 +230,12 @@ export function createInitializer(
 				await initPostgres(config.postgres, (diagnostic) => logger.error(diagnostic, 'Postgres connection error'));
 				const postgres = getDefaultPostgresClient();
 				await ensurePostgresKvSchema(postgres);
-				setDatabaseQueryExecutor(new PostgresKvQueryExecutor(postgres));
+				const executor = new PostgresKvQueryExecutor(postgres, config.postgres.readStateBatchingEnabled);
+				await executor.startChannelMetadataCache(
+					config.database.metadataCache?.channelEnabled ?? config.postgres.channelMetadataCacheEnabled,
+					config.database.metadataCache?.guildEnabled ?? config.postgres.guildAvailabilityCacheEnabled,
+				);
+				setDatabaseQueryExecutor(executor);
 				logger.info('Postgres KV client initialized');
 			} else if (config.database.backend === 'postgres') {
 				logger.info('Using injected database query executor for tests');
@@ -234,6 +257,13 @@ export function createInitializer(
 					}
 					throw error;
 				});
+				const cacheOptions = config.database.metadataCache;
+				if (cacheOptions && !config.dev.testModeEnabled) {
+					await startCassandraMetadataCaches(cacheOptions, config.cassandra.keyspace, {
+						kv: config.kv,
+						namespace: config.instance.baseDomain,
+					});
+				}
 				logger.info('Cassandra client initialized');
 				if (config.instance.selfHosted) {
 					await ensureCassandraSchema({
@@ -296,6 +326,8 @@ export function createInitializer(
 				unregisterMetricsSections.push(
 					registerMetricsSection(renderActivityMetrics),
 					registerMetricsSection(renderSharedListMetrics),
+					registerMetricsSection(renderReadStateMetrics),
+					registerMetricsSection(() => getUserActivityBuffer().renderActivityDeduperMetrics()),
 				);
 				logger.info('Activity events initialized');
 			}
@@ -333,6 +365,33 @@ export function createInitializer(
 					logger.warn({error}, 'Failed to reset SSO config for test mode');
 				}
 			}
+			await startAPIReadiness(async () => {
+				await Promise.all([
+					kvClient.get('__fluxer_readiness_probe__'),
+					...(config.database.backend === 'postgres' && !databaseExecutorInjected ? [checkPostgresReadiness()] : []),
+					...(config.database.backend === 'cassandra' && !hasDatabaseQueryExecutor()
+						? [getClient().execute('SELECT release_version FROM system.local', [], {prepare: true, readTimeout: 1000})]
+						: []),
+				]);
+				if (jsConnectionManager) {
+					const connection = jsConnectionManager.getConnection();
+					if (connection.isClosed()) throw new Error('NATS closed');
+					let timeout: ReturnType<typeof setTimeout> | undefined;
+					try {
+						await Promise.race([
+							connection.flush(),
+							new Promise<never>((_, reject) => {
+								timeout = setTimeout(() => reject(new Error('NATS readiness timeout')), 1000);
+							}),
+						]);
+					} finally {
+						clearTimeout(timeout);
+					}
+				}
+			});
+			threadMentionComponentLease?.stop();
+			threadMentionComponentLease = new ThreadMentionComponentLease(getGatewayService(), 'api');
+			threadMentionComponentLease.start();
 			logger.info('API service initialization complete');
 		} catch (error) {
 			logger.error({error}, 'API service initialization failed');
@@ -344,7 +403,16 @@ export function createInitializer(
 
 export function createShutdown(config: APIConfig, logger: LoggerInterface): () => Promise<void> {
 	return async (): Promise<void> => {
+		stopAPIReadiness();
+		threadMentionComponentLease?.stop();
+		threadMentionComponentLease = null;
 		logger.info('Shutting down API service...');
+		// 在网关、任务发布器和数据库连接关闭前结束已接收的读状态变更。
+		try {
+			await shutdownDatabaseQueryExecutor();
+		} catch (error) {
+			logger.error({error}, 'Error draining database executor during shutdown');
+		}
 		try {
 			await shutdownVoiceResources();
 			logger.info('Voice resources shut down');

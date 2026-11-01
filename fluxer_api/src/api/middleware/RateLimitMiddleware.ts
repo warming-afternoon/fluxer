@@ -2,6 +2,7 @@
 
 import {createHash} from 'node:crypto';
 import * as AuthSession from '@app/api/auth/AuthSession';
+import {getRequestIdentity} from '@app/api/auth/ReadStatePrincipal';
 import {Config} from '@app/api/Config';
 import type {HonoEnv} from '@app/api/types/HonoEnv';
 import {getRequestClientIp} from '@app/api/utils/RequestClientIp';
@@ -40,7 +41,7 @@ export function shouldEnforceRateLimits(ctx: Context<HonoEnv>): boolean {
 }
 
 function getAccountType(ctx: Context<HonoEnv>): AccountType {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user) {
 		const params = ctx.req.param();
 		if ('token' in params && 'webhook_id' in params) {
@@ -84,7 +85,7 @@ function getForwardedClientIdentifier(ctx: Context<HonoEnv>, bucket: string): st
 }
 
 function getClientIdentifier(ctx: Context<HonoEnv>, routeConfig: RouteRateLimitConfig): string {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (user?.id) {
 		const tokenType = ctx.get('authTokenType') ?? 'session';
 		if (tokenType === 'bearer') {
@@ -112,7 +113,7 @@ async function getRequestEmailIdentifier(ctx: Context<HonoEnv>): Promise<string 
 }
 
 function getGlobalRateLimit(ctx: Context<HonoEnv>): number {
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (user?.flags && (user.flags & UserFlags.HIGH_GLOBAL_RATE_LIMIT) !== 0n) {
 		return 1200;
 	}
@@ -159,7 +160,7 @@ function getRetryAfterSeconds(result: RateLimitResult): number {
 async function revokeAuthenticatedSessionOnGlobalRateLimit(ctx: Context<HonoEnv>): Promise<void> {
 	const authTokenType = ctx.get('authTokenType');
 	if (authTokenType !== 'session') return;
-	const user = ctx.get('user');
+	const user = getRequestIdentity(ctx);
 	if (!user || user.isBot) return;
 	const token = ctx.get('authToken');
 	if (!token) return;
@@ -168,6 +169,7 @@ async function revokeAuthenticatedSessionOnGlobalRateLimit(ctx: Context<HonoEnv>
 	} catch (_error) {}
 }
 
+/** 按原有扣额和拒绝顺序执行限流，仅在支持时合并存储往返。 */
 export function RateLimitMiddleware(routeConfig: RouteRateLimitConfig): MiddlewareHandler<HonoEnv> {
 	const routeBucketHash = getBucketHash(routeConfig.bucket);
 	const emailBucketHash = routeConfig.emailBucket ? getBucketHash(routeConfig.emailBucket.bucket) : undefined;
@@ -176,7 +178,7 @@ export function RateLimitMiddleware(routeConfig: RouteRateLimitConfig): Middlewa
 			await next();
 			return;
 		}
-		const user = ctx.get('user');
+		const user = getRequestIdentity(ctx);
 		if (user?.flags && (user.flags & UserFlags.RATE_LIMIT_BYPASS) !== 0n) {
 			await next();
 			return;
@@ -189,9 +191,21 @@ export function RateLimitMiddleware(routeConfig: RouteRateLimitConfig): Middlewa
 		const accountType = getAccountType(ctx);
 		const showHeaders = shouldShowHeadersOnSuccess(accountType);
 		const clientId = getClientIdentifier(ctx, routeConfig);
+		const bucket = resolveBucket(routeConfig.bucket, clientId, ctx);
+		const combinedResult =
+			Config.combinedRateLimitEnabled === true &&
+			!routeConfig.config.exemptFromGlobal &&
+			rateLimitService.checkGlobalAndBucketLimit
+				? await rateLimitService.checkGlobalAndBucketLimit(
+						clientId,
+						getGlobalRateLimit(ctx),
+						bucket,
+						routeConfig.config,
+					)
+				: null;
 		if (!routeConfig.config.exemptFromGlobal) {
 			const globalLimit = getGlobalRateLimit(ctx);
-			const globalResult = await rateLimitService.checkGlobalLimit(clientId, globalLimit);
+			const globalResult = combinedResult?.global ?? (await rateLimitService.checkGlobalLimit(clientId, globalLimit));
 			if (!globalResult.allowed) {
 				await revokeAuthenticatedSessionOnGlobalRateLimit(ctx);
 				throw new RateLimitError({
@@ -205,8 +219,10 @@ export function RateLimitMiddleware(routeConfig: RouteRateLimitConfig): Middlewa
 				});
 			}
 		}
-		const bucket = resolveBucket(routeConfig.bucket, clientId, ctx);
-		const bucketResult = await rateLimitService.checkBucketLimit(bucket, routeConfig.config);
+		const bucketResult = combinedResult
+			? combinedResult.bucket
+			: await rateLimitService.checkBucketLimit(bucket, routeConfig.config);
+		if (!bucketResult) throw new Error('Missing route result after combined global allowance');
 		if (!bucketResult.allowed) {
 			throw new RateLimitError({
 				retryAfter: getRetryAfterSeconds(bucketResult),

@@ -5,6 +5,7 @@
 
 -export([
     scope/2,
+    mention_view/3,
     is_candidate/4,
     role_visible/2,
     role_adds/4,
@@ -22,7 +23,7 @@
 -define(MEMBER_SETTING_KEYS, [<<"flags">>, <<"muted">>, <<"mute_config">>]).
 
 -define(MAX_ROLE_MENTION_THREAD_ADDS, 250).
--define(MAX_THREAD_MEMBERS, 1000).
+-define(MAX_THREAD_MEMBERS, 100000).
 
 -type user_id() :: integer().
 -type member_source() :: {ets, ets:tid()} | {map, map()}.
@@ -34,6 +35,37 @@ scope(ChannelId, State) ->
     case guild_thread_gate:store(State) of
         undefined -> undefined;
         Tab -> safe_scope(Tab, ChannelId)
+    end.
+
+%% 帖子提及只读取有界候选的成员身份；总人数单独读取小计数，不枚举关注者。
+-spec mention_view(integer(), [integer()], map()) -> map() | undefined.
+mention_view(ChannelId, UserIds, State) ->
+    case guild_thread_gate:store(State) of
+        undefined ->
+            undefined;
+        Tab ->
+            try guild_thread_store:get_thread(Tab, ChannelId) of
+                undefined ->
+                    undefined;
+                Thread ->
+                    Members = maps:from_list([
+                        {Id, true}
+                     || Id <- UserIds,
+                        guild_thread_store:is_member(Tab, ChannelId, Id)
+                    ]),
+                    #{
+                        thread => Thread,
+                        members => Members,
+                        member_ids => maps:keys(Members),
+                        member_count =>
+                            case guild_thread_store:member_count(Tab, ChannelId) of
+                                N when is_integer(N), N >= 0 -> N;
+                                unknown -> 100000
+                            end
+                    }
+            catch
+                error:badarg -> undefined
+            end
     end.
 
 -spec safe_scope(ets:table(), integer()) -> scope().
@@ -52,7 +84,7 @@ safe_scope(Tab, ChannelId) ->
 
 -spec push_message_data(map(), integer(), [integer()], map()) -> {map(), binary()} | undefined.
 push_message_data(MessageData, ChannelId, UserIds, Data) ->
-    case scope(ChannelId, Data) of
+    case push_scope(MessageData, ChannelId, UserIds, Data) of
         undefined ->
             undefined;
         #{thread := Thread, members := Members} ->
@@ -75,6 +107,39 @@ push_message_data(MessageData, ChannelId, UserIds, Data) ->
                 MessageData1#{?THREAD_PUSH_KEY => ThreadPush},
                 thread_name(Thread)
             }
+    end.
+
+%% 普通线程只读取候选成员，论坛新帖保留适用于大量 watcher 的成员快照路径
+-spec push_scope(map(), integer(), [user_id()], map()) -> scope().
+push_scope(#{?FORUM_THREAD_CREATED_KEY := true}, ChannelId, _UserIds, Data) ->
+    %% watcher 数量可能远超线程成员数量，复用已有快照避免逐个查询非成员
+    scope(ChannelId, Data);
+push_scope(_MessageData, ChannelId, UserIds, Data) ->
+    case guild_thread_gate:store(Data) of
+        undefined -> undefined;
+        Tab -> safe_candidate_scope(Tab, ChannelId, UserIds)
+    end.
+
+%% 去重读取候选成员，存储中途失效时放弃部分结果并沿用不可用回退
+-spec safe_candidate_scope(ets:table(), integer(), [user_id()]) -> scope().
+safe_candidate_scope(Tab, ChannelId, UserIds) ->
+    try
+        case guild_thread_store:get_thread(Tab, ChannelId) of
+            undefined ->
+                undefined;
+            Thread ->
+                #{
+                    thread => Thread,
+                    members => maps:from_list([
+                        {UserId, Member}
+                     || UserId <- lists:usort(UserIds),
+                        Member <- [guild_thread_store:get_member(Tab, ChannelId, UserId)],
+                        is_map(Member)
+                    ])
+                }
+        end
+    catch
+        error:badarg -> undefined
     end.
 
 -spec take_forum_thread_created(map()) -> {#{binary() => true}, map()}.
@@ -184,6 +249,7 @@ role_visible(ChannelId, State) ->
     end.
 
 -type role_add_request() :: #{
+    member_count := non_neg_integer(),
     members := map(),
     mentions := map(),
     mention_roles := map(),
@@ -194,13 +260,28 @@ role_visible(ChannelId, State) ->
 -spec role_adds(
     map(), map(), {ets, ets:tid()} | {map, map()}, fun((integer(), map()) -> boolean())
 ) -> #{integer() => true}.
-role_adds(#{thread := Thread, members := Members}, Mentions, Source, Visible) ->
+%% Despite the historical helper name, this is a push recipient set, not an
+%% autojoin operation. Persisted notification identities must not be reselected
+%% against today's member count or the separate 250-member autojoin quota.
+role_adds(_Scope, #{role_candidates := Ids} = Mentions, Source, Visible) when is_list(Ids) ->
+    maps:from_list([
+        {UserId, true}
+     || UserId <- Ids,
+        UserId =/= maps:get(author_id, Mentions),
+        Member <- [guild_push_candidates:lookup_member(UserId, Source)],
+        is_map(Member),
+        not guild_members_common:is_member_bot(Member),
+        guild_push_candidates:has_mentioned_role(Member, maps:get(mention_roles, Mentions)),
+        Visible(UserId, Member)
+    ]);
+role_adds(#{thread := Thread, members := Members} = Scope, Mentions, Source, Visible) ->
     MentionRoles = maps:get(mention_roles, Mentions),
     case map_size(MentionRoles) of
         0 ->
             #{};
         _ ->
             select_role_adds(Thread, #{
+                member_count => maps:get(member_count, Scope, map_size(Members)),
                 members => Members,
                 mentions => Mentions,
                 mention_roles => MentionRoles,
@@ -220,7 +301,7 @@ select_role_adds(_Thread, #{
     mention_roles := MentionRoles,
     source := Source,
     visible := Visible
-}) ->
+} = Request) ->
     Direct = maps:get(direct_mentions, Mentions),
     AuthorId = maps:get(author_id, Mentions),
     Candidates = guild_push_candidates:filtermap_members(
@@ -234,9 +315,9 @@ select_role_adds(_Thread, #{
         end,
         Source
     ),
-    Room = max(0, ?MAX_THREAD_MEMBERS - map_size(Members)),
+    Room = max(0, ?MAX_THREAD_MEMBERS - maps:get(member_count, Request, map_size(Members))),
     take_role_adds(
-        lists:sort(Candidates),
+        lists:sublist(lists:sort(Candidates), min(?MAX_ROLE_MENTION_THREAD_ADDS, Room)),
         Source,
         Visible,
         min(?MAX_ROLE_MENTION_THREAD_ADDS, Room),

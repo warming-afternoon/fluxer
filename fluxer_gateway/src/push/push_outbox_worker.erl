@@ -14,7 +14,8 @@ send(Subject, Body, Timeout) ->
         Class:Reason -> {error, {Class, Reason}}
     end.
 
--spec reply_result(term()) -> ok | {error, term()}.
+-spec reply_result(term()) -> ok | {error, term()} | {batch_results, [map()]}.
+reply_result({batch_results, Results}) when is_list(Results) -> {batch_results, Results};
 reply_result(ok) -> ok;
 reply_result({error, Reason}) -> {error, Reason};
 reply_result(Other) -> {error, {invalid_worker_reply, Other}}.

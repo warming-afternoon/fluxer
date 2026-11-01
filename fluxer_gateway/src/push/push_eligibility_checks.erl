@@ -141,7 +141,7 @@ check_thread_muted_and_notifications(
                 LargeGuildMetadata
             ),
             push_eligibility:should_allow_notification(
-                Level,
+                thread_message_level(Level),
                 thread_mention_scope(ThreadMember, MessageData),
                 UserId,
                 Settings,
@@ -225,7 +225,12 @@ explicit_thread_level(_Flags) ->
 thread_mention_scope(undefined, MessageData) ->
     MessageData#{<<"mention_everyone">> => false, <<"mention_here">> => false};
 thread_mention_scope(_ThreadMember, MessageData) ->
-    MessageData.
+    MessageData#{<<"mention_everyone">> => false, <<"mention_here">> => false}.
+
+%% 旧全部和父全部值不能恢复普通帖子设备通知，关闭设置仍优先。
+-spec thread_message_level(integer()) -> integer().
+thread_message_level(Level) ->
+    max(Level, ?MESSAGE_NOTIFICATIONS_ONLY_MENTIONS).
 
 -spec strip_thread_eligibility(map()) -> map().
 strip_thread_eligibility(#{?THREAD_PUSH_KEY := Thread} = MessageData) when is_map(Thread) ->
@@ -434,3 +439,313 @@ notification_level_setting(Settings, Default) ->
         Level when is_integer(Level) -> Level;
         _ -> Default
     end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+muted_channel_suppresses_push_test() ->
+    UserId = 100,
+    ChannelId = 200,
+    MessageData = #{<<"channel_type">> => 0},
+    GuildDefaultNotifications = 0,
+    UserRolesMap = #{},
+    ConnectedUsers = #{},
+    GuildId = 1,
+    Settings = #{
+        channel_overrides => #{
+            <<"200">> => #{muted => true}
+        }
+    },
+    ?assertEqual(
+        false,
+        check_muted_and_notifications(
+            UserId,
+            ChannelId,
+            MessageData,
+            GuildDefaultNotifications,
+            UserRolesMap,
+            Settings,
+            GuildId,
+            ConnectedUsers,
+            undefined
+        )
+    ).
+
+guild_muted_suppresses_push_test() ->
+    ?assertEqual(false, check_with_settings(#{muted => true})).
+
+temp_muted_suppresses_push_test() ->
+    MuteConfig = #{<<"end_time">> => rfc3339_in_ms(60000)},
+    ?assertEqual(false, check_with_settings(#{muted => true, mute_config => MuteConfig})).
+
+expired_temp_mute_allows_push_test() ->
+    MuteConfig = #{<<"end_time">> => rfc3339_in_ms(-60000)},
+    ?assertEqual(true, check_with_settings(#{muted => true, mute_config => MuteConfig})).
+
+rfc3339_in_ms(OffsetMs) ->
+    Ms = erlang:system_time(millisecond) + OffsetMs,
+    list_to_binary(calendar:system_time_to_rfc3339(Ms, [{unit, millisecond}, {offset, "Z"}])).
+
+check_with_settings(Settings) ->
+    check_muted_and_notifications(
+        100,
+        200,
+        #{<<"channel_type">> => 0},
+        0,
+        #{},
+        Settings,
+        1,
+        #{},
+        undefined
+    ).
+
+thread_message(Members) ->
+    thread_message(Members, #{}).
+
+thread_message(Members, Extra) ->
+    maps:merge(
+        #{
+            <<"channel_type">> => 11,
+            <<"__thread_push">> => #{
+                <<"parent_id">> => 200,
+                <<"parent_name">> => <<"general">>,
+                <<"category_id">> => 50,
+                <<"members">> => Members
+            }
+        },
+        Extra
+    ).
+
+check_thread(MessageData, Settings, Metadata) ->
+    check_muted_and_notifications(100, 500, MessageData, 0, #{}, Settings, 1, #{}, Metadata).
+
+thread_member_inherits_the_parent_level_test() ->
+    Member = #{100 => #{<<"flags">> => 1}},
+    ?assertNot(check_thread(thread_message(Member), #{}, undefined)),
+    ParentMentions = #{channel_overrides => #{<<"200">> => #{message_notifications => 1}}},
+    ?assertNot(check_thread(thread_message(Member), ParentMentions, undefined)),
+    ThreadOverride = #{channel_overrides => #{<<"500">> => #{message_notifications => 1}}},
+    ?assertNot(check_thread(thread_message(Member), ThreadOverride, undefined)).
+
+%% 启用帖子提及规则后，旧全部和父全部不能恢复普通消息或everyone通知。
+-spec thread_mentions_only_legacy_settings_test() -> term().
+thread_mentions_only_legacy_settings_test() ->
+    Key = {fluxer_gateway, runtime_config},
+    Old = persistent_term:get(Key, #{}),
+    persistent_term:put(Key, Old#{thread_mentions => #{enabled => true}}),
+    try
+        lists:foreach(
+            fun(Flags) ->
+                Members = #{100 => #{<<"flags">> => Flags}},
+                ?assertNot(check_thread(thread_message(Members), #{}, undefined)),
+                ?assertNot(
+                    check_thread(
+                        thread_message(Members, #{<<"mention_everyone">> => true}),
+                        #{},
+                        undefined
+                    )
+                ),
+                Direct = thread_message(Members, #{<<"mentions">> => [#{<<"id">> => <<"100">>}]}),
+                ?assert(check_thread(Direct, #{}, undefined))
+            end,
+            [0, 1, 2, 4]
+        ),
+        Off = thread_message(#{100 => #{<<"flags">> => 8}}, #{
+            <<"mentions">> => [#{<<"id">> => <<"100">>}]
+        }),
+        ?assertNot(check_thread(Off, #{}, undefined))
+    after
+        persistent_term:put(Key, Old)
+    end.
+
+explicit_thread_level_beats_the_parent_level_test() ->
+    ParentMentions = #{channel_overrides => #{<<"200">> => #{message_notifications => 1}}},
+    ?assertNot(
+        check_thread(thread_message(#{100 => #{<<"flags">> => 2}}), ParentMentions, undefined)
+    ),
+    ?assertNot(check_thread(thread_message(#{100 => #{<<"flags">> => 8}}), #{}, undefined)),
+    Mentioned = thread_message(
+        #{100 => #{<<"flags">> => 4}}, #{<<"mentions">> => [#{<<"id">> => <<"100">>}]}
+    ),
+    ?assert(check_thread(Mentioned, #{}, undefined)),
+    ?assertNot(check_thread(thread_message(#{100 => #{<<"flags">> => 4}}), #{}, undefined)).
+
+large_guild_clamp_applies_to_inherited_thread_levels_only_test() ->
+    Large = #{member_count => 3000, features => []},
+    ?assertNot(check_thread(thread_message(#{100 => #{<<"flags">> => 0}}), #{}, Large)),
+    ?assertNot(check_thread(thread_message(#{100 => #{<<"flags">> => 2}}), #{}, Large)).
+
+thread_mutes_apply_at_every_layer_test() ->
+    Member = #{100 => #{<<"flags">> => 2}},
+    Muted = #{muted => true},
+    ?assertNot(check_thread(thread_message(Member), Muted, undefined)),
+    ?assertNot(
+        check_thread(
+            thread_message(Member), #{channel_overrides => #{<<"50">> => Muted}}, undefined
+        )
+    ),
+    ?assertNot(
+        check_thread(
+            thread_message(Member), #{channel_overrides => #{<<"200">> => Muted}}, undefined
+        )
+    ),
+    ?assertNot(
+        check_thread(
+            thread_message(#{100 => #{<<"flags">> => 2, <<"muted">> => true}}), #{}, undefined
+        )
+    ),
+    Expired = #{<<"end_time">> => rfc3339_in_ms(-60000)},
+    ?assert(
+        check_thread(
+            thread_message(
+                #{
+                    100 => #{
+                        <<"flags">> => 2, <<"muted">> => true, <<"mute_config">> => Expired
+                    }
+                },
+                #{<<"mentions">> => [#{<<"id">> => <<"100">>}]}
+            ),
+            #{},
+            undefined
+        )
+    ).
+
+thread_non_members_need_a_direct_or_role_mention_test() ->
+    ?assertNot(check_thread(thread_message(#{}), #{}, undefined)),
+    Everyone = thread_message(#{}, #{<<"mention_everyone">> => true}),
+    ?assertNot(check_thread(Everyone, #{}, undefined)),
+    Direct = thread_message(#{}, #{<<"mentions">> => [#{<<"id">> => <<"100">>}]}),
+    ?assert(check_thread(Direct, #{}, undefined)),
+    ?assertNot(
+        check_thread(
+            thread_message(#{100 => #{<<"flags">> => 0}}, #{<<"mention_everyone">> => true}),
+            #{},
+            undefined
+        )
+    ).
+
+forum_message() ->
+    thread_message(#{}, #{
+        <<"__thread_push">> => #{
+            <<"parent_id">> => 200,
+            <<"parent_name">> => <<"ideas">>,
+            <<"category_id">> => 50,
+            <<"members">> => #{},
+            <<"forum_thread_created">> => true
+        }
+    }).
+
+forum_thread_created_needs_all_messages_on_the_forum_test() ->
+    ?assert(check_thread(forum_message(), #{}, undefined)),
+    Mentions = #{channel_overrides => #{<<"200">> => #{message_notifications => 1}}},
+    ?assertNot(check_thread(forum_message(), Mentions, undefined)),
+    ?assertNot(check_thread(forum_message(), #{message_notifications => 1}, undefined)),
+    ?assertNot(
+        check_thread(forum_message(), #{}, #{member_count => 3000, features => []})
+    ),
+    ExplicitAll = #{
+        message_notifications => 1,
+        channel_overrides => #{<<"200">> => #{message_notifications => 0}}
+    },
+    ?assert(check_thread(forum_message(), ExplicitAll, undefined)).
+
+forum_thread_created_honours_mutes_and_new_forum_threads_off_test() ->
+    Muted = #{muted => true},
+    ?assertNot(check_thread(forum_message(), Muted, undefined)),
+    ?assertNot(
+        check_thread(forum_message(), #{channel_overrides => #{<<"50">> => Muted}}, undefined)
+    ),
+    ?assertNot(
+        check_thread(forum_message(), #{channel_overrides => #{<<"200">> => Muted}}, undefined)
+    ),
+    Off = #{channel_overrides => #{<<"200">> => #{<<"flags">> => 16#2000}}},
+    ?assertNot(check_thread(forum_message(), Off, undefined)),
+    On = #{channel_overrides => #{<<"200">> => #{<<"flags">> => 16#4000}}},
+    ?assert(check_thread(forum_message(), On, undefined)).
+
+forum_thread_created_new_forum_threads_on_does_not_opt_in_below_all_test() ->
+    OnMentions = #{
+        channel_overrides => #{
+            <<"200">> => #{<<"flags">> => 16#4000, message_notifications => 1}
+        }
+    },
+    ?assertNot(check_thread(forum_message(), OnMentions, undefined)),
+    ?assertNot(
+        check_thread(
+            forum_message(),
+            #{channel_overrides => #{<<"200">> => #{<<"flags">> => 16#4000}}},
+            #{member_count => 3000, features => []}
+        )
+    ),
+    MutedOn = #{
+        channel_overrides => #{
+            <<"200">> => #{<<"flags">> => 16#4000, muted => true}
+        }
+    },
+    ?assertNot(check_thread(forum_message(), MutedOn, undefined)),
+    BothFlags = #{channel_overrides => #{<<"200">> => #{<<"flags">> => 16#6000}}},
+    ?assertNot(check_thread(forum_message(), BothFlags, undefined)).
+
+strip_thread_eligibility_keeps_delivery_fields_test() ->
+    ?assertEqual(
+        #{
+            <<"parent_id">> => 200,
+            <<"parent_name">> => <<"ideas">>,
+            <<"forum_thread_created">> => true
+        },
+        maps:get(<<"__thread_push">>, strip_thread_eligibility(forum_message()))
+    ),
+    ?assertEqual(
+        #{
+            <<"channel_type">> => 11,
+            <<"__thread_push">> => #{<<"parent_id">> => 200, <<"parent_name">> => <<"general">>}
+        },
+        strip_thread_eligibility(thread_message(#{100 => #{}}))
+    ),
+    ?assertEqual(#{<<"id">> => 1}, strip_thread_eligibility(#{<<"id">> => 1})).
+
+is_large_guild_test() ->
+    ?assertEqual(true, is_large_guild(3000, [])),
+    ?assertEqual(false, is_large_guild(300, [])),
+    ?assertEqual(true, is_large_guild(?LARGE_GUILD_THRESHOLD + 1, [])),
+    ?assertEqual(false, is_large_guild(?LARGE_GUILD_THRESHOLD, [])),
+    ?assertEqual(false, is_large_guild(100, [])),
+    ?assertEqual(true, is_large_guild(100, [<<"LARGE_GUILD_OVERRIDE">>])),
+    ?assertEqual(true, is_large_guild(300, [<<"LARGE_GUILD_OVERRIDE">>])),
+    ?assertEqual(true, is_large_guild(undefined, [<<"LARGE_GUILD_OVERRIDE">>])).
+
+mid_sized_guilds_keep_all_notifications_test() ->
+    MessageData = #{<<"channel_type">> => 0},
+    Metadata = #{member_count => 1000, features => []},
+    ?assertEqual(
+        true,
+        check_muted_and_notifications(100, 200, MessageData, 0, #{}, #{}, 1, #{}, Metadata)
+    ).
+
+cached_large_guild_metadata_overrides_all_notifications_test() ->
+    MessageData = #{<<"channel_type">> => 0},
+    LargeMetadata = #{member_count => 3000, features => []},
+    ?assertEqual(
+        false,
+        check_muted_and_notifications(100, 200, MessageData, 0, #{}, #{}, 1, #{}, LargeMetadata)
+    ).
+
+cached_large_guild_metadata_keeps_mentions_allowed_test() ->
+    MessageData = #{
+        <<"channel_type">> => 0,
+        <<"mentions">> => [#{<<"id">> => <<"100">>}]
+    },
+    LargeMetadata = #{member_count => 3000, features => []},
+    ?assertEqual(
+        true,
+        check_muted_and_notifications(100, 200, MessageData, 0, #{}, #{}, 1, #{}, LargeMetadata)
+    ).
+
+undefined_large_guild_metadata_preserves_all_notifications_test() ->
+    MessageData = #{<<"channel_type">> => 0},
+    ?assertEqual(
+        true,
+        check_muted_and_notifications(100, 200, MessageData, 0, #{}, #{}, 1, #{}, undefined)
+    ).
+
+-endif.

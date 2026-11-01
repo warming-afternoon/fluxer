@@ -7,6 +7,7 @@
 
 -define(PUSH_COUNTERS, guild_push_counters).
 -define(PUSH_COUNTER_KEYS, [
+    thread_mentions_early_skip,
     worker_started,
     worker_completed,
     worker_failed,

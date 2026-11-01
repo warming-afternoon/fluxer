@@ -16,6 +16,7 @@ mod retry;
 mod rpc;
 pub mod server;
 mod subscription;
+mod subscription_batcher;
 mod tokens;
 mod vendor;
 

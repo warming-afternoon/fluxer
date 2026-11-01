@@ -91,6 +91,7 @@ pub struct NatsConfig {
 #[derive(Debug)]
 pub struct RpcConfig {
     pub url: String,
+    pub readonly_urls: Option<Vec<String>>,
     pub auth_token: SecretString,
 }
 
@@ -182,6 +183,11 @@ pub struct DeliveryConfig {
     pub nats: NatsConfig,
     pub rpc: RpcConfig,
     pub queue_capacity: usize,
+    /// 是否合并清除通知任务的设备查询。
+    pub subscription_batching_enabled: bool,
+    /// 是否接收版本二清除通知批次；默认开启，可通过环境变量显式关闭。
+    pub clear_batch_enabled: bool,
+
     pub send_concurrency: usize,
     pub vapid: VapidConfig,
     pub apns: Option<ApnsConfig>,
@@ -241,6 +247,7 @@ impl Config {
 }
 
 impl DeliveryConfig {
+    /// 从环境变量迭代器构建 Push delivery 配置。
     pub fn load_from_iter<I, K, V>(vars: I) -> anyhow::Result<Self>
     where
         I: IntoIterator<Item = (K, V)>,
@@ -259,6 +266,16 @@ impl DeliveryConfig {
                 1,
                 1_000_000,
             )?,
+            subscription_batching_enabled: parse_bool(
+                "FLUXER_PUSH_SUBSCRIPTION_BATCHING_ENABLED",
+                env.get("FLUXER_PUSH_SUBSCRIPTION_BATCHING_ENABLED"),
+            )?
+            .unwrap_or(true),
+            clear_batch_enabled: parse_bool(
+                "FLUXER_PUSH_CLEAR_BATCH_ENABLED",
+                env.get("FLUXER_PUSH_CLEAR_BATCH_ENABLED"),
+            )?
+            .unwrap_or(true),
             send_concurrency: parse_number(
                 "FLUXER_PUSH_SERVICE_SEND_CONCURRENCY",
                 env.get("FLUXER_PUSH_SERVICE_SEND_CONCURRENCY"),
@@ -408,7 +425,33 @@ fn rpc_config(env: &Env) -> anyhow::Result<RpcConfig> {
         !api_endpoint.is_empty(),
         "FLUXER_INTERNAL_API_ENDPOINT must not be only slashes"
     );
+    let readonly_urls = if let Some(raw) = env.get("FLUXER_INTERNAL_API_RPC_URLS") {
+        let urls: Vec<String> = raw.split(',').map(|u| u.trim().to_owned()).collect();
+        anyhow::ensure!(
+            !urls.is_empty() && urls.len() <= 512,
+            "invalid RPC target count"
+        );
+        let distinct: std::collections::HashSet<_> = urls.iter().collect();
+        anyhow::ensure!(distinct.len() == urls.len(), "duplicate RPC targets");
+        for text in &urls {
+            let u = reqwest::Url::parse(text)?;
+            anyhow::ensure!(
+                (u.scheme() == "http" || u.scheme() == "https")
+                    && u.host_str().is_some()
+                    && u.username().is_empty()
+                    && u.password().is_none()
+                    && u.path() == "/internal/rpc"
+                    && u.query().is_none()
+                    && u.fragment().is_none(),
+                "invalid direct RPC target"
+            );
+        }
+        Some(urls)
+    } else {
+        None
+    };
     Ok(RpcConfig {
+        readonly_urls,
         url: format!("{api_endpoint}{RPC_PATH}"),
         auth_token: SecretString::new(env.require("FLUXER_GATEWAY_RPC_AUTH_TOKEN")?.to_owned()),
     })
@@ -697,5 +740,44 @@ impl Env {
     fn require(&self, key: &str) -> anyhow::Result<&str> {
         self.get(key)
             .ok_or_else(|| anyhow::anyhow!("{key} is required"))
+    }
+}
+
+#[cfg(test)]
+mod clear_batch_config_tests {
+    use super::DeliveryConfig;
+
+    /// 验证 clear batch 默认开启、可显式覆盖且拒绝畸形环境值。
+    #[test]
+    fn clear_batch_defaults_on_and_accepts_explicit_override() {
+        let base = vec![
+            ("FLUXER_INTERNAL_API_ENDPOINT", "http://127.0.0.1:1"),
+            ("FLUXER_GATEWAY_RPC_AUTH_TOKEN", "test"),
+            ("FLUXER_VAPID_EMAIL", "local@example.test"),
+            ("FLUXER_VAPID_PUBLIC_KEY", "unused"),
+            ("FLUXER_VAPID_PRIVATE_KEY", "unused"),
+        ];
+        assert!(
+            DeliveryConfig::load_from_iter(base.clone())
+                .unwrap()
+                .clear_batch_enabled
+        );
+        let mut disabled = base.clone();
+        disabled.push(("FLUXER_PUSH_CLEAR_BATCH_ENABLED", "false"));
+        assert!(
+            !DeliveryConfig::load_from_iter(disabled)
+                .unwrap()
+                .clear_batch_enabled
+        );
+        let mut enabled = base.clone();
+        enabled.push(("FLUXER_PUSH_CLEAR_BATCH_ENABLED", "true"));
+        assert!(
+            DeliveryConfig::load_from_iter(enabled)
+                .unwrap()
+                .clear_batch_enabled
+        );
+        let mut invalid = base;
+        invalid.push(("FLUXER_PUSH_CLEAR_BATCH_ENABLED", "maybe"));
+        assert!(DeliveryConfig::load_from_iter(invalid).is_err());
     }
 }

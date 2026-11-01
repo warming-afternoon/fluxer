@@ -97,6 +97,7 @@ function parseGuildRelease(value: unknown, label: string): AccountEngineGuildSub
 		members?: readonly [];
 		threads?: false;
 		thread_member_lists?: readonly [];
+		thread_watches?: readonly [];
 		focused_channel_id?: null;
 	} = {};
 	for (const [key, field] of Object.entries(guild)) {
@@ -120,6 +121,9 @@ function parseGuildRelease(value: unknown, label: string): AccountEngineGuildSub
 				break;
 			case 'thread_member_lists':
 				release.thread_member_lists = emptyList(field, `${label}.thread_member_lists`);
+				break;
+			case 'thread_watches':
+				release.thread_watches = emptyList(field, `${label}.thread_watches`);
 				break;
 			case 'threads':
 				if (field !== false) {

@@ -151,6 +151,9 @@ export class Message {
 	readonly editedTimestamp: Date | null;
 	readonly mentions: ReadonlyArray<User>;
 	readonly mentionRoles: ReadonlyArray<string>;
+	// 帖子角色通知未处理的专用原因；不承载人数或内部候选身份。
+	readonly threadMentionWarnings: ReadonlyArray<NonNullable<WireMessage['thread_mention_warnings']>[number]>;
+
 	readonly mentionChannels: ReadonlyArray<ChannelMention>;
 	readonly embeds: ReadonlyArray<MessageEmbed>;
 	readonly attachments: ReadonlyArray<MessageAttachment>;
@@ -205,6 +208,7 @@ export class Message {
 		this.blocked = message.blocked ?? isBlocked;
 		this.mentions = Object.freeze((message.mentions ?? []).map((user) => new User(user)));
 		this.mentionRoles = Object.freeze(message.mention_roles ?? []);
+		this.threadMentionWarnings = Object.freeze([...new Set(message.thread_mention_warnings ?? [])]);
 		this.mentionChannels = Object.freeze(message.mention_channels ?? []);
 		this.embeds = Object.freeze(
 			(message.embeds ?? []).map((embed) => {
@@ -323,6 +327,8 @@ export class Message {
 				edited_timestamp: updates.edited_timestamp ?? this.editedTimestamp?.toISOString(),
 				mentions: ('mentions' in updates ? updates.mentions : this.mentions.map((m) => m.toJSON())) ?? [],
 				mention_roles: ('mention_roles' in updates ? updates.mention_roles : this.mentionRoles) ?? [],
+				thread_mention_warnings:
+					('thread_mention_warnings' in updates ? updates.thread_mention_warnings : this.threadMentionWarnings) ?? [],
 				mention_channels: updates.mention_channels ?? this.mentionChannels,
 				embeds: updates.embeds ?? this.embeds,
 				attachments: updates.attachments ?? this.attachments,
@@ -373,6 +379,7 @@ export class Message {
 		if (!this.author.equals(other.author)) return false;
 		if (this.mentions.length !== other.mentions.length) return false;
 		if (this.mentionRoles.length !== other.mentionRoles.length) return false;
+		if (!stringArraysEqual(this.threadMentionWarnings, other.threadMentionWarnings)) return false;
 		if (this.mentionChannels.length !== other.mentionChannels.length) return false;
 		if (this.embeds.length !== other.embeds.length) return false;
 		if (this.attachments.length !== other.attachments.length) return false;
@@ -495,6 +502,7 @@ export class Message {
 			edited_timestamp: this.editedTimestamp?.toISOString(),
 			mentions: this.mentions.map((user) => user.toJSON() as MessageMention),
 			mention_roles: this.mentionRoles,
+			thread_mention_warnings: [...this.threadMentionWarnings],
 			mention_channels: this.mentionChannels,
 			embeds: this.embeds,
 			attachments: this.attachments,

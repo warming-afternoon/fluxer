@@ -8,6 +8,7 @@ interface GatewayGuildSubscription {
 	sync?: boolean;
 	threads?: boolean;
 	thread_member_lists?: Array<string>;
+	thread_watches?: Array<string>;
 	focused_channel_id?: string | null;
 }
 
@@ -18,6 +19,7 @@ interface GatewayGuildSubscriptionRelease {
 	members?: [];
 	threads?: false;
 	thread_member_lists?: [];
+	thread_watches?: [];
 	focused_channel_id?: null;
 }
 
@@ -32,6 +34,7 @@ export class GatewaySubscriptionLedger {
 	private memberList: MemberListSubscription | null = null;
 	private readonly memberGuilds = new Set<string>();
 	private readonly threadGuilds = new Set<string>();
+	private readonly watchGuilds = new Set<string>();
 	private readonly focusedGuilds = new Set<string>();
 
 	record(subscriptions: GatewayGuildSubscriptions): void {
@@ -50,6 +53,9 @@ export class GatewaySubscriptionLedger {
 				this.threadGuilds.delete(guildId);
 			} else if (subscription.threads === true || (subscription.thread_member_lists?.length ?? 0) > 0) {
 				this.threadGuilds.add(guildId);
+			}
+			if (subscription.thread_watches !== undefined) {
+				toggle(this.watchGuilds, guildId, subscription.thread_watches.length > 0);
 			}
 			if (subscription.focused_channel_id !== undefined) {
 				toggle(this.focusedGuilds, guildId, subscription.focused_channel_id !== null);
@@ -72,6 +78,9 @@ export class GatewaySubscriptionLedger {
 		for (const guildId of this.threadGuilds) {
 			Object.assign(entry(guildId), {threads: false, thread_member_lists: []});
 		}
+		for (const guildId of this.watchGuilds) {
+			entry(guildId).thread_watches = [];
+		}
 		for (const guildId of this.focusedGuilds) {
 			entry(guildId).focused_channel_id = null;
 		}
@@ -83,6 +92,7 @@ export class GatewaySubscriptionLedger {
 		this.memberGuilds.clear();
 		this.threadGuilds.clear();
 		this.focusedGuilds.clear();
+		this.watchGuilds.clear();
 	}
 }
 

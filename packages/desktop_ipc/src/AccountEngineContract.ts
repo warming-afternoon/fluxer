@@ -140,6 +140,7 @@ export interface AccountEngineGuildSubscriptionRelease {
 	readonly members?: readonly [];
 	readonly threads?: false;
 	readonly thread_member_lists?: readonly [];
+	readonly thread_watches?: readonly [];
 	readonly focused_channel_id?: null;
 }
 

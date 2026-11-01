@@ -12,6 +12,8 @@ import {
 } from '@app/features/notification/utils/MentionFeedFilters';
 import {initializeStore} from '@app/features/platform/utils/StoreInitialization';
 import Relationships from '@app/features/relationship/state/Relationships';
+import ChannelThreads from '@app/features/threads/state/ChannelThreads';
+import ThreadMemberships from '@app/features/threads/state/ThreadMemberships';
 import {makeSyncedField} from '@app/features/user/state/SyncedField';
 import UserGuildSettings from '@app/features/user/state/UserGuildSettings';
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
@@ -19,7 +21,7 @@ import {MAX_MESSAGES_PER_CHANNEL} from '@fluxer/constants/src/LimitConstants';
 import type {Channel as WireChannel} from '@fluxer/schema/src/domains/channel/ChannelSchemas';
 import type {Message as WireMessage} from '@fluxer/schema/src/domains/message/MessageResponseSchemas';
 import {RecentMentionsSettingsSchema} from '@fluxer/schema/src/gen/fluxer/user/preferences/v1/preferences_pb';
-import {makeAutoObservable} from 'mobx';
+import {makeAutoObservable, reaction} from 'mobx';
 
 export type {MentionFilters};
 
@@ -36,6 +38,11 @@ class MentionFeed {
 	constructor() {
 		makeAutoObservable(this, {}, {autoBind: true});
 		initializeStore(this, () => this.initPersistence());
+		// 当前消息集合决定引用，同帖多消息共享引用，移除和重置时自动释放。
+		reaction(
+			() => this.recentMentions.map((message) => message.channelId),
+			(ids) => ChannelThreads.setMentionReferences(new Set(ids)),
+		);
 	}
 
 	private async initPersistence(): Promise<void> {
@@ -79,7 +86,7 @@ class MentionFeed {
 
 	private isMessageAccessible(message: Message): boolean {
 		const channel = Channels.getChannel(message.channelId);
-		if (!channel) {
+		if (!channel || (channel.isThread() && !ChannelThreads.getThread(channel.id))) {
 			return false;
 		}
 		switch (channel.type) {
@@ -111,16 +118,20 @@ class MentionFeed {
 		this.fetchGeneration++;
 	}
 
+	/** 判断请求是否仍属于当前提及列表。 */
+	isFetchCurrent(requestId: number): boolean {
+		return requestId === this.fetchGeneration;
+	}
+
 	handleFetchPending(): number {
 		this.isLoadingMore = true;
 		this.fetchGeneration++;
 		return this.fetchGeneration;
 	}
 
-	handleRecentMentionsFetchSuccess(requestId: number, messages: ReadonlyArray<WireMessage>): void {
+	handleRecentMentionsFetchSuccess(requestId: number, messages: ReadonlyArray<WireMessage>, isLoadMore = false): void {
 		if (requestId !== this.fetchGeneration) return;
 		const filteredMessages = this.filterFetchedMessages(messages);
-		const isLoadMore = this.isLoadingMore && this.fetched;
 		if (isLoadMore) {
 			this.recentMentions.push(...filteredMessages.map((m) => new Message(m, {missingReactions: 'preserve'})));
 		} else {
@@ -159,10 +170,14 @@ class MentionFeed {
 	}
 
 	handleChannelDelete(channel: Pick<WireChannel, 'id'>): void {
+		this.fetchGeneration++;
+		this.isLoadingMore = false;
 		this.recentMentions = this.recentMentions.filter((message) => message.channelId !== channel.id);
 	}
 
 	handleGuildDelete(guildId: string): void {
+		this.fetchGeneration++;
+		this.isLoadingMore = false;
 		this.recentMentions = this.recentMentions.filter((message) => {
 			const channel = Channels.getChannel(message.channelId);
 			return !channel || channel.guildId !== guildId;
@@ -176,21 +191,31 @@ class MentionFeed {
 	}
 
 	handleMessageDelete(messageId: string): void {
+		this.fetchGeneration++;
+		this.isLoadingMore = false;
 		this.recentMentions = this.recentMentions.filter((message) => message.id !== messageId);
 	}
 
 	handleMessagesDelete(messageIds: ReadonlyArray<string>): void {
+		this.fetchGeneration++;
+		this.isLoadingMore = false;
 		const deletedIds = new Set(messageIds);
 		this.recentMentions = this.recentMentions.filter((message) => !deletedIds.has(message.id));
 	}
 
+	/** 更新提及列表，临时论坛浏览只接纳直接用户提及 */
 	handleMessageCreate(message: WireMessage): void {
 		const channel = Channels.getChannel(message.channel_id);
 		if (!channel) return;
 		const guildId = channel.guildId ?? null;
+		const browsingOnly =
+			channel.isThread() &&
+			!ThreadMemberships.isMember(channel.id) &&
+			channel.parentId != null &&
+			Channels.getChannel(channel.parentId)?.isThreadOnly() === true;
 		const mentioned = messageMentionsCurrentUser(message, {
-			suppressEveryone: UserGuildSettings.isEveryoneMentionSuppressed(guildId),
-			suppressRoles: UserGuildSettings.isRoleMentionSuppressed(guildId),
+			suppressEveryone: browsingOnly || UserGuildSettings.isEveryoneMentionSuppressed(guildId),
+			suppressRoles: browsingOnly || UserGuildSettings.isRoleMentionSuppressed(guildId),
 		});
 		if (!mentioned) {
 			return;

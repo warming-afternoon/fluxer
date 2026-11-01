@@ -7,7 +7,6 @@ import {DELETE_MY_MESSAGES_DESCRIPTOR} from '@app/features/channel/utils/Channel
 import {CHANNEL_RECORD_DESCRIPTOR, RecordDebugModal} from '@app/features/devtools/components/debug/RecordDebugModal';
 import {
 	COPY_LINK_DESCRIPTOR as D_COPY_THREAD_LINK_DESCRIPTOR,
-	NOTIFICATION_LEVEL_ALL_MESSAGES_DESCRIPTOR as D_NOTIFICATION_ALL_DESCRIPTOR,
 	NOTIFICATION_LEVEL_NOTHING_DESCRIPTOR as D_NOTIFICATION_NOTHING_DESCRIPTOR,
 	NOTIFICATION_SETTINGS_DESCRIPTOR as D_THREAD_NOTIFICATIONS_DESCRIPTOR,
 	MARK_AS_READ_DESCRIPTOR,
@@ -113,11 +112,10 @@ function confirmLeavePrivateThread(i18n: I18n, thread: Channel): void {
 	);
 }
 
+/** 桌面菜单和移动端菜单共享帖子的仅提及与关闭选项。 */
 export function buildThreadNotificationItems(i18n: I18n, thread: Channel): Array<MenuSheetItem> {
 	const current = getThreadNotificationSetting(thread.id);
 	const options: Array<[ThreadNotificationSetting, string]> = [
-		[ThreadNotificationSetting.DEFAULT, i18n._(D.NOTIFICATION_DEFAULT_DESCRIPTOR)],
-		[ThreadNotificationSetting.ALL_MESSAGES, i18n._(D_NOTIFICATION_ALL_DESCRIPTOR)],
 		[ThreadNotificationSetting.ONLY_MENTIONS, i18n._(D.NOTIFICATION_MENTIONS_DESCRIPTOR)],
 		[ThreadNotificationSetting.NO_MESSAGES, i18n._(D_NOTIFICATION_NOTHING_DESCRIPTOR)],
 	];

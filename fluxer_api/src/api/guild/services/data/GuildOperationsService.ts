@@ -890,6 +890,10 @@ export class GuildOperationsService {
 			await this.channelRepository.threads.purgeGuild(guildId);
 			await getKVThreadAutoArchiveQueue().removeGuild(guildId);
 		}
+		// 在线程关系清理之后删除普通频道主行与索引；保留失败可重试的社区主行直到最后。
+		await mapWithConcurrency(channels, THREAD_PURGE_CONCURRENCY, async (channel) => {
+			await this.channelRepository.channelData.delete(channel.id, guildId, channel.type);
+		});
 		await this.guildRepository.delete(guildId, guild.ownerId);
 		await this.gatewayService.stopGuild(guildId);
 		const guildSearchService = getGuildSearchService();

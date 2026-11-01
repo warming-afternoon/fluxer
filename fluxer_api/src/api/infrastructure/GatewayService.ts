@@ -93,6 +93,15 @@ interface GuildAuthContextParams {
 	channelId?: ChannelID;
 }
 
+/** 合并授权的上下文与实际权限目标。 */
+interface GuildChannelAuthorizationParams extends GuildAuthContextParams {
+	/** 实际计算权限的频道，帖子请求使用父频道。 */
+	permissionTargetChannelId: ChannelID;
+
+	/** 区分普通频道与帖子所需的授权上下文。 */
+	mode: 'channel' | 'thread';
+}
+
 interface CheckPermissionParams {
 	guildId: GuildID;
 	userId: UserID;
@@ -453,11 +462,31 @@ export class GatewayService {
 	}
 
 	private async processAuthContextEntry([key, pending]: BatchEntry<GuildChannelAuthContext>): Promise<void> {
-		const [guildIdStr, userIdStr, channelIdStr] = key.split('-');
+		const [guildIdStr, userIdStr, channelIdStr, permissionTarget, mode] = key.split('-');
 		const guildId = BigInt(guildIdStr) as GuildID;
 		const userId = BigInt(userIdStr) as UserID;
 		const channelId = channelIdStr !== '0' ? (BigInt(channelIdStr) as ChannelID) : undefined;
 		try {
+			if (permissionTarget) {
+				const result = await this.call<unknown>('guild.get_channel_authorization', {
+					guild_id: guildIdStr,
+					user_id: userIdStr,
+					context_channel_id: channelId?.toString() ?? null,
+					permission_target_channel_id: permissionTarget,
+					mode,
+				});
+				this.resolvePendingRequests(
+					pending,
+					await this.decodeChannelAuthorization(result, {
+						guildId,
+						userId,
+						channelId,
+						permissionTargetChannelId: BigInt(permissionTarget) as ChannelID,
+						mode: mode as 'channel' | 'thread',
+					}),
+				);
+				return;
+			}
 			const result = await this.call<GuildAuthContextRpcResponse>('guild.get_auth_context', {
 				guild_id: guildId.toString(),
 				user_id: userId.toString(),
@@ -469,7 +498,7 @@ export class GatewayService {
 			});
 		} catch (error) {
 			const transformedError = this.transformGatewayError(error);
-			if (!this.isAuthContextUnsupportedError(transformedError)) {
+			if (permissionTarget || !this.isAuthContextUnsupportedError(transformedError)) {
 				this.rejectPendingRequests(pending, transformedError);
 				this.logBatchFailure('guild.get_auth_context', key, transformedError);
 				return;
@@ -532,6 +561,27 @@ export class GatewayService {
 			event,
 			data,
 		});
+	}
+
+	/** 用一次 RPC 顺序执行通知清理和已读派发，不合并不同用户的任务。 */
+	async acknowledgeReadState(params: {
+		userId: UserID;
+		channelId: ChannelID;
+		messageId: MessageID;
+		data: Record<string, unknown>;
+	}): Promise<void> {
+		if (params.userId === SYSTEM_USER_ID) {
+			await this.clearPushChannelNotifications(params);
+			return;
+		}
+		const result = await this.call<{clear_ok: boolean; dispatch_ok: boolean}>('presence.acknowledge_read_state', {
+			user_id: params.userId.toString(),
+			channel_id: params.channelId.toString(),
+			message_id: params.messageId.toString(),
+			ack_data: params.data,
+		});
+		if (result.clear_ok !== true) Logger.error('Combined read-state RPC failed to clear notifications');
+		if (result.dispatch_ok !== true) throw new BadGatewayError();
 	}
 
 	async clearPushChannelNotifications({
@@ -627,6 +677,93 @@ export class GatewayService {
 		}
 		const key = `${guildId.toString()}-${userId.toString()}-${channelId ? channelId.toString() : '0'}`;
 		return this.enqueueBatchRequest(this.authContextLane, key);
+	}
+
+	/** 批量请求同一上下文的成员、权限与频道授权数据。 */
+	async getGuildChannelAuthorization(
+		params: GuildChannelAuthorizationParams,
+	): Promise<GuildChannelAuthContext & NonNullable<GuildChannelAuthContext['authorization']>> {
+		const key = `${params.guildId}-${params.userId}-${params.channelId ?? 0}-${params.permissionTargetChannelId}-${params.mode}`;
+		const result = await this.enqueueBatchRequest(this.authContextLane, key);
+		if (!result.authorization) throw new BadGatewayError();
+		return {...result, ...result.authorization};
+	}
+
+	/** 校验响应版本及权限目标，仅对成功的旧格式响应补齐字段。 */
+	private async decodeChannelAuthorization(
+		value: unknown,
+		params: GuildChannelAuthorizationParams,
+	): Promise<GuildChannelAuthContext> {
+		if (!value || typeof value !== 'object') throw new BadGatewayError();
+		const row = value as Record<string, unknown>;
+		const versioned = row.response_version !== undefined;
+		const guild = row.guild as GuildResponse | undefined;
+		if (
+			!guild ||
+			guild.id !== params.guildId.toString() ||
+			!/^[0-9]+$/.test(guild.owner_id) ||
+			![0, 1].includes(guild.mfa_level)
+		)
+			throw new BadGatewayError();
+		if (
+			versioned &&
+			((guild.nsfw !== undefined && typeof guild.nsfw !== 'boolean') ||
+				(guild.nsfw_level !== undefined && ![0, 1, 2, 3].includes(guild.nsfw_level)))
+		)
+			throw new BadGatewayError();
+		if (
+			versioned &&
+			(row.response_version !== 1 ||
+				row.context_channel_id !== (params.channelId?.toString() ?? null) ||
+				row.permission_target_channel_id !== params.permissionTargetChannelId.toString() ||
+				row.mode !== params.mode ||
+				row.member === undefined ||
+				row.permissions === undefined)
+		)
+			throw new BadGatewayError();
+		const parentChannel = row.parent_channel as GuildChannelAuthContext['parentChannel'];
+		if (
+			parentChannel != null &&
+			(typeof parentChannel !== 'object' ||
+				parentChannel.id !== params.channelId?.toString() ||
+				!Number.isInteger(parentChannel.type) ||
+				(versioned &&
+					parentChannel.nsfw_override !== undefined &&
+					parentChannel.nsfw_override !== null &&
+					typeof parentChannel.nsfw_override !== 'boolean'))
+		)
+			throw new BadGatewayError();
+		let memberResult: {success: boolean; memberData?: GuildMemberResponse};
+		if (row.member === undefined && !versioned)
+			memberResult = await this.getGuildMember({guildId: params.guildId, userId: params.userId});
+		else {
+			const member = row.member as {success?: unknown; member_data?: GuildMemberResponse} | null;
+			if (
+				!member ||
+				typeof member.success !== 'boolean' ||
+				(member.success && (!member.member_data || member.member_data.user?.id !== params.userId.toString()))
+			)
+				throw new BadGatewayError();
+			if (
+				member.member_data?.communication_disabled_until != null &&
+				!Number.isFinite(Date.parse(member.member_data.communication_disabled_until))
+			)
+				throw new BadGatewayError();
+			memberResult = {success: member.success, ...(member.success ? {memberData: member.member_data} : {})};
+		}
+		let permissions: bigint;
+		if (row.permissions === undefined && !versioned)
+			permissions = await this.getUserPermissions({
+				guildId: params.guildId,
+				userId: params.userId,
+				channelId: params.permissionTargetChannelId,
+			});
+		else {
+			if (typeof row.permissions !== 'string' || !/^(0|[1-9][0-9]*)$/.test(row.permissions))
+				throw new BadGatewayError();
+			permissions = BigInt(row.permissions);
+		}
+		return {guild, parentChannel: parentChannel ?? null, authorization: {memberResult, permissions}};
 	}
 
 	async getGuildMember({guildId, userId}: GuildUserParams): Promise<GuildMemberResult> {
@@ -837,6 +974,81 @@ export class GatewayService {
 			user_id: userId.toString(),
 		});
 		return result.channel_ids.map((id: string) => createChannelID(BigInt(id)));
+	}
+
+	/** 专用协议路由让旧网关明确拒绝帖子消息，避免退回全帖子广播。 */
+	async dispatchThreadMessage({guildId, data}: {guildId: GuildID; data: unknown}): Promise<void> {
+		await this.call('guild.dispatch_thread_message', {
+			guild_id: guildId.toString(),
+			event: 'MESSAGE_CREATE',
+			data,
+			protocol_version: 2,
+		});
+	}
+
+	/** 查询网关及后台角色决策能力，旧版本不作为已就绪处理。 */
+	async getThreadMentionCapabilities(): Promise<{
+		version: number;
+		api_version: number;
+		worker_version: number;
+		protocol_ready: boolean;
+	}> {
+		return this.call('guild.thread_mention_capabilities', {api_version: 2});
+	}
+
+	/** 登记实际启动完成的组件，网关按部署预期数量核对全栈能力。 */
+	async registerThreadMentionComponent(instanceId: string, component: 'api' | 'worker'): Promise<void> {
+		await this.call('guild.register_thread_mention_component', {
+			instance_id: instanceId,
+			component,
+			version: 2,
+			lease_ms: 60000,
+		});
+	}
+
+	/** 请求消息绑定的有界角色决策，不能通过旧角色枚举接口回退。 */
+	async resolveThreadMentionDecision(params: {
+		guildId: GuildID;
+		channelId: ChannelID;
+		messageId: MessageID;
+		authorId: UserID;
+		roleIds: Array<string>;
+		userIds: Array<string>;
+	}): Promise<unknown> {
+		return this.call('guild.resolve_thread_mention_decision', {
+			guild_id: params.guildId.toString(),
+			channel_id: params.channelId.toString(),
+			message_id: params.messageId.toString(),
+			author_id: params.authorId.toString(),
+			role_ids: params.roleIds,
+			user_ids: params.userIds,
+			protocol_version: 2,
+			api_version: 2,
+			worker_version: 2,
+		});
+	}
+
+	/** 破坏性清理前固定网关成员受众，失败不得继续删除数据库成员。 */
+	async prepareThreadLifecycle(
+		guildId: GuildID,
+		threadId: ChannelID,
+		stateVersion: number,
+		resumeTicket?: string,
+	): Promise<string> {
+		const result = await this.call<{ticket: string}>('guild.prepare_thread_lifecycle', {
+			guild_id: guildId.toString(),
+			thread_id: threadId.toString(),
+			operation: 'delete',
+			state_version: stateVersion,
+			...(resumeTicket !== undefined ? {ticket: resumeTicket} : {}),
+		});
+		if (
+			typeof result.ticket !== 'string' ||
+			Buffer.byteLength(result.ticket, 'utf8') < 24 ||
+			Buffer.byteLength(result.ticket, 'utf8') > 128
+		)
+			throw new Error('Invalid thread lifecycle ticket');
+		return result.ticket;
 	}
 
 	async resolveMentionSourcesPage({

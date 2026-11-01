@@ -2,7 +2,11 @@
 
 import {Config} from '@app/api/Config';
 import {createApiContext} from '@app/api/CreateApiContext';
-import {setDatabaseQueryExecutor} from '@app/api/database/CassandraQueryExecution';
+import {
+	setDatabaseQueryExecutor,
+	shutdownDatabaseQueryExecutor,
+	startCassandraMetadataCaches,
+} from '@app/api/database/CassandraQueryExecution';
 import {ensurePostgresKvSchema, PostgresKvQueryExecutor} from '@app/api/database/PostgresKvQueryExecutor';
 import {
 	activityEventsPublishing,
@@ -15,6 +19,7 @@ import {startSharedListWatch, stopSharedListWatch} from '@app/api/infrastructure
 import {sizeProcessForHost} from '@app/api/infrastructure/HostResources';
 import type {ISnowflakeService} from '@app/api/infrastructure/ISnowflakeService';
 import {shutdownStorageChangeFeed} from '@app/api/infrastructure/StorageServiceFactory';
+import {ThreadMentionComponentLease} from '@app/api/infrastructure/ThreadMentionComponentLease';
 import type {InstanceConfigRepository} from '@app/api/instance/InstanceConfigRepository';
 import {JobLedgerRepository} from '@app/api/jobs/JobLedgerRepository';
 import {Logger} from '@app/api/Logger';
@@ -182,6 +187,7 @@ export async function startWorkerRuntime(options: WorkerRuntimeOptions): Promise
 	const runners: Array<WorkerRunner> = [];
 	let cron: CronScheduler | null = null;
 	let stopPromise: Promise<void> | null = null;
+	let threadMentionComponentLease: ThreadMentionComponentLease | null = null;
 
 	const cleanupStep = async (label: string, fn: () => Promise<void> | void): Promise<void> => {
 		try {
@@ -192,6 +198,10 @@ export async function startWorkerRuntime(options: WorkerRuntimeOptions): Promise
 	};
 
 	const performStop = async (): Promise<void> => {
+		await cleanupStep('thread mention lease', () => {
+			threadMentionComponentLease?.stop();
+			threadMentionComponentLease = null;
+		});
 		await cleanupStep('heartbeat', () => heartbeat.stop());
 		await cleanupStep('cron', () => cron?.stop());
 		await cleanupStep('account actions', stopAccountActionConsumer);
@@ -299,6 +309,10 @@ export async function startWorkerRuntime(options: WorkerRuntimeOptions): Promise
 			Logger.info('Cron scheduler disabled for this worker process');
 		}
 		await Promise.all(runners.map((runner) => runner.start()));
+		if (activeWorkerLanes.some((lane) => lane.taskTypes.includes('handleMentions'))) {
+			threadMentionComponentLease = new ThreadMentionComponentLease(dependencies.gatewayService, 'worker');
+			threadMentionComponentLease.start();
+		}
 		Logger.info(
 			{lanes: activeWorkerLanes.map((l) => `${l.name}(${l.concurrency})`).join(', ')},
 			'Worker runners started',
@@ -346,6 +360,7 @@ export async function startWorkerMain(): Promise<void> {
 		await cleanupStep('storage change feed', shutdownStorageChangeFeed);
 		await cleanupStep('shared lists', stopSharedListWatch);
 		await cleanupStep('activity events', () => shutdownActivityEvents());
+		await cleanupStep('metadata caches and database executor', shutdownDatabaseQueryExecutor);
 		await cleanupStep('jetstream', async () => {
 			await jsConnectionManager?.drain();
 			jsConnectionManager = null;
@@ -413,7 +428,12 @@ export async function startWorkerMain(): Promise<void> {
 			postgresInitialized = true;
 			const postgres = getDefaultPostgresClient();
 			await ensurePostgresKvSchema(postgres);
-			setDatabaseQueryExecutor(new PostgresKvQueryExecutor(postgres));
+			const executor = new PostgresKvQueryExecutor(postgres, Config.postgres.readStateBatchingEnabled);
+			await executor.startChannelMetadataCache(
+				Config.database.metadataCache?.channelEnabled ?? Config.postgres.channelMetadataCacheEnabled,
+				Config.database.metadataCache?.guildEnabled ?? Config.postgres.guildAvailabilityCacheEnabled,
+			);
+			setDatabaseQueryExecutor(executor);
 			Logger.info('Postgres KV client initialised for worker backend');
 		}
 		if (Config.database.backend === 'cassandra') {
@@ -455,6 +475,12 @@ export async function startWorkerMain(): Promise<void> {
 			name: 'fluxer-worker',
 		});
 		await jsConnectionManager.connect();
+		if (Config.database.backend === 'cassandra' && Config.database.metadataCache) {
+			await startCassandraMetadataCaches(Config.database.metadataCache, Config.cassandra.keyspace, {
+				kv: Config.kv,
+				namespace: Config.instance.baseDomain,
+			});
+		}
 		Logger.info('JetStream connection established');
 		const queue = new JetStreamWorkerQueue(jsConnectionManager);
 		const jobLedger = new JobLedgerRepository();

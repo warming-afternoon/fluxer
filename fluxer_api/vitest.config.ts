@@ -22,7 +22,12 @@ const DEFAULT_PARALLEL_WORKERS = resolveDefaultParallelWorkers();
 const configuredMaxWorkers = parseParallelInteger(process.env.API_TEST_MAX_WORKERS, DEFAULT_PARALLEL_WORKERS);
 const configuredMaxConcurrency = parseParallelInteger(process.env.API_TEST_MAX_CONCURRENCY, configuredMaxWorkers);
 
-const MODULE_REGISTRY_TEST_FILES = ['src/api/voice/tests/VoiceAvailabilityService.test.ts'];
+const MODULE_REGISTRY_TEST_FILES = [
+	'src/api/voice/tests/VoiceAvailabilityService.test.ts',
+	'src/api/database/CassandraMetadataCaches.test.ts',
+	'src/api/database/CassandraMetadataExecution.test.ts',
+	'src/api/worker/tasks/HarvestUserData.test.ts',
+];
 
 const INSTANCE_POLICY_TEST_FILES = ['src/api/admin/tests/InstanceConfigPendingRegistrationApproval.test.ts'];
 

@@ -5,6 +5,7 @@ import type {GatewayRpcTransport} from '@app/api/infrastructure/GatewayRpcClient
 import {GatewayRpcClient} from '@app/api/infrastructure/GatewayRpcClient';
 import {GatewayRpcMethodError, GatewayRpcMethodErrorCodes} from '@app/api/infrastructure/GatewayRpcError';
 import {GatewayService} from '@app/api/infrastructure/GatewayService';
+import {BadGatewayError} from '@fluxer/errors/src/domains/core/BadGatewayError';
 import {ServiceUnavailableError} from '@fluxer/errors/src/domains/core/ServiceUnavailableError';
 import {afterEach, describe, expect, it} from 'vitest';
 
@@ -52,4 +53,37 @@ describe('GatewayService gateway error mapping', () => {
 		});
 		expect(calls).toBe(1);
 	});
+});
+
+it('sends one combined read-state RPC and retains independent failure reporting', async () => {
+	const calls: Array<{method: string; params: unknown}> = [];
+	let dispatchOk = true;
+	GatewayRpcClient.createForTests({
+		async call(method: string, params: Record<string, unknown>) {
+			calls.push({method, params});
+			return {clear_ok: false, dispatch_ok: dispatchOk};
+		},
+		async destroy() {},
+	});
+	try {
+		const {createChannelID, createMessageID} = await import('@app/api/BrandedTypes');
+		const service = new GatewayService();
+		const params = {
+			userId: createUserID(1n),
+			channelId: createChannelID(2n),
+			messageId: createMessageID(3n),
+			data: {channel_id: '2', message_id: '4'},
+		};
+		await expect(service.acknowledgeReadState(params)).resolves.toBeUndefined();
+		expect(calls).toEqual([
+			{
+				method: 'presence.acknowledge_read_state',
+				params: {user_id: '1', channel_id: '2', message_id: '3', ack_data: params.data},
+			},
+		]);
+		dispatchOk = false;
+		await expect(service.acknowledgeReadState(params)).rejects.toBeInstanceOf(BadGatewayError);
+	} finally {
+		await GatewayRpcClient.resetForTests();
+	}
 });

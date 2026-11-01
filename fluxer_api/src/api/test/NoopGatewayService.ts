@@ -108,6 +108,36 @@ export class NoopGatewayService implements IGatewayService {
 
 	async dispatchGuild(_params: {guildId: GuildID; event: GatewayDispatchEvent; data: unknown}): Promise<void> {}
 
+	/** 复用已有事件入口，保留派生测试替身对消息分发的记录。 */
+	async dispatchThreadMessage({guildId, data}: {guildId: GuildID; data: unknown}): Promise<void> {
+		await this.dispatchGuild({guildId, event: 'MESSAGE_CREATE', data});
+	}
+
+	/** 无真实网关的替身不宣告角色提及协议已经就绪。 */
+	async getThreadMentionCapabilities(): Promise<Awaited<ReturnType<IGatewayService['getThreadMentionCapabilities']>>> {
+		return {version: 0, api_version: 0, worker_version: 0, protocol_ready: false};
+	}
+
+	/** 测试替身不发布真实组件租约。 */
+	async registerThreadMentionComponent(_instanceId: string, _component: 'api' | 'worker'): Promise<void> {}
+
+	/** 需要角色决策的用例必须显式提供模拟结果，不能把未实现能力当成成功。 */
+	async resolveThreadMentionDecision(
+		_params: Parameters<IGatewayService['resolveThreadMentionDecision']>[0],
+	): Promise<unknown> {
+		throw new Error('Thread mention decision is not implemented by NoopGatewayService');
+	}
+
+	/** 返回稳定的本地测试票据；恢复请求沿用原票据，不模拟真实网关快照。 */
+	async prepareThreadLifecycle(
+		guildId: GuildID,
+		threadId: ChannelID,
+		stateVersion: number,
+		resumeTicket?: string,
+	): Promise<string> {
+		return resumeTicket ?? `noop:${guildId}:${threadId}:${stateVersion}`;
+	}
+
 	async dispatchGuildMany(params: {
 		guildId: GuildID;
 		events: Array<{event: GatewayDispatchEvent; data: unknown}>;
@@ -484,6 +514,31 @@ export class NoopGatewayService implements IGatewayService {
 		return {guild, parentChannel};
 	}
 
+	/** 为未连接真实网关的测试返回明确的空授权上下文。 */
+	async getGuildChannelAuthorization(params: {
+		/** 授权目标公会。 */
+		guildId: GuildID;
+
+		/** 请求授权的用户。 */
+		userId: UserID;
+
+		/** 内容分级判断使用的上下文频道。 */
+		channelId?: ChannelID;
+
+		/** 实际计算权限的目标频道。 */
+		permissionTargetChannelId: ChannelID;
+
+		/** 普通频道或帖子授权模式。 */
+		mode: 'channel' | 'thread';
+	}) {
+		const [context, memberResult, permissions] = await Promise.all([
+			this.getGuildAuthContext(params),
+			this.getGuildMember(params),
+			this.getUserPermissions({...params, channelId: params.permissionTargetChannelId}),
+		]);
+		return {...context, memberResult, permissions};
+	}
+
 	async getGuildMember(params: {guildId: GuildID; userId: UserID}): Promise<{
 		success: boolean;
 		memberData?: GuildMemberResponse;
@@ -716,6 +771,17 @@ export class NoopGatewayService implements IGatewayService {
 	}
 
 	async dispatchPresence(_params: {userId: UserID; event: GatewayDispatchEvent; data: unknown}): Promise<void> {}
+
+	/** 测试默认不执行已读网关副作用。 */
+	async acknowledgeReadState(params: {
+		userId: UserID;
+		channelId: ChannelID;
+		messageId: MessageID;
+		data: Record<string, unknown>;
+	}): Promise<void> {
+		await this.clearPushChannelNotifications(params);
+		await this.dispatchPresence({userId: params.userId, event: 'MESSAGE_ACK', data: params.data});
+	}
 
 	async clearPushChannelNotifications(_params: {
 		userId: UserID;

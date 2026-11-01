@@ -282,6 +282,7 @@ function buildOperatorPassConfig(master: MasterConfig): OperatorPassConfig {
 	};
 }
 
+/** 将主配置映射到 API，并保留显式关闭优化的设置。 */
 export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 	if (!master.internal) {
 		throw new Error('internal configuration is required for the API');
@@ -323,6 +324,13 @@ export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 		headersTimeoutMs: master.services.api.headers_timeout_ms,
 		requestTimeoutMs: master.services.api.request_timeout_ms,
 		maxInflightRequests: master.services.api.max_inflight_requests,
+		apiInstances: master.services.api.instances ?? 2,
+		combinedChannelAuthEnabled: master.services.api.combined_channel_auth_enabled ?? true,
+		combinedRateLimitEnabled: master.services.api.combined_rate_limit_enabled ?? true,
+		readState: {
+			combinedGatewayRpcEnabled: master.services.api.read_state_combined_gateway_rpc_enabled ?? false,
+			narrowAuthEnabled: master.services.api.read_state_narrow_auth_enabled ?? false,
+		},
 		automatedMessageDeletionDelayDays: master.services.api.automated_message_deletion_delay_days,
 		ipBanExemptIps: normalizeIpBanExemptIps(master.services.api.ip_ban_exempt_ips),
 		cassandra: {
@@ -345,9 +353,24 @@ export function buildAPIConfigFromMaster(master: MasterConfig): APIConfig {
 			maxConnections: postgresSource?.max_connections ?? 20,
 			kvTable: postgresSource?.kv_table ?? 'fluxer_kv',
 			preparedStatements: postgresSource?.prepared_statements ?? true,
+			readStateBatchingEnabled: postgresSource?.read_state_batching_enabled ?? true,
+			channelMetadataCacheEnabled:
+				master.database.metadata_cache?.channel_enabled ?? postgresSource?.channel_metadata_cache_enabled ?? true,
+			guildAvailabilityCacheEnabled:
+				master.database.metadata_cache?.guild_enabled ?? postgresSource?.guild_availability_cache_enabled ?? false,
 		},
 		database: {
 			backend: master.database.backend,
+			metadataCache: {
+				channelEnabled:
+					master.database.metadata_cache?.channel_enabled ??
+					(master.database.backend === 'postgres' ? (postgresSource?.channel_metadata_cache_enabled ?? true) : false),
+				guildEnabled:
+					master.database.metadata_cache?.guild_enabled ??
+					(master.database.backend === 'postgres'
+						? (postgresSource?.guild_availability_cache_enabled ?? false)
+						: false),
+			},
 		},
 		kv: {
 			url: master.internal.kv,

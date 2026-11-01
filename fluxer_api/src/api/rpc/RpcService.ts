@@ -16,22 +16,26 @@ import {
 import {Config} from '@app/api/Config';
 import {mapChannelToResponse} from '@app/api/channel/ChannelMappers';
 import type {ChannelRepository} from '@app/api/channel/ChannelRepository';
+import {ChannelAuthService} from '@app/api/channel/services/channel_data/ChannelAuthService';
 import {buildBroadcastMessageData} from '@app/api/channel/services/message/MessageGatewayDispatch';
 import {
 	ensurePersonalNotesChannelExists,
 	personalNotesEnabled,
 } from '@app/api/channel/services/PersonalNotesChannelRepair';
+import {filterThreadDiscoveryStates} from '@app/api/channel/services/thread/ThreadDiscoveryAccess';
 import {withThreadParentFieldsMany} from '@app/api/channel/services/thread/ThreadParentSettings';
 import {
 	listThreadMembersPage,
 	loadForumUnreads,
 	loadThreadCollectionRpcData,
+	loadThreadWatchContexts,
 	resolveThreadGateRpcData,
 } from '@app/api/channel/services/thread/ThreadRpcData';
 import {getChannelThreadsConfig, isTainted, type ThreadViewer} from '@app/api/experiment/ChannelThreadsGate';
 import {mapFavoriteMemeToResponse} from '@app/api/favorite_meme/FavoriteMemeModel';
 import type {FavoriteMemeRepository} from '@app/api/favorite_meme/FavoriteMemeRepository';
 import {
+	isGuildMemberTimedOut,
 	mapGuildEmojiToResponse,
 	mapGuildMemberToResponse,
 	mapGuildRoleToResponse,
@@ -108,7 +112,12 @@ import type {VoiceService} from '@app/api/voice/VoiceService';
 import type {WebhookRepository} from '@app/api/webhook/WebhookRepository';
 import {ensureGuildThreadPermissionsSeeded} from '@app/api/worker/tasks/SeedThreadPermissions';
 import type {WorkerTaskName} from '@app/api/worker/WorkerLaneConfig';
-import {AUTOMATIC_VOICE_REGION_ID, ChannelTypes, MessageTypes} from '@fluxer/constants/src/ChannelConstants';
+import {
+	AUTOMATIC_VOICE_REGION_ID,
+	ChannelTypes,
+	MessageTypes,
+	Permissions,
+} from '@fluxer/constants/src/ChannelConstants';
 import type {LimitKey} from '@fluxer/constants/src/LimitConfigMetadata';
 import {MAX_PRIVATE_CHANNELS_PER_USER} from '@fluxer/constants/src/LimitConstants';
 import {THREAD_ONLY_CHANNEL_TYPES} from '@fluxer/constants/src/ThreadConstants';
@@ -339,6 +348,30 @@ export class RpcService {
 						limit: request.limit,
 					}),
 				};
+			case 'guild_member_bounds': {
+				const guildId = createGuildID(request.guild_id);
+				await this.getGuildOrThrow(guildId);
+				const bounds = await this.guildRepository.getMemberIdBounds(
+					guildId,
+					request.after_user_id ? createUserID(request.after_user_id) : undefined,
+					request.through_user_id ? createUserID(request.through_user_id) : undefined,
+				);
+				return {
+					type: 'guild_member_bounds',
+					data: {min_user_id: bounds.minUserId?.toString() ?? null, max_user_id: bounds.maxUserId?.toString() ?? null},
+				};
+			}
+			case 'guild_member_range':
+				return {
+					type: 'guild_member_range',
+					data: await this.handleGuildCollectionMembersRequest({
+						guildId: createGuildID(request.guild_id),
+						requestCache,
+						afterUserId: request.after_user_id ? createUserID(request.after_user_id) : undefined,
+						throughUserId: request.through_user_id ? createUserID(request.through_user_id) : undefined,
+						limit: request.limit,
+					}),
+				};
 			case 'voice_state_upsert':
 				await this.persistGuildVoiceState({
 					guildId: createGuildID(request.guild_id),
@@ -563,6 +596,17 @@ export class RpcService {
 					data: {config},
 				};
 			}
+			case 'thread_watch_contexts':
+				return {
+					type: 'thread_watch_contexts',
+					data: {
+						threads: await loadThreadWatchContexts(
+							this.channelRepository,
+							createGuildID(request.guild_id),
+							request.thread_ids.map(createChannelID),
+						),
+					},
+				};
 			case 'list_thread_members':
 				return {
 					type: 'list_thread_members',
@@ -571,15 +615,50 @@ export class RpcService {
 						threadIds: request.thread_ids.map(createChannelID),
 						limit: request.limit ?? THREAD_MEMBERS_RPC_DEFAULT_LIMIT,
 						after: request.after_user_id !== undefined ? createUserID(request.after_user_id) : undefined,
+						expectedStateVersion: request.expected_state_version,
 					}),
 				};
-			case 'forum_unreads':
+			case 'forum_unreads': {
+				const userId = createUserID(request.user_id);
+				const guildId = createGuildID(request.guild_id);
+				const auth = await new ChannelAuthService(
+					this.channelRepository,
+					this.userRepository,
+					this.guildRepository,
+					this.gatewayService,
+				).getChannelAuthenticated({
+					userId,
+					channelId: createChannelID(request.channel_id),
+					viewer: {kind: 'user', userId, bot: false, capable: true},
+				});
+				if (auth.channel.guildId !== guildId || !THREAD_ONLY_CHANNEL_TYPES.has(auth.channel.type)) {
+					return {type: 'forum_unreads', data: {threads: []}};
+				}
+				const visible = await filterThreadDiscoveryStates(
+					{
+						channelRepository: this.channelRepository,
+						parentActor: async () => ({
+							permissions: await this.gatewayService.getUserPermissions({guildId, userId, channelId: auth.channel.id}),
+							isOwner: auth.guild?.owner_id === userId.toString(),
+							timedOut: isGuildMemberTimedOut(auth.member),
+						}),
+					},
+					auth,
+					userId,
+					await this.channelRepository.threads.getStates(
+						request.threads.map((thread) => createChannelID(thread.thread_id)),
+					),
+				);
+				const canReadMessageHistory = await auth.hasPermission(Permissions.READ_MESSAGE_HISTORY);
 				return {
 					type: 'forum_unreads',
 					data: {
 						threads: await loadForumUnreads(this.channelRepository, {
 							guildId: createGuildID(request.guild_id),
 							channelId: createChannelID(request.channel_id),
+							visibleThreadIds: new Set(visible.map((state) => state.threadId)),
+							canReadMessageHistory,
+							messageHistoryCutoff: canReadMessageHistory ? null : (auth.guild?.message_history_cutoff ?? null),
 							threads: request.threads.map((thread) => ({
 								threadId: createChannelID(thread.thread_id),
 								ackMessageId: thread.ack_message_id !== undefined ? createMessageID(thread.ack_message_id) : undefined,
@@ -587,6 +666,7 @@ export class RpcService {
 						}),
 					},
 				};
+			}
 			case 'guild_thread_flip_data':
 				return {
 					type: 'guild_thread_flip_data',
@@ -1437,20 +1517,28 @@ export class RpcService {
 		guildId,
 		requestCache,
 		afterUserId,
+		throughUserId,
 		limit,
 	}: {
 		guildId: GuildID;
 		requestCache: RequestCache;
 		afterUserId?: UserID;
+		throughUserId?: UserID;
 		limit?: number;
 	}): Promise<RpcResponseGuildCollectionData> {
 		if (!afterUserId) {
 			await this.getGuildOrThrow(guildId);
 		}
 		const chunkSize = this.resolveGuildCollectionLimit(limit);
-		const members = await this.guildRepository.listMembersPaginated(guildId, chunkSize + 1, afterUserId);
+		const members =
+			throughUserId === undefined
+				? await this.guildRepository.listMembersPaginated(guildId, chunkSize + 1, afterUserId)
+				: await this.guildRepository.listMembersInRange(guildId, chunkSize + 1, afterUserId, throughUserId);
 		const hasMore = members.length > chunkSize;
 		const pageMembers = hasMore ? members.slice(0, chunkSize) : members;
+		// 游标覆盖原数据库页，不因未知用户映射被过滤而跳失区间。
+		const pageFirstUserId = pageMembers[0]?.userId.toString() ?? null;
+		const pageLastUserId = pageMembers.at(-1)?.userId.toString() ?? null;
 		const mappedMembers = await this.mapRpcGuildMembers({guildId, members: pageMembers, requestCache});
 		let nextAfterUserId: string | null = null;
 		if (hasMore) {
@@ -1465,6 +1553,9 @@ export class RpcService {
 			members: mappedMembers,
 			has_more: hasMore,
 			next_after_user_id: nextAfterUserId,
+			page_first_user_id: pageFirstUserId,
+			page_last_user_id: pageLastUserId,
+			page_row_count: pageMembers.length,
 		};
 	}
 
@@ -1717,21 +1808,15 @@ export class RpcService {
 		return resolveLimitSafe(this.limitConfigService.getConfigSnapshot(), ctx, key, fallback);
 	}
 
+	/** 批量读取通知设置并保持 RPC 响应与输入用户逐项对齐 */
 	private async getUserGuildSettings(params: {userIds: Array<UserID>; guildId: GuildID}): Promise<{
+		/** 按请求用户顺序排列的设置，缺失项为 null */
 		user_guild_settings: Array<UserGuildSettings | null>;
 	}> {
+		// 保留个人设置的零社区映射，避免在 RPC 层逐用户发起查询。
 		const {userIds, guildId} = params;
 		const actualGuildId = guildId === createGuildID(0n) ? null : guildId;
-		const settled = await allSettledWithConcurrency(userIds, RPC_RESPONSE_MAP_CONCURRENCY, (userId) =>
-			this.userRepository.findGuildSettings(userId, actualGuildId),
-		);
-		const userGuildSettings: Array<UserGuildSettings | null> = [];
-		for (const result of settled) {
-			if (result.status === 'rejected') {
-				throw result.reason;
-			}
-			userGuildSettings.push(result.value);
-		}
+		const userGuildSettings = await this.userRepository.findGuildSettingsBatch(userIds, actualGuildId);
 		return {user_guild_settings: userGuildSettings};
 	}
 

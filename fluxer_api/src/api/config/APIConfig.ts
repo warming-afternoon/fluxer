@@ -82,6 +82,21 @@ export interface APIConfig {
 	headersTimeoutMs: number;
 	requestTimeoutMs: number;
 	maxInflightRequests: number;
+	apiInstances?: number;
+	/** Combine channel authorization context, member and permissions in one Gateway RPC. */
+	/** 默认启用合并授权，显式关闭时恢复旧网关调用链。 */
+	combinedChannelAuthEnabled?: boolean;
+	/** Combine global and route limits on standalone KV; Cluster retains sequential checks. */
+	/** 默认启用有序联合限流，集群保留原有单键语义。 */
+	combinedRateLimitEnabled?: boolean;
+	/** 单独控制两项已读优化，默认沿用旧链路。 */
+	readState?: {
+		/** 合并已读后的两次网关调用。 */
+		combinedGatewayRpcEnabled: boolean;
+
+		/** 会话已读请求采用窄字段认证。 */
+		narrowAuthEnabled: boolean;
+	};
 	automatedMessageDeletionDelayDays: number;
 	ipBanExemptIps: Array<string>;
 	cassandra: {
@@ -104,9 +119,15 @@ export interface APIConfig {
 		maxConnections: number;
 		kvTable: string;
 		preparedStatements: boolean;
+		/** 是否启用跨请求收集窗口 */
+		readStateBatchingEnabled: boolean;
+		/** 是否启用带数据库失效通知的频道元数据缓存 */
+		channelMetadataCacheEnabled: boolean;
+		guildAvailabilityCacheEnabled: boolean;
 	};
 	database: {
 		backend: 'cassandra' | 'postgres';
+		metadataCache?: {channelEnabled: boolean; guildEnabled: boolean};
 	};
 	kv: {
 		url: string;

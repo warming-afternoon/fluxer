@@ -27,7 +27,7 @@
 -define(FLIP_RETRIES, 5).
 -define(FLIP_RETRY_DELAY_MS, 1000).
 -define(MEMBER_PAGE_LIMIT, 1000).
--define(MEMBER_PAGES_PER_THREAD, 2).
+-define(MEMBER_PAGES_PER_THREAD, 200).
 -define(MEMBER_THREAD_BATCH, 100).
 -define(FETCH_COUNTS_KEY, {?MODULE, fetch_counts}).
 -define(EXTRA_KEYS, [thread_gate, thread_tainted, thread_load, thread_rows, thread_rows_at]).
@@ -100,6 +100,7 @@ with_paged_members(GuildId, Threads, Data) ->
         Id
      || T <- Threads, is_map(T), Id <- [maps:get(<<"id">>, T, undefined)], is_binary(Id)
     ],
+
     try fetch_thread_members(GuildId, ThreadIds, []) of
         {ok, Members} -> {ok, Data#{<<"thread_members">> => Members}};
         {error, Reason} -> {error, Reason}
@@ -141,11 +142,17 @@ member_batches(Ids, Acc) ->
     integer(), [binary()], binary() | undefined, [[map()]], non_neg_integer()
 ) ->
     {ok, [[map()]]} | {error, term()}.
-fetch_member_pages(_GuildId, [], _After, Acc, _PagesLeft) ->
-    {ok, Acc};
-fetch_member_pages(_GuildId, _ThreadIds, _After, _Acc, 0) ->
-    {error, thread_member_page_budget_exhausted};
 fetch_member_pages(GuildId, ThreadIds, After, Acc, PagesLeft) ->
+    fetch_member_pages_counted(GuildId, ThreadIds, After, Acc, PagesLeft, #{}).
+
+%% 总批次预算之外逐帖记页数，不能让单个异常帖子借用其他帖子的预算。
+-spec fetch_member_pages_counted(integer(), [binary()], binary() | undefined,
+    [[map()]], non_neg_integer(), map()) -> {ok, [[map()]]} | {error, term()}.
+fetch_member_pages_counted(_GuildId, [], _After, Acc, _PagesLeft, _Counts) ->
+    {ok, Acc};
+fetch_member_pages_counted(_GuildId, _ThreadIds, _After, _Acc, 0, _Counts) ->
+    {error, thread_member_page_budget_exhausted};
+fetch_member_pages_counted(GuildId, ThreadIds, After, Acc, PagesLeft, Counts0) ->
     Request0 = #{
         <<"type">> => <<"list_thread_members">>,
         <<"guild_id">> => integer_to_binary(GuildId),
@@ -159,6 +166,8 @@ fetch_member_pages(GuildId, ThreadIds, After, Acc, PagesLeft) ->
         end,
     case rpc_client:call(Request) of
         {ok, #{<<"members">> := Members} = Page} when is_list(Members) ->
+
+            Counts = count_member_pages(Members, ThreadIds, Counts0),
             Acc1 = [[M || M <- Members, is_map(M)] | Acc],
             case next_member_cursor(Page, ThreadIds) of
                 done ->
@@ -168,7 +177,8 @@ fetch_member_pages(GuildId, ThreadIds, After, Acc, PagesLeft) ->
                         true ->
                             {error, non_advancing_thread_member_cursor};
                         false ->
-                            fetch_member_pages(GuildId, Remaining, Next, Acc1, PagesLeft - 1)
+                            fetch_member_pages_counted(GuildId, Remaining, Next, Acc1,
+                                PagesLeft - 1, Counts)
                     end;
                 invalid ->
                     {error, invalid_thread_members_page}
@@ -178,6 +188,21 @@ fetch_member_pages(GuildId, ThreadIds, After, Acc, PagesLeft) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+%% 只遍历本页记录与最多百个帖子的小计数，不展开成员全集。
+-spec count_member_pages([map()], [binary()], map()) -> map().
+count_member_pages(Members, ThreadIds, Counts) ->
+    true = length(Members) =< ?MEMBER_PAGE_LIMIT,
+    Allowed = maps:from_keys(ThreadIds, true),
+    Touched = maps:from_keys([hd(ThreadIds) | [maps:get(<<"id">>, M) || M <- Members]], true),
+    maps:fold(fun(ThreadId, true, Acc) ->
+        true = maps:is_key(ThreadId, Allowed),
+        Next = maps:get(ThreadId, Acc, 0) + 1,
+        case Next =< ?MEMBER_PAGES_PER_THREAD of
+            true -> Acc#{ThreadId => Next};
+            false -> error(thread_member_page_budget_exhausted)
+        end
+    end, Counts, Touched).
 
 -spec next_member_cursor(map(), [binary()]) ->
     done | invalid | {[binary()], binary() | undefined}.
@@ -332,6 +357,7 @@ put_store(Tab, Status, State) ->
 
 -spec apply_payload(payload() | map(), guild_state()) -> guild_state().
 apply_payload(Payload, State) ->
+
     case guild_thread_gate:store(State) of
         undefined ->
             State;
@@ -339,7 +365,9 @@ apply_payload(Payload, State) ->
             ok = guild_thread_store:load(
                 Tab, maps:get(threads, Payload, []), maps:get(members, Payload, [])
             ),
-            merge_parent_settings(maps:get(parent_settings, Payload, []), State)
+            Applied = merge_parent_settings(maps:get(parent_settings, Payload, []), State),
+
+            Applied
     end.
 
 -spec merge_parent_settings([map()], guild_state()) -> guild_state().
@@ -470,7 +498,9 @@ handle_load_result(Ref, Result, #{thread_load := #{ref := Ref} = Load} = State) 
                 thread_load => #{status => ready, queue => [], queued => 0, attempt => 0}
             }),
             State3 = replay(lists:reverse(maps:get(queue, Load, [])), State2),
-            guild_thread_subscriptions:resync_after_load(State3);
+            Ready = guild_thread_subscriptions:resync_after_load(State3),
+
+            Ready;
         {{ok, _Payload}, undefined} ->
             maps:remove(thread_load, State);
         {_Error, _Tab} ->
@@ -508,6 +538,7 @@ replay(Events, State) ->
 
 -spec deactivate(guild_state()) -> guild_state().
 deactivate(State) ->
+    CleanState = guild_thread_lifecycle:cleanup(State),
     Data = maps:get(data, State),
     ok = guild_thread_store:retire(maps:get(thread_store, Data, undefined)),
     _ =
@@ -516,7 +547,7 @@ deactivate(State) ->
             _ -> false
         end,
     guild_thread_watches:clear(
-        maps:remove(thread_load, State#{data => maps:remove(thread_store, Data)})
+        maps:remove(thread_load, CleanState#{data => maps:remove(thread_store, Data)})
     ).
 
 -spec list_field(binary(), map()) -> [map()].
@@ -637,7 +668,7 @@ handoff_export_respects_the_row_budget_test() ->
         data => Data, thread_load => #{status => ready, queue => [], queued => 0}
     }),
     ?assertNot(maps:is_key(thread_store, Exported)),
-    ?assertEqual(2, length(maps:get(thread_rows, Exported))),
+    ?assertEqual(3, length(maps:get(thread_rows, Exported))),
     guild_thread_store:destroy(Tab).
 
 handoff_export_while_loading_forces_a_refetch_test() ->

@@ -9,8 +9,10 @@ import {
 	type RoleID,
 	type UserID,
 } from '@app/api/BrandedTypes';
+import {ChannelDataRepository} from '@app/api/channel/repositories/ChannelDataRepository';
 import {isOperationDisabled} from '@app/api/channel/services/message/MessageHelpers';
 import type {MessageResponseDataService} from '@app/api/channel/services/message/MessageResponseDataService';
+import {ThreadMentionDecisionService} from '@app/api/channel/services/message/ThreadMentionDecisionService';
 import {isPersonalNotesChannelId} from '@app/api/channel/services/PersonalNotesChannelRepair';
 import type {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
 import type {GatewayChannelMention, IGatewayService} from '@app/api/infrastructure/IGatewayService';
@@ -478,6 +480,7 @@ export class MessageMentionService {
 	}
 
 	async handleMentionTasks(params: {
+		channel?: Channel;
 		guildId: GuildID | null;
 		message: Message;
 		authorId: UserID;
@@ -488,15 +491,24 @@ export class MessageMentionService {
 		const mentionUserIds = Array.from(message.mentionedUserIds ?? []);
 		const mentionRoleIds = Array.from(message.mentionedRoleIds ?? []);
 		const mentionEveryone = message.mentionEveryone && !mentionHere;
+		// 旧的非公会调用仍兼容；公会调用缺上下文时读取真实频道，不能猜测为普通频道。
+		const channel =
+			params.channel ?? (guildId ? await new ChannelDataRepository().findUnique(message.channelId) : null);
+		if (guildId && !channel) throw new Error('Missing channel context for mention task');
+		const threadDecision = channel
+			? await new ThreadMentionDecisionService().ensure(channel, message, this.gatewayService)
+			: null;
+		if (threadDecision && threadDecision.direct_user_ids.length === 0 && threadDecision.role_user_ids.length === 0)
+			return;
 		const taskData = {
 			guildId: guildId?.toString(),
 			channelId: message.channelId.toString(),
 			messageId: message.id.toString(),
 			authorId: authorId.toString(),
-			mentionHere,
-			mentionEveryone,
+			mentionHere: threadDecision ? false : mentionHere,
+			mentionEveryone: threadDecision ? false : mentionEveryone,
 			mentionUserIds: mentionUserIds.map((userId) => userId.toString()),
-			mentionRoleIds: mentionRoleIds.map((roleId) => roleId.toString()),
+			mentionRoleIds: threadDecision ? [] : mentionRoleIds.map((roleId) => roleId.toString()),
 		};
 		const hasMentions =
 			mentionUserIds.length > 0 ||

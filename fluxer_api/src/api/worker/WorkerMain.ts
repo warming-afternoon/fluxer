@@ -17,6 +17,7 @@ import {setActivityProcessChannel} from '@app/api/infrastructure/activity/Activi
 import {startSharedListWatch, stopSharedListWatch} from '@app/api/infrastructure/activity/SharedLists';
 import type {ISnowflakeService} from '@app/api/infrastructure/ISnowflakeService';
 import {shutdownStorageChangeFeed} from '@app/api/infrastructure/StorageServiceFactory';
+import {ThreadMentionComponentLease} from '@app/api/infrastructure/ThreadMentionComponentLease';
 import type {InstanceConfigRepository} from '@app/api/instance/InstanceConfigRepository';
 import {JobLedgerRepository} from '@app/api/jobs/JobLedgerRepository';
 import {Logger} from '@app/api/Logger';
@@ -141,6 +142,7 @@ export async function startWorkerMain(): Promise<void> {
 	let instanceConfigRepository: InstanceConfigRepository | null = null;
 	let dependencies: WorkerDependencies | null = null;
 	let cron: CronScheduler | null = null;
+	let threadMentionComponentLease: ThreadMentionComponentLease | null = null;
 	let metricsServer: ServerType | null = null;
 	const heartbeat = new WorkerHeartbeat({logger: Logger});
 	const runners: Array<WorkerRunner> = [];
@@ -157,6 +159,7 @@ export async function startWorkerMain(): Promise<void> {
 
 	const performShutdown = async (): Promise<void> => {
 		Logger.info('Shutting down worker backend...');
+		threadMentionComponentLease?.stop();
 		const voiceShutdown = cleanupStep('voice resources', shutdownVoiceResources);
 		await cleanupStep('heartbeat', () => heartbeat.stop());
 		await cleanupStep('metrics server', () => {
@@ -384,6 +387,10 @@ export async function startWorkerMain(): Promise<void> {
 			Logger.info('Cron scheduler disabled for this worker process');
 		}
 		await Promise.all(runners.map((runner) => runner.start()));
+		if (activeWorkerLanes.some((lane) => lane.taskTypes.includes('handleMentions'))) {
+			threadMentionComponentLease = new ThreadMentionComponentLease(dependencies.gatewayService, 'worker');
+			threadMentionComponentLease.start();
+		}
 		Logger.info(
 			{lanes: activeWorkerLanes.map((l) => `${l.name}(${l.concurrency})`).join(', ')},
 			'Worker runners started',

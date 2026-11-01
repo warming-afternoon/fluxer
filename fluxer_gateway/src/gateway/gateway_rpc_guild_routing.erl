@@ -134,7 +134,12 @@ call_owner_guild_manager(GuildId, Request, Timeout) ->
 ) -> term().
 call_guild_manager_node(TargetNode, Request, Timeout) ->
     Ref = guild_manager_ref(TargetNode),
-    try gen_server:call(Ref, Request, Timeout) of
+    call_guild_manager_ref(Ref, Request, Timeout).
+
+%% 把调用方已有预算传入manager，避免分片转发悄悄退回默认五秒。
+-spec call_guild_manager_ref(gen_server:server_ref(), term(), pos_integer()) -> term().
+call_guild_manager_ref(Ref, Request, Timeout) ->
+    try gen_server:call(Ref, {with_timeout, Request, Timeout}, Timeout) of
         Reply -> Reply
     catch
         exit:{timeout, _} -> {error, timeout};

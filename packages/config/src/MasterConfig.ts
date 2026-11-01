@@ -159,6 +159,23 @@ export interface MasterConfig {
 			};
 		};
 		gateway: {
+			/** 所有 API 和提及后台升级并排空旧任务后才能启用。 */
+			thread_mentions?: {
+				/** 显式开启完整角色提及协议。 */
+				enabled: boolean;
+
+				/** 预期 API 实例数量，必须与清单一致。 */
+				expected_api_instances: number;
+
+				/** 预期 worker 实例数量，必须与清单一致。 */
+				expected_worker_instances: number;
+
+				/** 稳定的 API 实例身份清单。 */
+				expected_api_instance_ids: Array<string>;
+
+				/** 稳定的 worker 实例身份清单。 */
+				expected_worker_instance_ids: Array<string>;
+			};
 			/** 是否发送逐项保留结果的清理批次；升级前先启用全部接收端。 */
 			clear_batch_enabled?: boolean;
 

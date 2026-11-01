@@ -85,7 +85,7 @@ after_delivery(thread_members_update, Data, State) ->
             State
     end;
 after_delivery(_Event, _Data, State) ->
-    State.
+    guild_thread_lifecycle:after_delivery(_Event, _Data, State).
 
 -spec handle_event(atom(), map(), guild_state()) -> {[delivery()], guild_state()}.
 handle_event(thread_create, Data, State) ->
@@ -144,7 +144,8 @@ thread_update(Data, State0) ->
     State = guild_thread_watches:event(
         thread_update,
         Data,
-        guild_state_threads:apply_event(thread_update, Data, State0)
+        guild_thread_lifecycle:restore_members(ThreadId,
+            guild_state_threads:apply_event(thread_update, Data, State0))
     ),
     After = thread_or_context(ThreadId, Data, State),
     Viewers =
@@ -216,8 +217,9 @@ unarchive_member_updates(ThreadId, Thread, Viewers, #{id := GuildId} = State, Me
 -spec thread_delete(map(), guild_state()) -> {[delivery()], guild_state()}.
 thread_delete(Data, State0) ->
     ThreadId = snowflake_id:parse(maps:get(<<"id">>, Data)),
-    Thread = thread_or_context(ThreadId, Data, State0),
-    Joined = joined_or_interested(ThreadId, State0),
+    AudienceState = guild_thread_lifecycle:delete_state(ThreadId, Data, State0),
+    Thread = thread_or_context(ThreadId, Data, AudienceState),
+    Joined = joined_or_interested(ThreadId, AudienceState),
     Listed = maps:from_keys(
         snowflake_id:parse_list(maps:get(<<"_fluxer_member_ids">>, Data, [])), true
     ),
@@ -226,7 +228,7 @@ thread_delete(Data, State0) ->
             is_map_key(maps:get(user_id, Session, undefined), Listed)
     end,
     {Recipients, _Memo} = metadata_recipients(
-        Thread, event_sessions(Thread, [], State0), State0, Wants, #{}
+        Thread, event_sessions(Thread, [], AudienceState), AudienceState, Wants, #{}
     ),
     Payload = maps:with([<<"id">>, <<"guild_id">>, <<"parent_id">>, <<"type">>], Data),
     State = guild_thread_watches:remove_thread(
@@ -466,24 +468,19 @@ event_sessions(Thread, Users, State) ->
     case Parent of
         #{<<"type">> := Type} when Type =:= 15; Type =:= 16 ->
             Id = snowflake_id:parse(maps:get(<<"id">>, Thread)),
-            Members =
-                case guild_thread_gate:thread(Id, State) of
-                    undefined ->
-                        snowflake_id:parse_list(maps:get(<<"_fluxer_member_ids">>, Thread, []));
-                    _ ->
-                        guild_thread_store:member_ids(guild_thread_gate:store(State), Id)
-                end,
-            Sessions = maps:get(sessions, State, #{}),
-            Candidates = maps:merge(
-                guild_online_session_index:for_users(Sessions, Members ++ Users),
-                maps:with(guild_thread_watches:sessions(Id, State), Sessions)
-            ),
+            %% 元数据事件只检查在线会话的关系，不复制十万成员ID作为中间候选。
+            Tab = guild_thread_gate:store(State),
+            Known = guild_thread_gate:thread(Id, State) =/= undefined,
+            Listed = maps:from_keys(snowflake_id:parse_list(
+                maps:get(<<"_fluxer_member_ids">>, Thread, [])), true),
+            Extra = maps:from_keys(Users, true),
+            Watches = maps:from_keys(guild_thread_watches:sessions(Id, State), true),
             [
                 {Sid, S}
-             || {Sid, S} <- maps:to_list(Candidates),
-                guild_thread_gate:session_viewer(S),
-                maps:get(pending_connect, S, false) =/= true,
-                is_pid(maps:get(pid, S, undefined))
+             || {Sid, #{user_id := UserId} = S} <- viewer_sessions(State),
+                maps:is_key(Sid, Watches) orelse maps:is_key(UserId, Extra) orelse
+                    (Known andalso guild_thread_store:is_member(Tab, Id, UserId)) orelse
+                    (not Known andalso maps:is_key(UserId, Listed))
             ];
         _ ->
             viewer_sessions(State)

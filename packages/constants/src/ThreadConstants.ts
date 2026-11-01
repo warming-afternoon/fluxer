@@ -125,7 +125,7 @@ export const FORUM_TOPIC_MAX_LENGTH = 4096;
 export const MAX_FORUM_TAGS_PER_CHANNEL = 20;
 export const FORUM_TAG_NAME_MAX_LENGTH = 50;
 export const MAX_APPLIED_TAGS_PER_THREAD = 5;
-export const MAX_THREAD_MEMBERS = 1000;
+export const MAX_THREAD_MEMBERS = 100000;
 export const THREAD_MEMBER_COUNT_DISPLAY_CAP = 50;
 export const THREAD_MEMBER_IDS_PREVIEW_SIZE = 8;
 // 每个社区允许同时保持活跃的线程数量

@@ -320,7 +320,11 @@ export class RpcService {
 			case 'guild_member_bounds': {
 				const guildId = createGuildID(request.guild_id);
 				await this.getGuildOrThrow(guildId);
-				const bounds = await this.guildRepository.getMemberIdBounds(guildId);
+				const bounds = await this.guildRepository.getMemberIdBounds(
+					guildId,
+					request.after_user_id ? createUserID(request.after_user_id) : undefined,
+					request.through_user_id ? createUserID(request.through_user_id) : undefined,
+				);
 				return {
 					type: 'guild_member_bounds',
 					data: {min_user_id: bounds.minUserId?.toString() ?? null, max_user_id: bounds.maxUserId?.toString() ?? null},
@@ -592,6 +596,7 @@ export class RpcService {
 						threadIds: request.thread_ids.map(createChannelID),
 						limit: request.limit ?? THREAD_MEMBERS_RPC_DEFAULT_LIMIT,
 						after: request.after_user_id !== undefined ? createUserID(request.after_user_id) : undefined,
+						expectedStateVersion: request.expected_state_version,
 					}),
 				};
 			case 'forum_unreads': {
@@ -1486,6 +1491,9 @@ export class RpcService {
 				: await this.guildRepository.listMembersInRange(guildId, chunkSize + 1, afterUserId, throughUserId);
 		const hasMore = members.length > chunkSize;
 		const pageMembers = hasMore ? members.slice(0, chunkSize) : members;
+		// 游标覆盖原数据库页，不因未知用户映射被过滤而跳失区间。
+		const pageFirstUserId = pageMembers[0]?.userId.toString() ?? null;
+		const pageLastUserId = pageMembers.at(-1)?.userId.toString() ?? null;
 		const mappedMembers = await this.mapRpcGuildMembers({guildId, members: pageMembers, requestCache});
 		let nextAfterUserId: string | null = null;
 		if (hasMore) {
@@ -1500,6 +1508,9 @@ export class RpcService {
 			members: mappedMembers,
 			has_more: hasMore,
 			next_after_user_id: nextAfterUserId,
+			page_first_user_id: pageFirstUserId,
+			page_last_user_id: pageLastUserId,
+			page_row_count: pageMembers.length,
 		};
 	}
 

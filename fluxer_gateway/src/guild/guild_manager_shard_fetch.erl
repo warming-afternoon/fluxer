@@ -68,12 +68,18 @@ await_collection(Ref, PendingCollections, Acc, DeadlineMs, RemainingMs) ->
         {error, {guild_collection_fetch_timeout, PendingCollections}}
     end.
 
+%% 分别加载完整集合，成员分页结束才发布完整性证明。
 -spec fetch_guild_collection(guild_id(), binary()) ->
     {ok, term()} | {ok, term(), map()} | {error, term()}.
 fetch_guild_collection(GuildId, <<"members">>) ->
-    case fluxer_gateway_env:get_optional(guild_member_load_concurrency) of
+    Result = case fluxer_gateway_env:get_optional(guild_member_load_concurrency) of
         N when N =:= 2; N =:= 4; N =:= 8 -> fetch_members_parallel(GuildId, N);
         _ -> fetch_members_stream(GuildId, undefined, [])
+    end,
+    %% 只有完整分页成功才发布角色计数可用证明，不能把部分缓存当作完整人数。
+    case Result of
+        {ok, Members} -> {ok, Members, #{members_complete => true, members_loaded_count => length(Members)}};
+        Error -> Error
     end;
 fetch_guild_collection(GuildId, <<"channels">>) ->
     RpcRequest = #{
@@ -162,51 +168,22 @@ maybe_put_after(undefined, RpcRequest) ->
 maybe_put_after(AfterUserId, RpcRequest) when is_binary(AfterUserId) ->
     RpcRequest#{<<"after_user_id">> => AfterUserId}.
 
-%% The outer ranges remain open: bounds are scheduling hints, not a snapshot.
+%% 从开放根区间开始，完成页之后才用有界端点探针拆分未提交的后缀。
+-spec fetch_members_parallel(guild_id(), pos_integer()) -> {ok, [map()]} | {error, term()}.
 fetch_members_parallel(GuildId, N) ->
-    case
-        rpc_client:call(#{
-            <<"type">> => <<"guild_member_bounds">>,
-            <<"guild_id">> => type_conv:to_binary(GuildId)
-        })
-    of
-        {ok, #{<<"min_user_id">> := Min, <<"max_user_id">> := Max}} ->
-            case member_ranges(Min, Max, N) of
-                {ok, Ranges} ->
-                    Fetch = fun({Index, {After, Through}}) ->
-                        fetch_member_range(GuildId, Index, After, Through, [], N)
-                    end,
-                    case guild_thread_member_loader:run(lists:enumerate(Ranges), N, Fetch) of
-                        {ok, Chunks} -> {ok, lists:append(Chunks)};
-                        Error -> Error
-                    end;
-                Error ->
-                    Error
-            end;
-        {error, Reason} ->
-            {error, Reason};
-        _ ->
-            {error, invalid_member_bounds}
+    Page = fun({After, Through}) -> adaptive_member_page(GuildId, After, Through) end,
+    Probe = fun({After, Through}) -> adaptive_member_bounds(GuildId, After, Through) end,
+    Deadline = erlang:monotonic_time(millisecond) + ?GUILD_COLLECTION_FETCH_TIMEOUT_MS,
+    case guild_member_range_loader:run(GuildId, min(N, 4), Page, Probe, Deadline) of
+        {error, {member_page_failed, {error, legacy_member_page}}} ->
+            %% 旧API不返回coverage时丢弃已收集分片，从开放根重新串行加载。
+            %% 外层集合截止时间不变，旧响应从不被当作现代覆盖证明。
+            fetch_members_stream(GuildId, undefined, []);
+        Result -> Result
     end.
 
-member_ranges(null, null, _N) ->
-    {ok, [{undefined, undefined}]};
-member_ranges(Min0, Max0, N) ->
-    case {member_id(Min0), member_id(Max0)} of
-        {{ok, Min}, {ok, Max}} when Min =< Max ->
-            Bounds = lists:usort([
-                B
-             || I <- lists:seq(1, N - 1),
-                B <- [Min + ((Max - Min + 1) * I div N) - 1],
-                B >= Min,
-                B < Max
-            ]),
-            Bins = [integer_to_binary(B) || B <- Bounds],
-            {ok, lists:zip([undefined | Bins], Bins ++ [undefined])};
-        _ ->
-            {error, invalid_member_bounds}
-    end.
-
+%% 保留十进制精确ID，不经浮点数转换。
+-spec member_id(term()) -> {ok, pos_integer()} | error.
 member_id(B) when is_binary(B) ->
     try binary_to_integer(B) of
         I when I > 0 ->
@@ -222,43 +199,70 @@ member_id(B) when is_binary(B) ->
 member_id(_) ->
     error.
 
-fetch_member_range(GuildId, Index, After, Through, Acc, N) ->
-    Request0 = maybe_put_after(After, #{
-        <<"type">> => <<"guild_member_range">>,
+%% 同一页RPC失败可重试，覆盖验证失败必须使完整fetch失败。
+-spec adaptive_member_page(guild_id(), integer() | undefined, integer() | undefined) -> term().
+adaptive_member_page(GuildId, After, Through) ->
+    Request = member_range_request(GuildId, <<"guild_member_range">>, After, Through),
+    case rpc_client:call(Request) of
+        {ok, Data} ->
+            case validated_range_page(Data, bound_binary(After), bound_binary(Through)) of
+                {ok, Members, Next} ->
+                    Cursor = case Next of null -> null; _ -> binary_to_integer(Next) end,
+                    {ok, Members, Cursor};
+                Error -> Error
+            end;
+        {error, Reason} ->
+            case rpc_client:is_retryable(Reason) of
+                true -> {error, {retryable, Reason}};
+                false -> {error, Reason}
+            end;
+        _ -> {error, invalid_members_range_response}
+    end.
+
+%% 探针只读取原区间内的索引首尾，错误由协调器显式回退同一区间分页。
+-spec adaptive_member_bounds(guild_id(), integer() | undefined, integer() | undefined) -> term().
+adaptive_member_bounds(GuildId, After, Through) ->
+    Request = member_range_request(GuildId, <<"guild_member_bounds">>, After, Through),
+    case rpc_client:call(Request) of
+        {ok, #{<<"min_user_id">> := Min, <<"max_user_id">> := Max}} ->
+            case {member_id(Min), member_id(Max)} of
+                {{ok, A}, {ok, B}} -> {ok, A, B};
+                _ -> {error, empty_or_invalid_member_bounds}
+            end;
+        Error -> Error
+    end.
+
+%% 页与探针共享完全相同的排他下界和包含上界，开放根端点保持不传。
+-spec member_range_request(guild_id(), binary(), integer() | undefined, integer() | undefined) -> map().
+member_range_request(GuildId, Type, After, Through) ->
+    Request0 = maybe_put_after(bound_binary(After), #{
+        <<"type">> => Type,
         <<"guild_id">> => type_conv:to_binary(GuildId),
         <<"limit">> => 1000
     }),
     Request =
         case Through of
             undefined -> Request0;
-            _ -> Request0#{<<"through_user_id">> => Through}
+            _ -> Request0#{<<"through_user_id">> => integer_to_binary(Through)}
         end,
-    case rpc_client:call(Request) of
-        {ok, Data} ->
-            case validated_range_page(Data, After, Through) of
-                {ok, Members, Next} ->
-                    case Next of
-                        null ->
-                            {ok, lists:append(lists:reverse([Members | Acc]))};
-                        _ ->
-                            fetch_member_range(
-                                GuildId, Index, Next, Through, [Members | Acc], N
-                            )
-                    end;
-                Error ->
-                    Error
-            end;
-        {error, Reason} ->
-            {error, Reason};
-        _ ->
-            {error, invalid_members_range_response}
-    end.
+    case Type of <<"guild_member_bounds">> -> maps:remove(<<"limit">>, Request); _ -> Request end.
 
+%% 仅RPC线格式使用十进制binary，协调器保持任意精度整数。
+-spec bound_binary(integer() | undefined) -> binary() | undefined.
+bound_binary(undefined) -> undefined;
+bound_binary(Value) -> integer_to_binary(Value).
+
+%% 验证原数据库页覆盖证明，允许未知用户映射被过滤但禁止cursor跳过未覆盖区间。
+-spec validated_range_page(term(), binary() | undefined, binary() | undefined) ->
+    {ok, [map()], binary() | null} | {error, term()}.
 validated_range_page(
     #{
         <<"members">> := Members,
         <<"has_more">> := More,
-        <<"next_after_user_id">> := Next
+        <<"next_after_user_id">> := Next,
+        <<"page_first_user_id">> := First0,
+        <<"page_last_user_id">> := Last0,
+        <<"page_row_count">> := Count
     },
     After,
     Through
@@ -280,11 +284,23 @@ validated_range_page(
                     {ok, U} = member_id(Through),
                     U
             end,
-        Last = lists:foldl(
+        true = is_integer(Count) andalso Count >= 0 andalso Count =< 1000,
+        true = length(Members) =< Count,
+        Coverage = case Count of
+            0 -> true = First0 =:= null andalso Last0 =:= null, {Lower, Lower};
+            _ ->
+                {ok, First} = member_id(First0), {ok, Last} = member_id(Last0),
+                true = First > Lower andalso Last >= First,
+                true = Last - First + 1 >= Count,
+                true = Upper =:= infinity orelse Last =< Upper,
+                {First, Last}
+        end,
+        {CoverageFirst, CoverageLast} = Coverage,
+        _ = lists:foldl(
             fun(#{<<"user">> := #{<<"id">> := Id}}, Prev) ->
                 {ok, I} = member_id(Id),
                 true = I > Prev,
-                true = (Upper =:= infinity orelse I =< Upper),
+                true = I >= CoverageFirst andalso I =< CoverageLast,
                 I
             end,
             Lower,
@@ -295,13 +311,20 @@ validated_range_page(
                 {ok, Members, null};
             {true, Cursor} ->
                 {ok, C} = member_id(Cursor),
-                true = C > Lower,
-                true = C >= Last,
-                true = (Upper =:= infinity orelse C =< Upper),
+                true = Count > 0 andalso C =:= CoverageLast andalso C > Lower,
                 {ok, Members, Cursor}
         end
     catch
         _:_ -> {error, invalid_members_range_page}
+    end;
+validated_range_page(#{<<"members">> := Members, <<"has_more">> := More,
+    <<"next_after_user_id">> := _Next} = Data, _After, _Through)
+    when is_list(Members), is_boolean(More) ->
+    case not maps:is_key(<<"page_first_user_id">>, Data) andalso
+        not maps:is_key(<<"page_last_user_id">>, Data) andalso
+        not maps:is_key(<<"page_row_count">>, Data) of
+        true -> {error, legacy_member_page};
+        false -> {error, invalid_members_range_page}
     end;
 validated_range_page(_, _, _) ->
     {error, invalid_members_range_page}.

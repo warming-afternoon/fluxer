@@ -146,11 +146,17 @@ interface GuildMemberPageBounds {
 	/** 可选的排他用户 ID 游标 */
 	after?: bigint;
 
+	/** 可选的包含式用户ID上界。 */
+	through?: bigint;
+
+	/** 有界端点探针支持沿同一个数值索引反向读取。 */
+	direction: 'ASC' | 'DESC';
+
 	/** 数据库最多返回的成员数量 */
 	limit: number;
 }
 
-/** 仅为明确支持的成员升序分页提取边界，其余查询保留通用执行路径 */
+/** 仅为明确支持的成员有界分页与端点探针提取边界，其余查询保留通用执行路径 */
 function guildMemberPageBounds(meta: KvQueryMeta, params: CassandraParams): GuildMemberPageBounds | null {
 	// 限制表、主键、排序和条数，避免专用 SQL 改变其他查询的语义。
 	if (
@@ -163,18 +169,32 @@ function guildMemberPageBounds(meta: KvQueryMeta, params: CassandraParams): Guil
 		typeof meta.limit !== 'number' ||
 		!Number.isSafeInteger(meta.limit) ||
 		meta.limit < 0 ||
-		(meta.orderBy && (meta.orderBy.col !== 'user_id' || meta.orderBy.direction !== 'ASC'))
+		(meta.orderBy &&
+			(meta.orderBy.col !== 'user_id' || (meta.orderBy.direction !== 'ASC' && meta.orderBy.direction !== 'DESC')))
 	)
 		return null;
-	// 只接受社区等值条件及可选的用户 ID 严格大于游标条件。
+	// 只接受社区等值条件、可选的排他下界与包含式上界。
 	const where = whereClauses(meta);
 	const guild = where.find((clause) => clause.kind === 'eq' && clause.col === 'guild_id');
 	const after = where.find((clause) => clause.kind === 'gt' && clause.col === 'user_id');
-	if (!guild || where.length !== (after ? 2 : 1)) return null;
+	const through = where.find((clause) => clause.kind === 'lte' && clause.col === 'user_id');
+	if (!guild || where.length !== 1 + (after ? 1 : 0) + (through ? 1 : 0)) return null;
 	const guildId = params[guild.param];
 	const afterId = after ? params[after.param] : undefined;
-	if (typeof guildId !== 'bigint' || (after && typeof afterId !== 'bigint')) return null;
-	return {guildId, after: afterId as bigint | undefined, limit: meta.limit};
+	const throughId = through ? params[through.param] : undefined;
+	if (
+		typeof guildId !== 'bigint' ||
+		(after && typeof afterId !== 'bigint') ||
+		(through && typeof throughId !== 'bigint')
+	)
+		return null;
+	return {
+		guildId,
+		after: afterId as bigint | undefined,
+		through: throughId as bigint | undefined,
+		direction: meta.orderBy?.direction ?? 'ASC',
+		limit: meta.limit,
+	};
 }
 
 function planStatementName(prefix: string, plan: CandidatePlan): string | undefined {
@@ -1348,11 +1368,15 @@ export class PostgresKvQueryExecutor {
 			let cursor = '';
 			if (memberPage.after !== undefined) {
 				bindings.push(memberPage.after.toString());
-				cursor = ` AND ${userId} > $2::numeric`;
+				cursor += ` AND ${userId} > $${bindings.length}::numeric`;
+			}
+			if (memberPage.through !== undefined) {
+				bindings.push(memberPage.through.toString());
+				cursor += ` AND ${userId} <= $${bindings.length}::numeric`;
 			}
 			bindings.push(memberPage.limit);
 			const result = await db.query<StoredRow>(
-				`SELECT kv.row_key, kv.row_data FROM ${this.table} kv WHERE kv.table_name = 'guild_members' AND kv.row_data -> 'guild_id' = $1::jsonb${cursor} AND (kv.expires_at IS NULL OR kv.expires_at > now()) ORDER BY ${userId} ASC LIMIT $${bindings.length}`,
+				`SELECT kv.row_key, kv.row_data FROM ${this.table} kv WHERE kv.table_name = 'guild_members' AND kv.row_data -> 'guild_id' = $1::jsonb${cursor} AND (kv.expires_at IS NULL OR kv.expires_at > now()) ORDER BY ${userId} ${memberPage.direction} LIMIT $${bindings.length}`,
 				bindings,
 			);
 			return this.matchingRows(meta, result.rows, params).map((row) =>

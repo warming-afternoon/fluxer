@@ -35,42 +35,41 @@ export function isThreadMuted(thread: Channel): boolean {
 	return ThreadMemberships.isMuted(thread.id) || isThreadParentMuted(thread);
 }
 
+/** 将旧全部通知归一为仅提及，默认值只继承父级关闭状态。 */
 export function getThreadNotificationSetting(threadId: string): ThreadNotificationSetting {
 	const flags = ThreadMemberships.get(threadId)?.flags ?? 0;
-	if ((flags & ThreadMemberFlags.ALL_MESSAGES) !== 0) return ThreadNotificationSetting.ALL_MESSAGES;
-	if ((flags & ThreadMemberFlags.ONLY_MENTIONS) !== 0) return ThreadNotificationSetting.ONLY_MENTIONS;
 	if ((flags & ThreadMemberFlags.NO_MESSAGES) !== 0) return ThreadNotificationSetting.NO_MESSAGES;
-	return ThreadNotificationSetting.DEFAULT;
+	if ((flags & (ThreadMemberFlags.ALL_MESSAGES | ThreadMemberFlags.ONLY_MENTIONS)) === 0) {
+		const thread = Channels.getChannel(threadId);
+		const parent = thread ? getThreadParent(thread) : undefined;
+		if (
+			parent &&
+			UserGuildSettings.resolveEffectiveMessageNotifications({
+				id: parent.id,
+				guildId: parent.guildId,
+				parentId: parent.parentId ?? undefined,
+				type: parent.type,
+			}) === MessageNotifications.NO_MESSAGES
+		) {
+			return ThreadNotificationSetting.NO_MESSAGES;
+		}
+	}
+	return ThreadNotificationSetting.ONLY_MENTIONS;
 }
 
+/** 所有历史可写值都只提交仅提及或关闭，不能重新写入全部消息。 */
 export function getThreadNotificationFlag(setting: ThreadNotificationSetting): number {
 	switch (setting) {
-		case ThreadNotificationSetting.ALL_MESSAGES:
-			return ThreadMemberFlags.ALL_MESSAGES;
-		case ThreadNotificationSetting.ONLY_MENTIONS:
-			return ThreadMemberFlags.ONLY_MENTIONS;
 		case ThreadNotificationSetting.NO_MESSAGES:
 			return ThreadMemberFlags.NO_MESSAGES;
 		default:
-			return 0;
+			return ThreadMemberFlags.ONLY_MENTIONS;
 	}
 }
 
+/** 帖子普通消息不能由父级全部消息设置恢复通知。 */
 export function resolveThreadNotificationLevel(thread: Channel): number {
-	switch (getThreadNotificationSetting(thread.id)) {
-		case ThreadNotificationSetting.ALL_MESSAGES:
-			return MessageNotifications.ALL_MESSAGES;
-		case ThreadNotificationSetting.ONLY_MENTIONS:
-			return MessageNotifications.ONLY_MENTIONS;
-		case ThreadNotificationSetting.NO_MESSAGES:
-			return MessageNotifications.NO_MESSAGES;
-	}
-	const parent = getThreadParent(thread);
-	if (!parent) return MessageNotifications.ONLY_MENTIONS;
-	return UserGuildSettings.resolveEffectiveMessageNotifications({
-		id: parent.id,
-		guildId: parent.guildId,
-		parentId: parent.parentId ?? undefined,
-		type: parent.type,
-	});
+	return getThreadNotificationSetting(thread.id) === ThreadNotificationSetting.NO_MESSAGES
+		? MessageNotifications.NO_MESSAGES
+		: MessageNotifications.ONLY_MENTIONS;
 }

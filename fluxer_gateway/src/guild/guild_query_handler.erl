@@ -108,6 +108,15 @@ rpc_caller_timeout_ms(_Tag) -> undefined.
 -spec handle_query(term(), gen_server:from(), guild_state()) ->
     {reply, term(), guild_state()}
     | {noreply, guild_state()}.
+handle_query({dispatch_thread_message, #{data := Data}}, _From, State) ->
+    {noreply, NextState} = guild_dispatch:handle_dispatch(message_create, Data, State),
+    {reply, true, NextState};
+handle_query({dispatch_thread_delete, Data}, _From, State) ->
+    guild_thread_lifecycle:dispatch_delete(Data, State);
+handle_query({prepare_thread_lifecycle, Request}, _From, State) ->
+    guild_thread_lifecycle:handle_prepare(Request, State);
+handle_query({resolve_thread_mention_decision, Request}, _From, State) ->
+    {reply, gateway_rpc_thread_mentions:decide(Request, State), State};
 handle_query({get_counts}, _From, State) ->
     handle_get_counts(State);
 handle_query({get_viewer_counts, #{user_id := UserId}}, _From, State) when is_integer(UserId) ->

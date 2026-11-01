@@ -85,6 +85,7 @@ env_gateway_base_config() ->
         <<"push_enrolled_clear_notifications_enabled">> => env_bool(
             "FLUXER_GATEWAY_PUSH_ENROLLED_CLEAR_NOTIFICATIONS_ENABLED", true
         ),
+        <<"thread_mentions">> => env_thread_mentions_config(),
         <<"thread_sync_rate">> => env_int("FLUXER_GATEWAY_THREAD_SYNC_RATE", 80),
         <<"thread_sync_jitter_ms">> => env_int("FLUXER_GATEWAY_THREAD_SYNC_JITTER_MS", 500),
         <<"push_outbox_max_inflight">> => env_int(
@@ -307,6 +308,7 @@ build_misc_config(Service) ->
         thread_sync_rate => positive_config(Service, <<"thread_sync_rate">>, 80),
         thread_sync_jitter_ms => positive_config(Service, <<"thread_sync_jitter_ms">>, 500),
         thread_member_load_concurrency => thread_member_concurrency(Service),
+        thread_mentions => thread_mentions_config(Service),
         guild_member_load_concurrency => guild_member_concurrency(Service),
         voice_state_counts_sync_interval_ms =>
             get_int(Service, <<"voice_state_counts_sync_interval_ms">>, 30000),
@@ -628,7 +630,6 @@ optional_string(Bin) when is_binary(Bin) -> binary_to_list(Bin).
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
-
 %% 验证批传输默认值、显式覆盖及非法环境配置。
 -spec clear_batch_default_override_and_env_validation_test() -> term().
 clear_batch_default_override_and_env_validation_test() ->
@@ -674,4 +675,70 @@ valid_internal_rpc_url(Url) ->
                 not maps:is_key(fragment, M);
         _ ->
             false
+    end.
+
+%% 真实启动环境使用严格布尔值，实例门槛由部署配置明确给定。
+-spec env_thread_mentions_config() -> map().
+env_thread_mentions_config() ->
+    #{
+        <<"enabled">> => env_bool_strict("FLUXER_GATEWAY_THREAD_MENTIONS_ENABLED", false),
+        <<"expected_api_instances">> => env_int(
+            "FLUXER_GATEWAY_THREAD_MENTIONS_EXPECTED_API_INSTANCES", 0
+        ),
+        <<"expected_worker_instances">> => env_int(
+            "FLUXER_GATEWAY_THREAD_MENTIONS_EXPECTED_WORKER_INSTANCES", 0
+        ),
+        <<"expected_api_instance_ids">> => unicode:characters_to_binary(
+            env_string(
+                "FLUXER_GATEWAY_THREAD_MENTIONS_EXPECTED_API_INSTANCE_IDS", ""
+            )
+        ),
+        <<"expected_worker_instance_ids">> => unicode:characters_to_binary(
+            env_string(
+                "FLUXER_GATEWAY_THREAD_MENTIONS_EXPECTED_WORKER_INSTANCE_IDS", ""
+            )
+        )
+    }.
+
+%% 缺少完整租约时仅使用安全回退，不恢复全帖子设备广播。
+-spec thread_mentions_config(map()) -> map().
+thread_mentions_config(Service) ->
+    Raw = maps:get(<<"thread_mentions">>, Service, #{}),
+    #{
+        enabled => maps:get(<<"enabled">>, Raw, false) =:= true,
+        expected_api_instances => max(0, get_int(Raw, <<"expected_api_instances">>, 0)),
+        expected_worker_instances => max(0, get_int(Raw, <<"expected_worker_instances">>, 0)),
+        expected_api_instance_ids => thread_mention_instance_ids(
+            maps:get(<<"expected_api_instance_ids">>, Raw, [])
+        ),
+        expected_worker_instance_ids => thread_mention_instance_ids(
+            maps:get(<<"expected_worker_instance_ids">>, Raw, [])
+        )
+    }.
+
+%% JSON 使用字符串数组，环境使用逗号分隔清单；重复或非法身份拒绝启动。
+-spec thread_mention_instance_ids(term()) -> [binary()].
+thread_mention_instance_ids(Value) ->
+    Values =
+        case Value of
+            <<>> ->
+                [];
+            Bin when is_binary(Bin) ->
+                [string:trim(Id) || Id <- binary:split(Bin, <<",">>, [global])];
+            List when is_list(List) -> List;
+            _ ->
+                error(invalid_thread_mention_instance_ids)
+        end,
+    Valid =
+        length(Values) =< 256 andalso length(lists:usort(Values)) =:= length(Values) andalso
+            lists:all(
+                fun(Id) ->
+                    is_binary(Id) andalso byte_size(Id) > 0 andalso byte_size(Id) =< 128 andalso
+                        re:run(Id, <<"^[A-Za-z0-9._:-]+$">>, [{capture, none}]) =:= match
+                end,
+                Values
+            ),
+    case Valid of
+        true -> lists:sort(Values);
+        false -> error(invalid_thread_mention_instance_ids)
     end.

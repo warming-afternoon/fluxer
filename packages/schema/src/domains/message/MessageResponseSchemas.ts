@@ -139,6 +139,10 @@ const MessageBaseResponseSchema = z.object({
 	tts: z.boolean().describe('Whether the message was sent as text-to-speech'),
 	mentions: z.array(z.lazy(() => UserPartialResponse)).describe('The users mentioned in the message'),
 	mention_roles: z.array(z.string()).describe('The role IDs mentioned in the message'),
+	thread_mention_warnings: z
+		.array(z.enum(['role_group_too_large', 'role_union_too_large', 'role_index_unavailable']))
+		.optional()
+		.describe('Reasons role device notifications and automatic thread joins were skipped'),
 	mention_channels: z
 		.array(MessageChannelMentionResponse)
 		.nullish()
@@ -354,6 +358,9 @@ export interface Message {
 	readonly edited_timestamp?: string;
 	readonly mentions: ReadonlyArray<MessageMention>;
 	readonly mention_roles: ReadonlyArray<string>;
+	readonly thread_mention_warnings?: ReadonlyArray<
+		'role_group_too_large' | 'role_union_too_large' | 'role_index_unavailable'
+	>;
 	readonly mention_channels?: ReadonlyArray<ChannelMention>;
 	readonly users?: ReadonlyArray<UserPartial>;
 	readonly embeds?: ReadonlyArray<MessageEmbed>;

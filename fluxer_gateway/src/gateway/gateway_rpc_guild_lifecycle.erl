@@ -31,8 +31,7 @@ handle_dispatch(#{<<"guild_id">> := GuildIdBin, <<"event">> := Event, <<"data">>
             "rpc guild.dispatch: guild_id=~p event=~p pid=~p alive=~p",
             [GuildId, EventAtom, Pid, IsAlive]
         ),
-        gen_server:cast(Pid, {dispatch, #{event => EventAtom, data => Data}}),
-        true
+        dispatch_request_to_owner(Pid, #{event => EventAtom, data => Data})
     end).
 
 -spec handle_dispatch_many(map()) -> term().
@@ -42,11 +41,31 @@ handle_dispatch_many(#{<<"guild_id">> := GuildIdBin, <<"events">> := Events}) wh
     GuildId = validation:snowflake_or_throw(<<"guild_id">>, GuildIdBin),
     Requests = [dispatch_request(Event) || Event <- Events],
     gateway_rpc_guild_infra:with_guild_unchecked(GuildId, fun(Pid) ->
-        gen_server:cast(Pid, {dispatch_many, Requests}),
+        %% 有票据的删除必须等待 owner 完成，不能把入队成功当作可清理 DB 的确认。
+        case lists:any(fun is_ticketed_delete/1, Requests) of
+            true -> lists:foreach(fun(Request) -> dispatch_request_to_owner(Pid, Request) end, Requests);
+            false -> gen_server:cast(Pid, {dispatch_many, Requests})
+        end,
         true
     end);
 handle_dispatch_many(_Params) ->
     gateway_rpc_error:raise(validation_invalid_params).
+
+%% 只改变带内部票据的删除，其他事件保留原异步分发契约。
+-spec dispatch_request_to_owner(pid(), map()) -> true.
+dispatch_request_to_owner(Pid, #{event := thread_delete, data := #{<<"_fluxer_lifecycle_ticket">> := _} = Data}) ->
+    case guild_query_handler:call(Pid, {dispatch_thread_delete, Data}, 4000) of
+        true -> true;
+        _ -> gateway_rpc_error:raise(<<"thread_delete_dispatch_failed">>)
+    end;
+dispatch_request_to_owner(Pid, Request) ->
+    gen_server:cast(Pid, {dispatch, Request}),
+    true.
+
+%% 识别内部删除票据，不扩大普通批量事件的同步范围。
+-spec is_ticketed_delete(map()) -> boolean().
+is_ticketed_delete(#{event := thread_delete, data := #{<<"_fluxer_lifecycle_ticket">> := _}}) -> true;
+is_ticketed_delete(_) -> false.
 
 -spec dispatch_request(term()) -> map().
 dispatch_request(#{<<"event">> := Event, <<"data">> := Data}) when is_binary(Event) ->

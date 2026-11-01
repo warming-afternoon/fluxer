@@ -5,6 +5,7 @@
 
 -export([
     scope/2,
+    mention_view/3,
     push_message_data/4,
     forum_starter/3,
     mark_forum_thread_created/1,
@@ -26,6 +27,37 @@ scope(ChannelId, State) ->
     case guild_thread_gate:store(State) of
         undefined -> undefined;
         Tab -> safe_scope(Tab, ChannelId)
+    end.
+
+%% 帖子提及只读取有界候选的成员身份；总人数单独读取小计数，不枚举关注者。
+-spec mention_view(integer(), [integer()], map()) -> map() | undefined.
+mention_view(ChannelId, UserIds, State) ->
+    case guild_thread_gate:store(State) of
+        undefined ->
+            undefined;
+        Tab ->
+            try guild_thread_store:get_thread(Tab, ChannelId) of
+                undefined ->
+                    undefined;
+                Thread ->
+                    Members = maps:from_list([
+                        {Id, true}
+                     || Id <- UserIds,
+                        guild_thread_store:is_member(Tab, ChannelId, Id)
+                    ]),
+                    #{
+                        thread => Thread,
+                        members => Members,
+                        member_ids => maps:keys(Members),
+                        member_count =>
+                            case guild_thread_store:member_count(Tab, ChannelId) of
+                                N when is_integer(N), N >= 0 -> N;
+                                unknown -> 100000
+                            end
+                    }
+            catch
+                error:badarg -> undefined
+            end
     end.
 
 -spec safe_scope(ets:table(), integer()) -> scope().

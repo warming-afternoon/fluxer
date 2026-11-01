@@ -106,6 +106,36 @@ export class NoopGatewayService implements IGatewayService {
 
 	async dispatchGuild(_params: {guildId: GuildID; event: GatewayDispatchEvent; data: unknown}): Promise<void> {}
 
+	/** 复用已有事件入口，保留派生测试替身对消息分发的记录。 */
+	async dispatchThreadMessage({guildId, data}: {guildId: GuildID; data: unknown}): Promise<void> {
+		await this.dispatchGuild({guildId, event: 'MESSAGE_CREATE', data});
+	}
+
+	/** 无真实网关的替身不宣告角色提及协议已经就绪。 */
+	async getThreadMentionCapabilities(): Promise<Awaited<ReturnType<IGatewayService['getThreadMentionCapabilities']>>> {
+		return {version: 0, api_version: 0, worker_version: 0, protocol_ready: false};
+	}
+
+	/** 测试替身不发布真实组件租约。 */
+	async registerThreadMentionComponent(_instanceId: string, _component: 'api' | 'worker'): Promise<void> {}
+
+	/** 需要角色决策的用例必须显式提供模拟结果，不能把未实现能力当成成功。 */
+	async resolveThreadMentionDecision(
+		_params: Parameters<IGatewayService['resolveThreadMentionDecision']>[0],
+	): Promise<unknown> {
+		throw new Error('Thread mention decision is not implemented by NoopGatewayService');
+	}
+
+	/** 返回稳定的本地测试票据；恢复请求沿用原票据，不模拟真实网关快照。 */
+	async prepareThreadLifecycle(
+		guildId: GuildID,
+		threadId: ChannelID,
+		stateVersion: number,
+		resumeTicket?: string,
+	): Promise<string> {
+		return resumeTicket ?? `noop:${guildId}:${threadId}:${stateVersion}`;
+	}
+
 	async dispatchGuildMany(params: {
 		guildId: GuildID;
 		events: Array<{event: GatewayDispatchEvent; data: unknown}>;

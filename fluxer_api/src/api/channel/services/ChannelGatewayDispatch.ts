@@ -15,11 +15,22 @@ interface DispatchChannelEventParams {
 	data: unknown;
 }
 
+/** 复用现有频道构造公共基础上下文，网关权限筛选后再按白名单投递。 */
 export function withThreadContext(channel: Channel, data: unknown): unknown {
 	if (!THREAD_CHANNEL_TYPES.has(channel.type) || typeof data !== 'object' || data === null) return data;
 	return {
 		...data,
-		_fluxer_thread: {id: channel.id.toString(), parent_id: channel.parentId?.toString() ?? null, type: channel.type},
+		_fluxer_thread: {
+			id: channel.id.toString(),
+			guild_id: channel.guildId?.toString(),
+			parent_id: channel.parentId?.toString() ?? null,
+			type: channel.type,
+			name: channel.name,
+			owner_id: channel.ownerId?.toString() ?? null,
+			last_message_id: channel.lastMessageId?.toString() ?? null,
+			last_pin_timestamp: channel.lastPinTimestamp?.toISOString() ?? null,
+			rate_limit_per_user: channel.rateLimitPerUser,
+		},
 	};
 }
 

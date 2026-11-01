@@ -9,6 +9,7 @@ import {
 	type ThreadDispatchEvent,
 	threadDeleteEvent,
 } from '@app/api/channel/services/thread/ThreadDispatch';
+import {prepareThreadDeletion} from '@app/api/channel/services/thread/ThreadLifecyclePreparation';
 import {serializeThreadForAudit} from '@app/api/channel/services/thread/ThreadMappers';
 import type {ThreadServiceContext} from '@app/api/channel/services/thread/ThreadServiceContext';
 import {loadThreadViews} from '@app/api/channel/services/thread/ThreadViews';
@@ -17,11 +18,7 @@ import type {ThreadState} from '@app/api/models/ThreadState';
 import {deleteChannelMessageSearchDocuments} from '@app/api/search/MessageSearchIndexCleanup';
 import {deleteThreadSearchDocuments} from '@app/api/search/thread/ThreadSearchService';
 import {AuditLogActionType} from '@fluxer/constants/src/AuditLogActionType';
-import {
-	MAX_THREAD_MEMBERS,
-	ServerMessageFlags,
-	TEXT_THREAD_PARENT_CHANNEL_TYPES,
-} from '@fluxer/constants/src/ThreadConstants';
+import {ServerMessageFlags, TEXT_THREAD_PARENT_CHANNEL_TYPES} from '@fluxer/constants/src/ThreadConstants';
 import {InvalidChannelTypeError} from '@fluxer/errors/src/domains/channel/InvalidChannelTypeError';
 import type {ICacheService} from '@pkgs/cache/src/ICacheService';
 
@@ -71,23 +68,22 @@ export class ThreadDeletionService {
 		const guildId = thread.guildId;
 		const state = await this.ctx.channelRepository.threads.getState(thread.id);
 		const [view] = state ? await loadThreadViews(this.ctx.channelRepository, [state]) : [];
-		const members = state
-			? await this.ctx.channelRepository.threads.listMembers(thread.id, {limit: MAX_THREAD_MEMBERS})
-			: [];
+		const prepared = state
+			? await prepareThreadDeletion(this.ctx.channelRepository.threads, this.ctx.gatewayService, state)
+			: undefined;
 		await deleteChannelMessageSearchDocuments(thread.id, {context: {source: 'thread_delete'}});
 		await this.ctx.purgeChannelAttachments(thread);
-		await this.ctx.channelRepository.threads.purgeThread(thread.id);
 		await this.ctx.archiveQueue.remove(guildId, thread.id);
 		await deleteThreadSearchDocuments([thread.id]);
-		if (state) {
+		if (state && !state.deleteDispatched) {
 			await dispatchThreadEvents(this.ctx.gatewayService, guildId, [
-				threadDeleteEvent(
-					state,
-					members.map((member) => member.userId),
-				),
+				threadDeleteEvent(state, [], prepared?.ticket, prepared?.preparedVersion),
 				...(await clearThreadSourceFlag(this.ctx.channelRepository, this.ctx.cacheService, state)),
 			]);
+			await this.ctx.channelRepository.threads.markDeleteDispatched(thread.id, prepared!.ticket);
 		}
+		// 直到网关 owner 确认之前保留原关系，keeper 丢失仍能按冻结版本重建受众。
+		await this.ctx.channelRepository.threads.purgeThread(thread.id);
 		if (params.recordGuildAudit) {
 			await this.ctx.guildAuditLogService.record({
 				guildId,

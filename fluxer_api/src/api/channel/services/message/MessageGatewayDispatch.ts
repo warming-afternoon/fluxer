@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {GuildID, MessageID, UserID} from '@app/api/BrandedTypes';
-import {dispatchChannelEvent} from '@app/api/channel/services/ChannelGatewayDispatch';
+import {dispatchChannelEvent, withThreadContext} from '@app/api/channel/services/ChannelGatewayDispatch';
 import {createMessageResponseDataService} from '@app/api/channel/services/message/MessageResponseDataService';
+import {
+	getAttachedThreadMentionDecision,
+	ThreadMentionDecisionService,
+} from '@app/api/channel/services/message/ThreadMentionDecisionService';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import type {Channel} from '@app/api/models/Channel';
 import type {Message} from '@app/api/models/Message';
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
+import {THREAD_CHANNEL_TYPES} from '@fluxer/constants/src/ThreadConstants';
 import type {MessageResponse} from '@fluxer/schema/src/domains/message/MessageResponseSchemas';
 
 interface BuildBroadcastMessageDataParams {
@@ -76,11 +81,25 @@ export async function dispatchMessageCreateBroadcast({
 }: BuildBroadcastMessageCreateDataParams & {
 	gatewayService: IGatewayService;
 }): Promise<void> {
+	await new ThreadMentionDecisionService().ensure(params.channel, params.message, gatewayService);
+	const threadDecision = getAttachedThreadMentionDecision(params.message);
+	const broadcastData = await buildBroadcastMessageCreateData(params);
+	if (params.channel.guildId && THREAD_CHANNEL_TYPES.has(params.channel.type)) {
+		// 专用协议不能回退到旧广播入口，避免旧网关泄露私有决策或恢复普通消息Push。
+		await gatewayService.dispatchThreadMessage({
+			guildId: params.channel.guildId,
+			data: withThreadContext(params.channel, {
+				...broadcastData,
+				...(threadDecision ? {_thread_mention_decision: threadDecision} : {}),
+			}),
+		});
+		return;
+	}
 	await dispatchChannelEvent({
 		gatewayService,
 		channel: params.channel,
 		event: 'MESSAGE_CREATE',
-		data: await buildBroadcastMessageCreateData(params),
+		data: broadcastData,
 	});
 }
 

@@ -3,6 +3,7 @@
 import {type ChannelID, channelIdToMessageId, type GuildID, type MessageID, type UserID} from '@app/api/BrandedTypes';
 import type {ChannelDataRepository} from '@app/api/channel/repositories/ChannelDataRepository';
 import type {MessageRepository} from '@app/api/channel/repositories/MessageRepository';
+import {ThreadMentionDecisionRepository} from '@app/api/channel/repositories/ThreadMentionDecisionRepository';
 import {
 	BatchBuilder,
 	deleteOneOrMany,
@@ -56,6 +57,7 @@ import {
 } from '@fluxer/constants/src/ThreadConstants';
 import {MaxThreadMembersError} from '@fluxer/errors/src/domains/channel/MaxThreadMembersError';
 import {ThreadAlreadyCreatedForMessageError} from '@fluxer/errors/src/domains/channel/ThreadAlreadyCreatedForMessageError';
+import {UnknownChannelError} from '@fluxer/errors/src/domains/channel/UnknownChannelError';
 import {ServiceUnavailableError} from '@fluxer/errors/src/domains/core/ServiceUnavailableError';
 import {snowflakeToDate} from '@fluxer/snowflake/src/Snowflake';
 
@@ -280,6 +282,8 @@ export class ThreadRepository {
 	}
 
 	async create(params: CreateThreadParams): Promise<ThreadState> {
+		const uniqueMembers = [...new Map(params.members.map((member) => [member.userId, member])).values()];
+		if (uniqueMembers.length > MAX_THREAD_MEMBERS) throw new MaxThreadMembersError(MAX_THREAD_MEMBERS);
 		const channel = params.channel;
 		const threadId = channel.channel_id;
 		const guildId = channel.guild_id;
@@ -290,7 +294,7 @@ export class ThreadRepository {
 		await upsertOne(
 			ThreadsByParent.upsertAll({parent_id: parentId, thread_id: threadId, guild_id: guildId, type: channel.type}),
 		);
-		const memberIds = params.members.map((member) => member.userId);
+		const memberIds = uniqueMembers.map((member) => member.userId);
 		const stateRow: ThreadStateRow = {
 			thread_id: threadId,
 			guild_id: guildId,
@@ -308,6 +312,10 @@ export class ThreadRepository {
 			member_ids_preview: listOrNull(previewWith([], memberIds)),
 			has_starter: params.hasStarter,
 			state_version: 1,
+			deleting: false,
+			delete_ticket: null,
+			delete_prepared_state_version: null,
+			delete_dispatched: false,
 		};
 		const claim = await this.claimState(stateRow);
 		if (claim === null) {
@@ -316,7 +324,7 @@ export class ThreadRepository {
 		if (claim.repaired) {
 			await this.purgeMembers(threadId, claim.repaired.type);
 		}
-		const members = [...new Map(params.members.map((member) => [member.userId, member])).values()];
+		const members = uniqueMembers;
 		if (members.length > 0) {
 			const inserted = await executeConditional(
 				ThreadMembers.conditionalBatch(
@@ -396,6 +404,7 @@ export class ThreadRepository {
 		for (let attempt = 0; attempt < STATE_CAS_ATTEMPTS; attempt++) {
 			const current = await this.getState(threadId);
 			if (!current) return null;
+			if (current.deleting) throw new UnknownChannelError();
 			const requested = mutate(current);
 			if (requested === null) return {previous: current, state: current};
 			const patch = this.withArchiveRules(current, requested);
@@ -713,6 +722,7 @@ export class ThreadRepository {
 		const joinTimestamp = new Date();
 		for (let attempt = 0; attempt < STATE_CAS_ATTEMPTS; attempt++) {
 			const state = await this.getState(threadId);
+			if (state?.deleting) throw new UnknownChannelError();
 			if (!state) return null;
 			if (unique.length === 0) return {added: [], state};
 			const existing = new Set(
@@ -754,6 +764,14 @@ export class ThreadRepository {
 			for (const row of rows)
 				byUser.addPrepared(ThreadMembersByUser.upsertAll(this.memberByUserRow(stateRow, row.user_id)));
 			await byUser.execute(false);
+			const afterIndex = await this.getState(threadId);
+			if (!afterIndex || afterIndex.deleteDispatched) {
+				await this.discardFrozenRemoval(
+					threadId,
+					rows.map((row) => new ThreadMember(row)),
+				);
+				throw new UnknownChannelError();
+			}
 			return {added: rows.map((row) => new ThreadMember(row)), state: next ?? state};
 		}
 		throw new ServiceUnavailableError();
@@ -762,6 +780,8 @@ export class ThreadRepository {
 	async removeMembers(threadId: ChannelID, userIds: Array<UserID>): Promise<ThreadMemberRemoveResult> {
 		const unique = [...new Set(userIds)];
 		for (let attempt = 0; attempt < STATE_CAS_ATTEMPTS; attempt++) {
+			const before = await this.getState(threadId);
+			if (before?.deleting) throw new UnknownChannelError();
 			const existing = await this.getMembers(threadId, unique);
 			if (existing.length === 0) return {removed: [], state: await this.getState(threadId)};
 			const removed = await executeConditional(
@@ -779,9 +799,17 @@ export class ThreadRepository {
 				[],
 				existing.map((member) => member.userId),
 			).catch(async (error: unknown) => {
+				const current = await this.getState(threadId);
+				if (!current || current.deleteDispatched) {
+					await this.discardFrozenRemoval(threadId, existing);
+					throw error;
+				}
 				await executeConditional(
 					ThreadMembers.conditionalBatch(existing.map((member) => ({action: 'insert' as const, row: member.toRow()}))),
 				);
+				// 冻结后、分发前保留完整受众；只有 owner 已确认或主行已消失才清理回写。
+				const after = await this.getState(threadId);
+				if (!after || after.deleteDispatched) await this.discardFrozenRemoval(threadId, existing);
 				throw error;
 			});
 			const byUser = new BatchBuilder();
@@ -804,6 +832,37 @@ export class ThreadRepository {
 		throw new ServiceUnavailableError();
 	}
 
+	/** 删除竞态下按原加入令牌有界清理，不回写旧成员或影响后来的加入。 */
+	private async discardFrozenRemoval(threadId: ChannelID, members: Array<ThreadMember>): Promise<void> {
+		for (let offset = 0; offset < members.length; offset += 16) {
+			await Promise.all(
+				members
+					.slice(offset, offset + 16)
+					.map((member) =>
+						executeConditional(
+							ThreadMembers.conditionalDeleteByPk(
+								{thread_id: threadId, user_id: member.userId},
+								{join_timestamp: member.joinTimestamp},
+							),
+						),
+					),
+			);
+		}
+		const cleanup = new BatchBuilder();
+		for (const member of members) {
+			for (const type of [ChannelTypes.PUBLIC_THREAD, ChannelTypes.PRIVATE_THREAD])
+				cleanup.addPrepared(
+					ThreadMembersByUser.deleteByPk(
+						this.memberByUserRow(
+							{thread_id: threadId, guild_id: member.guildId, parent_id: member.parentId, type},
+							member.userId,
+						),
+					),
+				);
+		}
+		await cleanup.executeChunked(100, false);
+	}
+
 	private async bumpMembership(
 		threadId: ChannelID,
 		added: Array<UserID>,
@@ -811,7 +870,11 @@ export class ThreadRepository {
 	): Promise<ThreadState | null> {
 		for (let attempt = 0; attempt < STATE_CAS_ATTEMPTS * 2; attempt++) {
 			const state = await this.getState(threadId);
-			if (!state) return null;
+			if (!state) {
+				if (added.length > 0) throw new UnknownChannelError();
+				return null;
+			}
+			if (state.deleting) throw new UnknownChannelError();
 			const memberCount = Math.max(0, state.memberCount + added.length - removed.length);
 			if (added.length > 0 && memberCount > MAX_THREAD_MEMBERS) throw new MaxThreadMembersError(MAX_THREAD_MEMBERS);
 			const preview = previewWith(state.memberIdsPreview, added).filter((id) => !removed.includes(id));
@@ -862,6 +925,26 @@ export class ThreadRepository {
 		});
 	}
 
+	/** 按创建时间倒序读取单个父频道的有界目录批次 */
+	async listDirectoryThreadIds(
+		parentId: ChannelID,
+		opts: {before?: ChannelID; limit: number},
+	): Promise<Array<ChannelID>> {
+		// 保留维护任务使用的 after 升序接口，目录单独使用严格小于游标
+		const query = ThreadsByParent.select({
+			where:
+				opts.before !== undefined
+					? [ThreadsByParent.where.eq('parent_id'), ThreadsByParent.where.lt('thread_id', 'before')]
+					: ThreadsByParent.where.eq('parent_id'),
+			orderBy: {col: 'thread_id', direction: 'DESC'},
+			limit: opts.limit,
+		});
+		const rows = await fetchMany<ThreadsByParentRow>(
+			query.bind(opts.before !== undefined ? {parent_id: parentId, before: opts.before} : {parent_id: parentId}),
+		);
+		return rows.map((row) => row.thread_id);
+	}
+
 	async listThreadIdsByParent(
 		parentId: ChannelID,
 		opts: {after?: ChannelID; limit: number},
@@ -899,6 +982,7 @@ export class ThreadRepository {
 		for (let attempt = 0; attempt < STATE_CAS_ATTEMPTS; attempt++) {
 			const current = await this.getState(threadId);
 			if (!current) return null;
+			if (current.deleting) throw new UnknownChannelError();
 			if (current.type !== type) {
 				const applied = await executeConditional(
 					ThreadStateTable.conditionalPatchByPk(
@@ -979,11 +1063,59 @@ export class ThreadRepository {
 		return threadIds.filter((id) => snowflakeToDate(lastActivity.get(id) ?? id).getTime() >= cutoff);
 	}
 
+	/** 准备受众后以原版本冻结成员变更；版本竞态失败时不得继续破坏性清理。 */
+	async beginDelete(
+		threadId: ChannelID,
+		expectedVersion: number,
+		ticket: string,
+		preparedVersion = expectedVersion,
+	): Promise<void> {
+		const state = await this.getState(threadId);
+		if (!state || state.stateVersion !== expectedVersion) throw new ServiceUnavailableError();
+		if (!ticket || ticket.length > 256) throw new ServiceUnavailableError();
+		if (state.deleting) {
+			if (state.deleteTicket !== ticket || state.deletePreparedVersion !== preparedVersion)
+				throw new ServiceUnavailableError();
+			return;
+		}
+		if (preparedVersion !== expectedVersion) throw new ServiceUnavailableError();
+		const applied = await executeConditional(
+			ThreadStateTable.conditionalPatchByPk(
+				{thread_id: threadId},
+				{
+					deleting: Db.set(true),
+					delete_ticket: Db.set(ticket),
+					delete_prepared_state_version: Db.set(preparedVersion),
+					delete_dispatched: Db.set(false),
+					state_version: Db.set(expectedVersion + 1),
+				},
+				{state_version: expectedVersion},
+			),
+		);
+		if (!applied) throw new ServiceUnavailableError();
+	}
+
+	/** 只标记原票据的 owner 处理确认；失败保持冻结数据供同一删除请求安全重试。 */
+	async markDeleteDispatched(threadId: ChannelID, ticket: string): Promise<void> {
+		const state = await this.getState(threadId);
+		if (!state?.deleting || state.deleteTicket !== ticket) throw new ServiceUnavailableError();
+		if (state.deleteDispatched) return;
+		const applied = await executeConditional(
+			ThreadStateTable.conditionalPatchByPk(
+				{thread_id: threadId},
+				{delete_dispatched: Db.set(true)},
+				{state_version: state.stateVersion, delete_ticket: ticket},
+			),
+		);
+		if (!applied) throw new ServiceUnavailableError();
+	}
+
 	async purgeThread(threadId: ChannelID): Promise<void> {
 		const state = await this.getState(threadId);
 		const channel = await fetchOne<ChannelRow>(FETCH_CHANNEL.bind({channel_id: threadId, soft_deleted: false}));
 		const parentId = state?.parentId ?? channel?.parent_id ?? null;
 		await this.messages.deleteAllChannelMessages(threadId);
+		await new ThreadMentionDecisionRepository().deleteForThread(threadId);
 		await this.purgeMembers(threadId, state?.type ?? channel?.type ?? ChannelTypes.PUBLIC_THREAD);
 		const guildId = state?.guildId ?? channel?.guild_id ?? null;
 		const side = new BatchBuilder();
@@ -996,14 +1128,18 @@ export class ThreadRepository {
 		side.addPrepared(ThreadStatsTable.deleteByPk({thread_id: threadId}));
 		await side.execute(false);
 		if (state?.isPinned) await this.releaseForumPin(state.parentId, threadId);
-		await this.channelData.delete(threadId, channel?.guild_id ?? state?.guildId, channel?.type ?? state?.type);
-		await deleteOneOrMany(ThreadStateTable.deleteByPk({thread_id: threadId}));
+
 		if (guildId !== null) {
 			await deleteOneOrMany(ActiveThreadsByGuild.deleteByPk({guild_id: guildId, thread_id: threadId}));
 		}
 		if (parentId !== null) {
 			await deleteOneOrMany(ThreadsByParent.deleteByPk({parent_id: parentId, thread_id: threadId}));
 		}
+		// 最后两个主行使用同一 logged batch，依赖重放避免永久孤儿；跨分区读取仍可能短暂不同步。
+		const final = new BatchBuilder();
+		final.addPrepared(Channels.deleteByPk({channel_id: threadId, soft_deleted: false}));
+		final.addPrepared(ThreadStateTable.deleteByPk({thread_id: threadId}));
+		await final.execute();
 	}
 
 	async revertParentLastMessageId(parentId: ChannelID, threadId: ChannelID, previous: MessageID | null): Promise<void> {

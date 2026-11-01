@@ -666,7 +666,7 @@ export class GatewaySocket extends EventEmitter<GatewaySocketEvents> {
 		});
 	}
 
-	updateGuildSubscriptions(params: {subscriptions: GatewayGuildSubscriptions}): void {
+	updateGuildSubscriptions(params: {subscriptions: GatewayGuildSubscriptions; thread_watch_nonce?: string}): void {
 		if (!this.isConnected()) return;
 		if (!this.sendPayload({op: GatewayOpcodes.LAZY_REQUEST, d: params})) return;
 		this.subscriptionLedger.record(params.subscriptions);

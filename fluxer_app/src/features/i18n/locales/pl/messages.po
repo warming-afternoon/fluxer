@@ -44379,3 +44379,18 @@ msgstr "Powiększ"
 #: src/features/user/components/settings_utils/search_index/KeybindsIndex.ts
 msgid "Zoom out"
 msgstr "Pomniejsz"
+
+#. Non-blocking note beside a thread message. English fallback until localized; no audience counts.
+#: src/features/channel/components/ThreadMentionWarning.tsx
+msgid "Some role notifications were skipped because a mentioned role exceeds the size limit."
+msgstr "Some role notifications were skipped because a mentioned role exceeds the size limit."
+
+#. Non-blocking note beside a thread message. English fallback until localized; no audience counts.
+#: src/features/channel/components/ThreadMentionWarning.tsx
+msgid "Role notifications were skipped because the combined audience exceeds the size limit."
+msgstr "Role notifications were skipped because the combined audience exceeds the size limit."
+
+#. Non-blocking note beside a thread message. English fallback until localized; no delayed retry promise.
+#: src/features/channel/components/ThreadMentionWarning.tsx
+msgid "Role notifications were skipped because role information is temporarily unavailable."
+msgstr "Role notifications were skipped because role information is temporarily unavailable."

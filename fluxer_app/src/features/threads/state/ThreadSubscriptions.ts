@@ -7,6 +7,7 @@ import SelectedGuild from '@app/features/navigation/state/SelectedGuild';
 import {deferUntilModulesLoaded} from '@app/features/platform/utils/DeferUntilModulesLoaded';
 import ThreadGuilds from '@app/features/threads/state/ThreadGuilds';
 import ThreadRoster from '@app/features/threads/state/ThreadRoster';
+import ThreadWatches from '@app/features/threads/state/ThreadWatches';
 import {compareStructural, makeAutoObservable, reaction} from 'mobx';
 
 interface SentState {
@@ -65,19 +66,23 @@ class ThreadSubscriptions {
 		});
 	}
 
+	/** 新连接和恢复连接分别重建目录订阅与浏览订阅 */
 	handleConnectionReady(): void {
+		ThreadWatches.handleConnectionReady();
 		this.sent = new Map();
 		this.armed = true;
 		this.connectionEpoch += 1;
 	}
 
 	reset(): void {
+		this.armed = false;
 		this.sent = new Map();
 		this.listGuilds = new Set();
 		this.lastGuildId = null;
 	}
 
 	private handleConnectionLost(): void {
+		ThreadWatches.handleConnectionLost();
 		this.sent = new Map();
 		this.armed = false;
 	}

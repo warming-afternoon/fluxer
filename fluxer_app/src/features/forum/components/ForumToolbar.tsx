@@ -44,10 +44,7 @@ const ForumSortViewPanel = observer(({forum, sheet = false}: {forum: Channel; sh
 					optionAlign="center"
 					value={ForumPosts.getSortOrder(forum)}
 					onChange={(value) => ForumPosts.setSortOrder(forum, value)}
-					options={[
-						{value: ForumSortOrderTypes.LATEST_ACTIVITY, name: i18n._(D.SORT_RECENT_ACTIVITY_DESCRIPTOR)},
-						{value: ForumSortOrderTypes.CREATION_TIME, name: i18n._(D.SORT_CREATION_DATE_DESCRIPTOR)},
-					]}
+					options={[{value: ForumSortOrderTypes.CREATION_TIME, name: i18n._(D.SORT_CREATION_DATE_DESCRIPTOR)}]}
 					data-flx="forum.forum-toolbar.sort-panel.sort-radio-group"
 				/>
 			</section>
@@ -241,6 +238,15 @@ export const ForumFilterRow = observer(({forum}: {forum: Channel}) => {
 	const tagCount = ForumPosts.getTagFilter(forum.id).length;
 	return (
 		<div className={styles.filterRow} data-flx="forum.forum-toolbar.filter-row">
+			<Button
+				variant="secondary"
+				small
+				fitContent
+				onClick={() => ForumPosts.refresh(forum)}
+				data-flx="forum.forum-toolbar.refresh"
+			>
+				{i18n._(D.REFRESH_POSTS_DESCRIPTOR)}
+			</Button>
 			{mobile ? (
 				<Button
 					variant="secondary"

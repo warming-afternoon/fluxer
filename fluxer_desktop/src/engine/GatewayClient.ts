@@ -189,7 +189,11 @@ export class GatewayClient {
 		if (this.exited || !this.hello) {
 			return;
 		}
-		this.send({op: GatewayOp.LAZY_REQUEST, d: {subscriptions: release}});
+		const hasWatchRelease = Object.values(release).some((subscription) => subscription.thread_watches !== undefined);
+		this.send({
+			op: GatewayOp.LAZY_REQUEST,
+			d: {subscriptions: release, ...(hasWatchRelease ? {thread_watch_nonce: 'handoff-release'} : {})},
+		});
 	}
 
 	probe(): void {

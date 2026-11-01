@@ -874,6 +874,20 @@ export class ChannelMessages {
 		return next;
 	}
 
+	/** 恢复浏览窗口内容并保留滚动定位状态，清除失效的分页缓存 */
+	reconcileWatchWindow(
+		windowMessages: Array<WireMessage>,
+		hasMoreBefore: boolean,
+		hasMoreAfter: boolean,
+	): ChannelMessages {
+		// 只替换窗口数据，不增加跳转票据或改变高亮定位
+		const records = windowMessages.map((wire) => hydrateMessage(this, wire, 'empty'));
+		const unsent = this.collectUnsentMessages(records);
+		let next = this.reset(records);
+		if (unsent.length > 0) next = next.merge(unsent);
+		return next.withPatch({ready: true, cached: false, loadingMore: false, error: false, hasMoreBefore, hasMoreAfter});
+	}
+
 	private collectUnsentMessages(records: Array<Message>): Array<Message> {
 		const unsent = this.messageList.filter((message) => message.hasFailed || message.isSending);
 		if (unsent.length === 0) return unsent;

@@ -19,10 +19,9 @@ export function isMediaChannel(forum: Channel): boolean {
 	return forum.type === ChannelTypes.GUILD_MEDIA;
 }
 
-export function getDefaultSortOrder(forum: Channel): ForumSortOrderType {
-	return forum.threadFields?.default_sort_order === ForumSortOrderTypes.CREATION_TIME
-		? ForumSortOrderTypes.CREATION_TIME
-		: ForumSortOrderTypes.LATEST_ACTIVITY;
+/** 目录始终使用创建时间排序。 */
+export function getDefaultSortOrder(_forum: Channel): ForumSortOrderType {
+	return ForumSortOrderTypes.CREATION_TIME;
 }
 
 export function getDefaultLayout(forum: Channel): ForumLayoutType {

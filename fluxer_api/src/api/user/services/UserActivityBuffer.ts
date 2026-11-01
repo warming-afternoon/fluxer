@@ -3,6 +3,7 @@
 import type {UserID} from '@app/api/BrandedTypes';
 import {fetchMany, upsertOne} from '@app/api/database/CassandraQueryExecution';
 import {Db, type PreparedQuery} from '@app/api/database/CassandraTypes';
+import {SessionActivityDeduper} from '@app/api/infrastructure/SessionActivityDeduper';
 import {Logger} from '@app/api/Logger';
 import {AuthSessions, AuthSessionsByAppChannel} from '@app/api/Tables';
 import {UserAccountRepository} from '@app/api/user/repositories/account/UserAccountRepository';
@@ -151,6 +152,7 @@ function authSessionActivityStatements(
 }
 
 export class UserActivityBuffer {
+	private readonly activityDeduper = new SessionActivityDeduper();
 	private readonly kv: IKVProvider;
 	private readonly writer: ActivityWriter;
 	private readonly accounts: UserActivityAccountWriter;
@@ -177,17 +179,31 @@ export class UserActivityBuffer {
 		timestamp: Date,
 		app: ReportedClientApp | null = null,
 	): Promise<boolean> {
+		// Client identity must not be suppressed by a timestamp-only debounce window.
+		if (app) return this.writeAuthSessionActivity(sessionIdHash, timestamp, app);
+		return this.activityDeduper.run(this.encodeSessionIdHash(sessionIdHash), () =>
+			this.writeAuthSessionActivity(sessionIdHash, timestamp, null),
+		);
+	}
+
+	private async writeAuthSessionActivity(
+		sessionIdHash: Buffer,
+		timestamp: Date,
+		app: ReportedClientApp | null,
+	): Promise<boolean> {
 		const encodedSessionIdHash = this.encodeSessionIdHash(sessionIdHash);
 		const touchKey = `${AUTH_SESSION_TOUCH_KEY_PREFIX}${encodedSessionIdHash}`;
 		let touched: string | null;
 		try {
-			touched = await this.kv.set(
-				touchKey,
-				timestamp.getTime().toString(),
-				'EX',
-				AUTH_SESSION_TOUCH_DEBOUNCE_TTL_SECONDS,
-				'NX',
-			);
+			touched = app
+				? await this.kv.set(touchKey, timestamp.getTime().toString(), 'EX', AUTH_SESSION_TOUCH_DEBOUNCE_TTL_SECONDS)
+				: await this.kv.set(
+						touchKey,
+						timestamp.getTime().toString(),
+						'EX',
+						AUTH_SESSION_TOUCH_DEBOUNCE_TTL_SECONDS,
+						'NX',
+					);
 		} catch (error) {
 			Logger.debug({error}, 'Failed to debounce auth session activity');
 			return false;
@@ -201,13 +217,19 @@ export class UserActivityBuffer {
 			return true;
 		} catch (error) {
 			Logger.debug({error}, 'Failed to enqueue auth session activity to buffer');
-			void this.kv.del(touchKey).catch(() => undefined);
+			await this.kv.del(touchKey).catch(() => undefined);
 			return false;
 		}
 	}
 
+	/** 导出固定维度的会话活动缓存计数。 */
+	renderActivityDeduperMetrics(): string {
+		return this.activityDeduper.renderMetrics();
+	}
+
 	async forgetAuthSessions(sessionIdHashes: ReadonlyArray<Buffer>): Promise<void> {
 		if (sessionIdHashes.length === 0) return;
+		this.activityDeduper.forget(sessionIdHashes.map((hash) => this.encodeSessionIdHash(hash)));
 		const encoded = sessionIdHashes.map((sessionIdHash) => this.encodeSessionIdHash(sessionIdHash));
 		await this.kv.hdel(PENDING_AUTH_SESSION_HASH_KEY, ...encoded);
 		await this.kv.del(...encoded.map((value) => `${AUTH_SESSION_TOUCH_KEY_PREFIX}${value}`));

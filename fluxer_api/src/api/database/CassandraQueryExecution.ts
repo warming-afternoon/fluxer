@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import type {ChannelID, GuildID} from '@app/api/BrandedTypes';
 import {logBatch, logQuery} from '@app/api/database/CassandraDevLogger';
+import {
+	CassandraMetadataCaches,
+	type CassandraMetadataNotifications,
+	type MetadataCacheOptions,
+} from '@app/api/database/CassandraMetadataCaches';
+import {
+	getCassandraMetadataInvalidations,
+	mergeMetadataInvalidations,
+} from '@app/api/database/CassandraMetadataTargets';
 import {getIsDev} from '@app/api/database/CassandraMetaRegistry';
 import type {
 	CassandraParam,
@@ -17,7 +27,10 @@ import {
 	normalizeExecuteArgs,
 	normalizeInParams,
 } from '@app/api/database/CassandraTypes';
+import type {ChannelMetadata} from '@app/api/database/ChannelMetadataCache';
+import type {GuildAvailability} from '@app/api/database/GuildAvailabilityCache';
 import {LocalDate} from '@app/api/database/LocalDate';
+import type {ReadStateMutation, ReadStateMutationResult} from '@app/api/database/ReadStateMutation';
 import {Logger} from '@app/api/Logger';
 import {chunkArray} from '@app/api/utils/ArrayUtils';
 import {ServiceUnavailableError} from '@fluxer/errors/src/domains/core/ServiceUnavailableError';
@@ -66,18 +79,81 @@ export interface CassandraQueryExecutorForTesting {
 	executeBatch(queries: Array<{query: string; params: object; meta?: KvQueryMeta}>, atomic?: boolean): Promise<void>;
 	advanceRows?(writes: ReadonlyArray<KvAdvance>): Promise<Array<boolean>>;
 	reset?(): void;
+	clearMetadataCachesForTesting?(): void;
 	shutdown?(): Promise<void>;
+	/** 可选的跨请求已读事务入口，其他后端沿用仓库路径 */
+	executeReadStateMutations?(mutations: ReadonlyArray<ReadStateMutation>): Promise<Array<ReadStateMutationResult>>;
+	renderReadStateMetrics?(): string;
+	/** Optional narrow projections; never substitutes for full permission-bearing models. */
+	getGuildAvailability?(id: GuildID): Promise<GuildAvailability | null> | null;
+	getChannelMetadata?(ids: ReadonlyArray<ChannelID>): Promise<Map<ChannelID, ChannelMetadata>>;
 }
 
 let injectedExecutorForTesting: CassandraQueryExecutorForTesting | null = null;
 let configuredExecutor: CassandraQueryExecutorForTesting | null = null;
+let cassandraMetadata: CassandraMetadataCaches | null = null;
+
+export async function startCassandraMetadataCaches(
+	options: MetadataCacheOptions,
+	keyspace: string,
+	notifications: CassandraMetadataNotifications,
+): Promise<void> {
+	if (activeExecutor() || (!options.channelEnabled && !options.guildEnabled)) return;
+	if (cassandraMetadata) throw new Error('Cassandra metadata caches already initialized');
+	cassandraMetadata = new CassandraMetadataCaches(executeQuery, options, keyspace, notifications);
+	cassandraMetadata.start();
+}
 
 function activeExecutor(): CassandraQueryExecutorForTesting | null {
 	return injectedExecutorForTesting ?? configuredExecutor;
 }
 
+/** 不支持共享元数据缓存的后端返回空能力，调用方保留原行为 */
+export function getChannelMetadata(ids: ReadonlyArray<ChannelID>): Promise<Map<ChannelID, ChannelMetadata>> | null {
+	const executor = activeExecutor();
+	return executor ? (executor.getChannelMetadata?.(ids) ?? null) : (cassandraMetadata?.getChannelMetadata(ids) ?? null);
+}
+
+export function getGuildAvailability(id: GuildID): Promise<GuildAvailability | null> | null {
+	const executor = activeExecutor();
+	return executor
+		? (executor.getGuildAvailability?.(id) ?? null)
+		: (cassandraMetadata?.getGuildAvailability(id) ?? null);
+}
+
+/** 将已读变更交给支持跨请求组批的数据库执行器 */
+export function executeReadStateMutations(
+	mutations: ReadonlyArray<ReadStateMutation>,
+): Promise<Array<ReadStateMutationResult>> | null {
+	// 未提供能力的 Cassandra 和内存测试后端继续使用原有读写流程。
+	return activeExecutor()?.executeReadStateMutations?.(mutations) ?? null;
+}
+
+/** 在关闭数据库连接之前排空执行器持有的缓冲区 */
+export async function shutdownDatabaseQueryExecutor(): Promise<void> {
+	await activeExecutor()?.shutdown?.();
+	await cassandraMetadata?.shutdown();
+	cassandraMetadata = null;
+}
+
+/** 提供不含用户信息的批处理指标 */
+export function renderReadStateMetrics(): string {
+	return activeExecutor()?.renderReadStateMetrics?.() ?? cassandraMetadata?.renderMetrics() ?? '';
+}
+
 export function setDatabaseQueryExecutor(executor: CassandraQueryExecutorForTesting | null): void {
 	configuredExecutor = executor;
+}
+
+/** In-process test harness only; never exposed as an HTTP or worker API. */
+export function clearMetadataCachesForTesting(): void {
+	activeExecutor()?.clearMetadataCachesForTesting?.();
+	cassandraMetadata?.clear();
+}
+
+/** Test fixtures replace physical database access; a configured production executor does not. */
+export function hasInjectedDatabaseQueryExecutorForTesting(): boolean {
+	return injectedExecutorForTesting !== null;
 }
 
 export function hasDatabaseQueryExecutor(): boolean {
@@ -143,10 +219,35 @@ export async function executeQuery<T = Record<string, unknown>, P extends Cassan
 	const isDev = getIsDev();
 	const startTime = isDev ? performance.now() : 0;
 	try {
-		const result = await getClient().execute(cql, driverParams(bound), {
-			prepare: true,
-			...(readOptions ? {consistency: getLoadedCassandraDriver()?.types.consistencies[readOptions.consistency]} : {}),
-		});
+		const run = async () => {
+			const result = await getClient().execute(cql, driverParams(bound), {
+				prepare: true,
+				...(readOptions ? {consistency: getLoadedCassandraDriver()?.types.consistencies[readOptions.consistency]} : {}),
+			});
+			const prepared = {
+				cql,
+				params: bound,
+				kvMeta: typeof queryOrPrepared === 'string' ? undefined : queryOrPrepared.kvMeta,
+			};
+			if (meta.type !== 'SELECT' && isConditionalQuery(prepared)) {
+				const rows = result.rows ?? [];
+				const applied = rows[0]?.['[applied]'];
+				if (
+					typeof applied !== 'boolean' ||
+					(prepared.kvMeta?.action !== 'batch' && rows.length !== 1) ||
+					rows.some((row) => row['[applied]'] !== applied)
+				) {
+					throw new Error('Conditional write returned an invalid database result');
+				}
+			}
+			return result;
+		};
+		const mutationMeta = typeof queryOrPrepared === 'string' ? undefined : queryOrPrepared.kvMeta;
+		const changes = cassandraMetadata ? getCassandraMetadataInvalidations(cql, bound, mutationMeta) : [];
+		const result =
+			cassandraMetadata && changes.length
+				? await cassandraMetadata.mutate(run, changes, (response) => response.rows?.[0]?.['[applied]'] !== false)
+				: await run();
 		const rows = await collectSelectRows<T>(meta.type, result);
 		if (isDev) {
 			const durationMs = performance.now() - startTime;
@@ -222,6 +323,7 @@ export async function fetchPage<T = Record<string, unknown>, P extends Cassandra
 	if (meta.unsafe) {
 		throw new Error('Cannot prepare a statement that looks like `SELECT *`');
 	}
+	if (meta.type !== 'SELECT') throw new Error('fetchPage requires a SELECT query');
 	assertNoUndefinedParams(bound as Record<string, unknown>);
 	const executor = activeExecutor();
 	if (executor) {
@@ -349,13 +451,26 @@ async function executeBatch(
 	const isDev = getIsDev();
 	const startTime = isDev ? performance.now() : 0;
 	try {
-		await getClient().batch(
-			queries.map(({query, params}) => ({
-				query,
-				params: driverParams(normalizeInParams(getStatementMeta(query), params as CassandraParams)),
-			})),
-			options,
-		);
+		const run = () =>
+			getClient().batch(
+				queries.map(({query, params}) => ({
+					query,
+					params: driverParams(normalizeInParams(getStatementMeta(query), params as CassandraParams)),
+				})),
+				options,
+			);
+		const changes = cassandraMetadata
+			? mergeMetadataInvalidations(
+					queries.flatMap(({query, params, meta}) =>
+						getCassandraMetadataInvalidations(query, params as CassandraParams, meta),
+					),
+				)
+			: [];
+		if (cassandraMetadata && changes.length) {
+			await cassandraMetadata.mutate(run, changes);
+		} else {
+			await run();
+		}
 	} catch (err: unknown) {
 		throw mapCassandraDriverError(err);
 	}

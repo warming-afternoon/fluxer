@@ -10,6 +10,9 @@ interface KVSubscriptionConfig {
 	mode?: KVClientMode;
 	timeoutMs: number;
 	logger: IKVLogger;
+
+	/** 专用订阅者可在断线和重新订阅成功时清理本地缓存。 */
+	onStateChange?: (ready: boolean) => void;
 }
 
 interface KVSubscriptionConnect {
@@ -22,6 +25,7 @@ export class KVSubscription implements IKVSubscription {
 	private readonly mode: KVClientMode;
 	private readonly timeoutMs: number;
 	private readonly logger: IKVLogger;
+	private readonly onStateChange?: (ready: boolean) => void;
 	private readonly desiredChannels = new Set<string>();
 	private readonly messageCallbacks: Set<(channel: string, message: string) => void> = new Set();
 	private readonly errorCallbacks: Set<(error: Error) => void> = new Set();
@@ -34,6 +38,7 @@ export class KVSubscription implements IKVSubscription {
 		this.mode = config.mode ?? 'standalone';
 		this.timeoutMs = config.timeoutMs;
 		this.logger = config.logger;
+		this.onStateChange = config.onStateChange;
 	}
 
 	async connect(): Promise<void> {
@@ -76,6 +81,17 @@ export class KVSubscription implements IKVSubscription {
 		const client = connection
 			? new Redis({...connection.redisOptions, ...connection.node, db: 0, ...options})
 			: new Redis(this.url, options);
+		// 默认订阅者行为不变，仅专用元数据订阅者观察重连状态。
+		if (this.onStateChange) {
+			client.on('ready', () => {
+				void this.restoreState(client);
+			});
+			for (const event of ['close', 'end', 'reconnecting']) {
+				client.on(event, () => {
+					if (this.client === client && this.closing === null) this.onStateChange?.(false);
+				});
+			}
+		}
 		client.on('message', (channel: string, message: string) => {
 			if (this.client !== client || this.closing !== null) {
 				return;
@@ -94,6 +110,23 @@ export class KVSubscription implements IKVSubscription {
 			}
 		});
 		return client;
+	}
+
+	/** 自动重连后确认订阅已恢复，再通知本地缓存清空旧代次。 */
+	private async restoreState(client: Redis): Promise<void> {
+		try {
+			if (this.client !== client || this.closing !== null) return;
+			if (this.desiredChannels.size) await client.subscribe(...this.desiredChannels);
+			this.assertCurrentClient(client);
+			this.onStateChange?.(true);
+		} catch (error) {
+			if (this.client !== client || this.closing !== null) return;
+			this.onStateChange?.(false);
+			for (const callback of this.errorCallbacks)
+				callback(error instanceof Error ? error : new Error('KV resubscription failed'));
+			// 重建连接，避免订阅恢复失败后静默保持未订阅状态。
+			client.disconnect(true);
+		}
 	}
 
 	private async connectClient(client: Redis, signal: AbortSignal): Promise<void> {

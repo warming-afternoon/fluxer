@@ -1,0 +1,17 @@
+# Transition overlay: apply LAST during a mixed-version upgrade or rollback.
+# Receivers accept v1 and v2; no sender may emit v2 until every receiver is ready.
+services:
+  api:
+    environment:
+      FLUXER_COMBINED_CHANNEL_AUTH_ENABLED: "false"
+      FLUXER_COMBINED_RATE_LIMIT_ENABLED: "false"
+  worker:
+    environment:
+      FLUXER_COMBINED_CHANNEL_AUTH_ENABLED: "false"
+      FLUXER_COMBINED_RATE_LIMIT_ENABLED: "false"
+  gateway:
+    environment:
+      FLUXER_GATEWAY_CLEAR_BATCH_ENABLED: "false"
+  push:
+    environment:
+      FLUXER_PUSH_CLEAR_BATCH_ENABLED: "true"

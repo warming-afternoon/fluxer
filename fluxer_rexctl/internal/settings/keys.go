@@ -233,6 +233,9 @@ func Lookup(set *stack.Set, custom []string, name string, adminSchema []adminapi
 		return Key{}, unknown(name)
 	}
 	validate := validText
+	if forkValidator := forkSettingValidator(name); forkValidator != nil {
+		validate = forkValidator
+	}
 	if name == TurnServersVar {
 		validate = validTurnServers
 	}

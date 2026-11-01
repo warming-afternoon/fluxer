@@ -14,6 +14,7 @@ interface NamedEnvOverride {
 }
 
 const NAMED_FLUXER_ENV_OVERRIDES: Record<string, NamedEnvOverride> = {
+	FLUXER_GATEWAY_CLEAR_BATCH_ENABLED: {path: ['services', 'gateway', 'clear_batch_enabled'], parse: parseBoolean},
 	FLUXER_ENV: {path: ['env']},
 	FLUXER_BASE_DOMAIN: {path: ['domain', 'base_domain']},
 	FLUXER_PUBLIC_ORIGIN: {path: ['domain', 'public_origin']},
@@ -49,8 +50,36 @@ const NAMED_FLUXER_ENV_OVERRIDES: Record<string, NamedEnvOverride> = {
 	FLUXER_POSTGRES_SSL: {path: ['database', 'postgres', 'ssl'], parse: parseBoolean},
 	FLUXER_POSTGRES_SSL_CA: {path: ['database', 'postgres', 'ssl_ca']},
 	FLUXER_POSTGRES_MAX_CONNECTIONS: {path: ['database', 'postgres', 'max_connections'], parse: parseInteger},
+	FLUXER_READ_STATE_BATCHING_ENABLED: {
+		path: ['database', 'postgres', 'read_state_batching_enabled'],
+		parse: parseBoolean,
+	},
+	FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED: {
+		path: ['database', 'metadata_cache', 'guild_enabled'],
+		parse: parseBoolean,
+	},
+	FLUXER_CHANNEL_METADATA_CACHE_ENABLED: {
+		path: ['database', 'metadata_cache', 'channel_enabled'],
+		parse: parseBoolean,
+	},
 	FLUXER_POSTGRES_KV_TABLE: {path: ['database', 'postgres', 'kv_table']},
 	FLUXER_POSTGRES_PREPARED_STATEMENTS: {path: ['database', 'postgres', 'prepared_statements'], parse: parseBoolean},
+	FLUXER_READ_STATE_COMBINED_GATEWAY_RPC_ENABLED: {
+		path: ['services', 'api', 'read_state_combined_gateway_rpc_enabled'],
+		parse: parseBoolean,
+	},
+	FLUXER_COMBINED_RATE_LIMIT_ENABLED: {
+		path: ['services', 'api', 'combined_rate_limit_enabled'],
+		parse: parseBoolean,
+	},
+	FLUXER_COMBINED_CHANNEL_AUTH_ENABLED: {
+		path: ['services', 'api', 'combined_channel_auth_enabled'],
+		parse: parseBoolean,
+	},
+	FLUXER_READ_STATE_NARROW_AUTH_ENABLED: {
+		path: ['services', 'api', 'read_state_narrow_auth_enabled'],
+		parse: parseBoolean,
+	},
 	FLUXER_DATABASE_BACKEND: {path: ['database', 'backend']},
 	FLUXER_KV_URL: {path: ['internal', 'kv']},
 	FLUXER_KV_MODE: {path: ['internal', 'kv_mode']},
@@ -68,6 +97,7 @@ const NAMED_FLUXER_ENV_OVERRIDES: Record<string, NamedEnvOverride> = {
 	FLUXER_NATS_URL: {path: ['services', 'nats', 'core_url']},
 	FLUXER_NATS_JETSTREAM_URL: {path: ['services', 'nats', 'jetstream_url']},
 	FLUXER_NATS_AUTH_TOKEN: {path: ['services', 'nats', 'auth_token']},
+	FLUXER_API_INSTANCES: {path: ['services', 'api', 'instances'], parse: parseInteger},
 	FLUXER_API_PORT: {path: ['services', 'api', 'port'], parse: parseInteger},
 	FLUXER_API_HEADERS_TIMEOUT_MS: {path: ['services', 'api', 'headers_timeout_ms'], parse: parseInteger},
 	FLUXER_API_REQUEST_TIMEOUT_MS: {path: ['services', 'api', 'request_timeout_ms'], parse: parseInteger},

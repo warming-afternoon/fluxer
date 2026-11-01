@@ -83,6 +83,9 @@ function defaultConfig(): MasterConfig {
 				max_connections: 20,
 				kv_table: 'fluxer_kv',
 				prepared_statements: true,
+				read_state_batching_enabled: true,
+				channel_metadata_cache_enabled: true,
+				guild_availability_cache_enabled: false,
 			},
 		},
 		s3: {
@@ -104,6 +107,11 @@ function defaultConfig(): MasterConfig {
 				headers_timeout_ms: 30_000,
 				request_timeout_ms: 120_000,
 				max_inflight_requests: 512,
+				instances: 2,
+				combined_channel_auth_enabled: true,
+				combined_rate_limit_enabled: true,
+				read_state_combined_gateway_rpc_enabled: false,
+				read_state_narrow_auth_enabled: false,
 				automated_message_deletion_delay_days: 7,
 				ip_ban_exempt_ips: [],
 				donation_proxy_key: '',
@@ -136,6 +144,14 @@ function defaultConfig(): MasterConfig {
 				},
 			},
 			gateway: {
+				thread_mentions: {
+					enabled: false,
+					expected_api_instances: 0,
+					expected_worker_instances: 0,
+					expected_api_instance_ids: [],
+					expected_worker_instance_ids: [],
+				},
+				clear_batch_enabled: true,
 				rpc_auth_token: '',
 			},
 			admin: {
@@ -484,11 +500,19 @@ function validateVapidConfig(config: MasterConfig): void {
 
 function validatePostgresConfig(config: MasterConfig): void {
 	const postgres = config.database.postgres;
+	const metadataCache = config.database.metadata_cache;
+	if (metadataCache?.channel_enabled !== undefined)
+		assertBoolean(metadataCache.channel_enabled, 'FLUXER_CHANNEL_METADATA_CACHE_ENABLED');
+	if (metadataCache?.guild_enabled !== undefined)
+		assertBoolean(metadataCache.guild_enabled, 'FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED');
 	assertIntegerInRange(postgres.port, 'FLUXER_POSTGRES_PORT', 1, 65535);
 	assertIntegerInRange(postgres.max_connections, 'FLUXER_POSTGRES_MAX_CONNECTIONS', 1, 1000);
 	assertBoolean(postgres.ssl, 'FLUXER_POSTGRES_SSL');
 	assertIdentifier(postgres.kv_table, 'FLUXER_POSTGRES_KV_TABLE');
 	assertBoolean(postgres.prepared_statements, 'FLUXER_POSTGRES_PREPARED_STATEMENTS');
+	assertBoolean(postgres.read_state_batching_enabled, 'FLUXER_READ_STATE_BATCHING_ENABLED');
+	assertBoolean(postgres.channel_metadata_cache_enabled, 'FLUXER_CHANNEL_METADATA_CACHE_ENABLED');
+	assertBoolean(postgres.guild_availability_cache_enabled, 'FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED');
 	if (config.env !== 'production' || config.database.backend !== 'postgres') {
 		return;
 	}
@@ -709,6 +733,15 @@ function normalizeConfig(config: MasterConfig): MasterConfig {
 	validateReplyToEmail(config.integrations.email.reply_to_email);
 	normalizeEmailFallbackConfig(config);
 	normalizeAppOriginAliases(config);
+	assertBoolean(
+		config.services.api.read_state_combined_gateway_rpc_enabled ?? false,
+		'FLUXER_READ_STATE_COMBINED_GATEWAY_RPC_ENABLED',
+	);
+	assertBoolean(config.services.gateway.clear_batch_enabled ?? true, 'FLUXER_GATEWAY_CLEAR_BATCH_ENABLED');
+	assertBoolean(config.services.api.combined_channel_auth_enabled ?? true, 'FLUXER_COMBINED_CHANNEL_AUTH_ENABLED');
+	assertBoolean(config.services.api.combined_rate_limit_enabled ?? true, 'FLUXER_COMBINED_RATE_LIMIT_ENABLED');
+	assertBoolean(config.services.api.read_state_narrow_auth_enabled ?? false, 'FLUXER_READ_STATE_NARROW_AUTH_ENABLED');
+	assertIntegerInRange(config.services.api.instances ?? 2, 'FLUXER_API_INSTANCES', 1, 512);
 	assertIntegerInRange(config.services.api.max_inflight_requests, 'FLUXER_API_MAX_INFLIGHT_REQUESTS', 1, 100_000);
 	assertIntegerInRange(
 		config.services.api.automated_message_deletion_delay_days,

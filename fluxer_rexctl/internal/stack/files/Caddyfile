@@ -1,6 +1,6 @@
 {
 	servers {
-		trusted_proxies static {$FLUXER_EDGE_TRUSTED_PROXIES:private_ranges}
+		trusted_proxies static {$FLUXER_EDGE_TRUSTED_PROXIES:127.0.0.1/32}
 		trusted_proxies_strict
 		protocols {$FLUXER_EDGE_PROTOCOLS:h1 h2 h3}
 	}

@@ -79,6 +79,44 @@ describe('ConfigLoader', () => {
 		expect((await loadConfig()).env).toBe('production');
 	});
 
+	test('channel authorization RPC defaults on and supports explicit rollback', async () => {
+		stubMinimalEnv();
+		expect((await loadConfig()).services.api.combined_channel_auth_enabled).toBe(true);
+		resetConfig();
+		vi.stubEnv('FLUXER_COMBINED_CHANNEL_AUTH_ENABLED', 'false');
+		expect((await loadConfig()).services.api.combined_channel_auth_enabled).toBe(false);
+	});
+
+	test('combined rate limiting defaults on and supports explicit rollback', async () => {
+		stubMinimalEnv();
+		expect((await loadConfig()).services.api.combined_rate_limit_enabled).toBe(true);
+		resetConfig();
+		vi.stubEnv('FLUXER_COMBINED_RATE_LIMIT_ENABLED', 'false');
+		expect((await loadConfig()).services.api.combined_rate_limit_enabled).toBe(false);
+	});
+
+	test('read-state batching defaults on; metadata and narrow auth keep explicit backend defaults', async () => {
+		stubMinimalEnv();
+		const config = await loadConfig();
+		expect(config.database.postgres.read_state_batching_enabled).toBe(true);
+		expect(config.database.metadata_cache?.channel_enabled).toBeUndefined();
+		expect(config.database.metadata_cache?.guild_enabled).toBeUndefined();
+		expect(config.services.api.read_state_combined_gateway_rpc_enabled).toBe(false);
+		expect(config.services.api.read_state_narrow_auth_enabled).toBe(false);
+	});
+
+	test('parses metadata and read-state batching rollback switches', async () => {
+		stubMinimalEnv({
+			FLUXER_READ_STATE_BATCHING_ENABLED: 'false',
+			FLUXER_CHANNEL_METADATA_CACHE_ENABLED: 'false',
+			FLUXER_GUILD_AVAILABILITY_CACHE_ENABLED: 'true',
+		});
+		const config = await loadConfig();
+		expect(config.database.postgres.read_state_batching_enabled).toBe(false);
+		expect(config.database.metadata_cache?.channel_enabled).toBe(false);
+		expect(config.database.metadata_cache?.guild_enabled).toBe(true);
+	});
+
 	test('reads the profile pseudonym secret and requires it in production', async () => {
 		stubMinimalEnv();
 		expect((await loadConfig()).auth.profile_pseudonym_secret).toBe('test-profile-pseudonym-secret');
@@ -410,6 +448,14 @@ describe('FLUXER_PUBLIC_ORIGIN', () => {
 		await expect(loadConfig()).rejects.toThrow(
 			'FLUXER_PUBLIC_ORIGIN must be a scheme, host and optional port such as https://chat.example.com:8443',
 		);
+	});
+
+	test('clear batch sender defaults on and supports explicit rollback', async () => {
+		stubMinimalEnv();
+		expect((await loadConfig()).services.gateway.clear_batch_enabled).toBe(true);
+		resetConfig();
+		stubMinimalEnv({FLUXER_GATEWAY_CLEAR_BATCH_ENABLED: 'false'});
+		expect((await loadConfig()).services.gateway.clear_batch_enabled).toBe(false);
 	});
 
 	test('leaves the derived origin canonical when nothing is set', async () => {

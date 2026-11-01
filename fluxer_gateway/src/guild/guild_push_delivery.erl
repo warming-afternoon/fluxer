@@ -127,13 +127,20 @@ send_forum_thread_created_push({ForumId, ThreadMembers}, #{
     hold := Hold,
     state := State
 }) ->
-    Skip = maps:merge(
+    Skip0 = maps:merge(
         maps:put(guild_push_candidates:author_id(MessageData), true, ThreadMembers),
         guild_push_candidates:direct_mention_ids(MessageData)
     ),
-    MentionRoles = guild_push_candidates:mention_role_ids(
-        maps:get(<<"mention_roles">>, MessageData, [])
-    ),
+    {Skip, MentionRoles} = case guild_thread_mention_policy:candidates(MessageData) of
+        Ids when is_list(Ids) ->
+            %% Only fixed mention identities were notified; current role holders
+            %% outside that frozen set still qualify for the separate forum notice.
+            {maps:merge(Skip0, maps:from_keys(Ids, true)), #{}};
+        undefined ->
+            {Skip0, guild_push_candidates:mention_role_ids(
+                maps:get(<<"mention_roles">>, MessageData, [])
+            )}
+    end,
     Recipient = guild_thread_gate:recipient_active(ChannelId, State),
     HeldSessions = guild_push_engagement:held_sessions(Hold),
     CanView = fun guild_permissions_check:can_view_channel/4,

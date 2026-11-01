@@ -18,7 +18,7 @@
 -export_type([job/0, kind/0]).
 
 -define(DEFAULT_MAX_QUEUE, 10000).
--define(DEFAULT_MAX_INFLIGHT, 64).
+-define(DEFAULT_MAX_INFLIGHT, 96).
 -define(DEFAULT_REQUEST_TIMEOUT_MS, 100000).
 -define(DEFAULT_MAX_AGE_MS, 300000).
 -define(DEFAULT_RETRY_BASE_MS, 1000).
@@ -47,7 +47,13 @@
     message_id := integer(),
     seq := non_neg_integer(),
     enqueued_at := integer(),
-    attempts := non_neg_integer()
+    attempts := non_neg_integer(),
+
+    %% 跨重试保留的逻辑任务身份。
+    item_id => binary(),
+
+    %% 批传输内的原始逻辑任务。
+    batch_entries => [entry()]
 }.
 -type counter() ::
     delivered
@@ -61,6 +67,7 @@
 -type active() :: #{integer() => {non_neg_integer(), integer()}}.
 -type state() :: #{
     jobs := gb_trees:tree(non_neg_integer(), entry()),
+    message_index => #{integer() => gb_sets:set(non_neg_integer())},
     ready := queue:queue(non_neg_integer()),
     inflight := #{pid() => {reference(), reference(), entry()}},
     followups => #{pid() => #{integer() => integer()}},
@@ -73,7 +80,13 @@
     max_inflight := pos_integer(),
     request_timeout_ms := pos_integer(),
     max_age_ms := pos_integer(),
-    retry_base_ms := pos_integer()
+    retry_base_ms := pos_integer(),
+
+    %% 进程启动时确定的清理批传输开关。
+    clear_batch_enabled => boolean(),
+
+    %% 等待连续清理前缀的刷新定时器。
+    clear_batch_timer => reference() | undefined
 }.
 
 -spec start_link() -> {ok, pid()} | {error, term()} | ignore.
@@ -117,12 +130,21 @@ request_timeout_ms() ->
 max_age_ms() ->
     env_pos_integer(push_outbox_max_age_ms, ?DEFAULT_MAX_AGE_MS).
 
+%% 初始化推送队列及进程启动时确定的批传输状态。
 -spec init([]) -> {ok, state()}.
 init([]) ->
     erlang:process_flag(fullsweep_after, 10),
     schedule_prune(),
     {ok, #{
         jobs => gb_trees:empty(),
+        %% 启动后固定本进程采用的清理传输协议。
+        clear_batch_enabled => fluxer_gateway_env:get_optional(push_clear_batch_enabled) =:=
+            true,
+
+        %% 仅在等待连续清理前缀时保存刷新定时器。
+        clear_batch_timer => undefined,
+
+        message_index => #{},
         ready => queue:new(),
         inflight => #{},
         followups => #{},
@@ -167,6 +189,7 @@ handle_cast({dropped, Kind, Reason}, State) when is_atom(Kind), is_atom(Reason) 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+%% 处理推送结果、重试和批清理刷新消息。
 -spec handle_info(term(), state()) -> {noreply, state()}.
 handle_info({push_outbox_reply, Pid, Result}, State) when is_pid(Pid) ->
     {noreply, pump(finish_worker(Pid, push_outbox_worker:reply_result(Result), State))};
@@ -177,6 +200,8 @@ handle_info({request_deadline, Pid}, #{inflight := Inflight} = State) when is_pi
     {noreply, State};
 handle_info({retry, Seq}, State) when is_integer(Seq), Seq >= 0 ->
     {noreply, pump(make_ready(Seq, State))};
+handle_info(clear_batch_flush, State) ->
+    {noreply, pump(State#{clear_batch_timer => undefined})};
 handle_info(prune, State) ->
     schedule_prune(),
     {noreply, prune(State)};
@@ -191,22 +216,75 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
+%% 为入队任务分配稳定身份并执行容量限制。
 -spec admit(job(), state()) -> state().
 admit(Job, #{next_seq := Seq} = State) ->
-    Entry = maps:merge(Job, #{seq => Seq, enqueued_at => now_ms(), attempts => 0}),
+    %% 稳定身份随逻辑任务保留，重试不会生成新的逐项标识。
+    Entry = maps:merge(Job, #{
+        seq => Seq,
+        enqueued_at => now_ms(),
+        attempts => 0,
+
+        %% 使用节点、队列进程和序号区分逻辑任务。
+        item_id => base64:encode(term_to_binary({node(), self(), Seq}))
+    }),
     State1 = bump(enqueued, 1, State#{next_seq := Seq + 1}),
     shed_to_capacity(insert(Entry, State1)).
 
 -spec insert(entry(), state()) -> state().
-insert(#{seq := Seq} = Entry, #{jobs := Jobs, ready := Ready} = State) ->
-    State#{jobs := gb_trees:enter(Seq, Entry, Jobs), ready := queue:in(Seq, Ready)}.
+insert(#{seq := Seq} = Entry, #{ready := Ready} = State) ->
+    queued_put(Entry, State#{ready := queue:in(Seq, Ready)}).
+
+%% The primary queue owns jobs and order; this optional index only locates queued messages.
+%% Backoff jobs remain indexed. Inflight jobs leave the index before dispatch.
+queued_put(#{seq := Seq} = Entry, #{jobs := Jobs} = State) ->
+    State1 =
+        case gb_trees:lookup(Seq, Jobs) of
+            {value, Previous} -> index_remove(Previous, State);
+            none -> State
+        end,
+    index_add(Entry, State1#{jobs := gb_trees:enter(Seq, Entry, Jobs)}).
+
+queued_remove(Seq, #{jobs := Jobs} = State) ->
+    case gb_trees:lookup(Seq, Jobs) of
+        none -> State;
+        {value, Entry} -> index_remove(Entry, State#{jobs := gb_trees:delete(Seq, Jobs)})
+    end.
+
+index_add(
+    #{kind := message, channel_id := ChannelId, seq := Seq},
+    #{message_index := Index} = State
+) ->
+    Seqs = gb_sets:add(Seq, maps:get(ChannelId, Index, gb_sets:empty())),
+    State#{message_index := Index#{ChannelId => Seqs}};
+index_add(_Entry, State) ->
+    State.
+
+index_remove(
+    #{kind := message, channel_id := ChannelId, seq := Seq},
+    #{message_index := Index} = State
+) ->
+    case maps:find(ChannelId, Index) of
+        error ->
+            State;
+        {ok, Seqs} ->
+            Rest = gb_sets:delete_any(Seq, Seqs),
+            Next =
+                case gb_sets:is_empty(Rest) of
+                    true -> maps:remove(ChannelId, Index);
+                    false -> Index#{ChannelId := Rest}
+                end,
+            State#{message_index := Next}
+    end;
+index_remove(_Entry, State) ->
+    State.
 
 -spec shed_to_capacity(state()) -> state().
 shed_to_capacity(#{jobs := Jobs, max_queue := MaxQueue} = State) ->
     case gb_trees:size(Jobs) > MaxQueue of
         true ->
-            {_Seq, Shed, Rest} = gb_trees:take_smallest(Jobs),
-            shed_to_capacity(shed(Shed, State#{jobs := Rest}));
+            {Seq, Shed} = gb_trees:smallest(Jobs),
+            shed_to_capacity(shed(Shed, queued_remove(Seq, State)));
         false ->
             State
     end.
@@ -223,24 +301,126 @@ log_shed(#{kind := Kind, channel_id := ChannelId, message_id := MessageId}) ->
         #{kind => Kind, channel_id => ChannelId, message_id => MessageId}
     ).
 
+%% 按逻辑任务数量限制在途工作。
 -spec pump(state()) -> state().
-pump(#{inflight := Inflight, max_inflight := MaxInflight} = State) when
-    map_size(Inflight) >= MaxInflight
-->
-    State;
-pump(#{ready := Ready, jobs := Jobs} = State) ->
+pump(#{max_inflight := MaxInflight} = State) ->
+    case inflight_items(State) >= MaxInflight of
+        true -> State;
+        false -> pump_ready(State)
+    end.
+
+%% 按队列顺序选择单项派发或连续清理批次。
+-spec pump_ready(state()) -> state().
+pump_ready(#{ready := Ready, jobs := Jobs} = State) ->
+    %% 仅清理任务允许形成批次，其他任务仍沿原单项路径派发。
     case queue:out(Ready) of
         {empty, _} ->
             State;
         {{value, Seq}, Rest} ->
-            pump(take_ready(gb_trees:lookup(Seq, Jobs), Seq, State#{ready := Rest}))
+            case gb_trees:lookup(Seq, Jobs) of
+                {value, #{kind := clear} = Entry} ->
+                    case maps:get(clear_batch_enabled, State, false) of
+                        true -> pump_clear_batch(Entry, State);
+                        false -> pump(take_ready({value, Entry}, Seq, State#{ready := Rest}))
+                    end;
+                Found ->
+                    pump(take_ready(Found, Seq, State#{ready := Rest}))
+            end
     end.
+
+%% 在有限等待后仅合并连续清理前缀派发。
+-spec pump_clear_batch(entry(), state()) -> state().
+pump_clear_batch(#{enqueued_at := At}, State) ->
+    %% 等待上界由最早任务决定，不因后续任务持续推迟发送。
+    Wait = 5 - (now_ms() - At),
+    case Wait > 0 of
+        true ->
+            case maps:get(clear_batch_timer, State, undefined) of
+                undefined ->
+                    State#{
+                        clear_batch_timer => erlang:send_after(Wait, self(), clear_batch_flush)
+                    };
+                _ ->
+                    State
+            end;
+        false ->
+            Slots = min(32, maps:get(max_inflight, State) - inflight_items(State)),
+            {Entries, State1} = take_clear_prefix(Slots, [], State),
+            case Entries of
+                [] ->
+                    pump(State1);
+                [First | _] ->
+                    %% 传输封装只聚合发送，各项清理边界保持独立。
+                    Items = [
+                        #{
+                            %% 与逐项回复匹配的稳定任务身份。
+                            <<"item_id">> => maps:get(item_id, E),
+
+                            %% 包含原始清理边界的任务载荷。
+                            <<"job">> => maps:get(job, E)
+                        }
+                     || E <- Entries
+                    ],
+                    Batch = First#{
+                        %% 保留各逻辑任务用于容量计算和逐项重试。
+                        batch_entries => Entries,
+
+                        %% 编码带版本与逐项清理载荷的传输封装。
+                        body := iolist_to_binary(
+                            json:encode(#{
+                                %% 批清理传输协议版本。
+                                <<"v">> => 2,
+
+                                %% 不合并各任务原始清理边界。
+                                <<"items">> => Items
+                            })
+                        )
+                    },
+                    pump(start_worker(Batch, State1))
+            end
+    end.
+
+%% 提取连续清理任务并保留消息与响铃屏障。
+-spec take_clear_prefix(non_neg_integer(), [entry()], state()) -> {[entry()], state()}.
+take_clear_prefix(0, Acc, State) ->
+    {lists:reverse(Acc), State};
+take_clear_prefix(N, Acc, #{ready := Ready, jobs := Jobs} = State) ->
+    case queue:out(Ready) of
+        {empty, _} ->
+            {lists:reverse(Acc), State};
+        {{value, Seq}, Rest} ->
+            case gb_trees:lookup(Seq, Jobs) of
+                none ->
+                    take_clear_prefix(N, Acc, State#{ready := Rest});
+                {value, #{kind := clear} = E} ->
+                    State1 = queued_remove(Seq, State#{ready := Rest}),
+                    case is_expired(E, State1) of
+                        true -> take_clear_prefix(N, Acc, drop_expired(E, State1));
+                        false -> take_clear_prefix(N - 1, [E | Acc], State1)
+                    end;
+                _ ->
+                    %% 消息或响铃是顺序屏障，不越过它们寻找清理任务。
+                    {lists:reverse(Acc), State}
+            end
+    end.
+
+%% 取得传输封装包含的原始逻辑任务。
+-spec logical_entries(entry()) -> [entry()].
+logical_entries(#{batch_entries := Entries}) ->
+    Entries;
+logical_entries(Entry) ->
+    [Entry].
+
+%% 按原始逻辑任务计算在途数量。
+-spec inflight_items(state()) -> non_neg_integer().
+inflight_items(#{inflight := Inflight}) ->
+    lists:sum([length(logical_entries(E)) || {_, _, E} <- maps:values(Inflight)]).
 
 -spec take_ready(none | {value, entry()}, non_neg_integer(), state()) -> state().
 take_ready(none, _Seq, State) ->
     State;
-take_ready({value, Entry}, Seq, #{jobs := Jobs} = State) ->
-    dispatch(Entry, State#{jobs := gb_trees:delete(Seq, Jobs)}).
+take_ready({value, Entry}, Seq, State) ->
+    dispatch(Entry, queued_remove(Seq, State)).
 
 -spec dispatch(entry(), state()) -> state().
 dispatch(Entry, State) ->
@@ -298,7 +478,7 @@ with_user_ids(UserIds, #{job := Job} = Entry) ->
     }.
 
 -spec apply_read(integer(), integer(), integer(), state()) -> state().
-apply_read(UserId, ChannelId, MessageId, #{reads := Reads, jobs := Jobs} = State) ->
+apply_read(UserId, ChannelId, MessageId, #{reads := Reads} = State) ->
     Key = {UserId, ChannelId},
     Watermark =
         case maps:find(Key, Reads) of
@@ -306,12 +486,18 @@ apply_read(UserId, ChannelId, MessageId, #{reads := Reads, jobs := Jobs} = State
             error -> MessageId
         end,
     State1 = State#{reads := Reads#{Key => {Watermark, now_ms()}}},
+    Seqs = gb_sets:to_list(
+        maps:get(ChannelId, maps:get(message_index, State1), gb_sets:empty())
+    ),
     State2 = lists:foldl(
-        fun({Seq, Entry}, Acc) ->
-            truncate_entry(Seq, Entry, UserId, ChannelId, MessageId, Acc)
+        fun(Seq, Acc) ->
+            case gb_trees:lookup(Seq, maps:get(jobs, Acc)) of
+                {value, Entry} -> truncate_entry(Seq, Entry, UserId, ChannelId, MessageId, Acc);
+                none -> Acc
+            end
         end,
         State1,
-        gb_trees:to_list(Jobs)
+        Seqs
     ),
     note_inflight_read(UserId, ChannelId, MessageId, State2).
 
@@ -373,30 +559,40 @@ remove_reader(Seq, #{user_ids := UserIds} = Entry, UserId, State) ->
         false ->
             State;
         true ->
-            drop_reader(Seq, lists:delete(UserId, UserIds), Entry, bump(truncations, 1, State))
+            State1 = bump(truncations, 1, State),
+            case lists:delete(UserId, UserIds) of
+                [] ->
+                    queued_remove(Seq, State1);
+                Remaining ->
+                    queued_put(with_user_ids(Remaining, Entry), State1)
+            end
     end.
-
--spec drop_reader(non_neg_integer(), [integer()], entry(), state()) -> state().
-drop_reader(Seq, [], _Entry, #{jobs := Jobs} = State) ->
-    State#{jobs := gb_trees:delete(Seq, Jobs)};
-drop_reader(Seq, Remaining, Entry, #{jobs := Jobs} = State) ->
-    State#{jobs := gb_trees:update(Seq, with_user_ids(Remaining, Entry), Jobs)}.
 
 -spec record_active(integer(), state()) -> state().
 record_active(UserId, #{active := Active, next_seq := Seq} = State) ->
     State#{active := Active#{UserId => {Seq, now_ms()}}, next_seq := Seq + 1}.
 
+%% 启动受监控请求并选择单项或批传输协议。
 -spec start_worker(entry(), state()) -> state().
 start_worker(Entry, #{inflight := Inflight, request_timeout_ms := Timeout} = State) ->
     #{subject := Subject, body := Body} = Entry,
     Outbox = self(),
-    {Pid, MRef} = spawn_monitor(fun() ->
-        Outbox ! {push_outbox_reply, self(), push_outbox_worker:send(Subject, Body, Timeout)}
-    end),
+    %% 批封装使用逐项回复协议，单项路径保持原来的请求方式。
+    {Pid, MRef} = spawn_monitor(
+        fun() ->
+            Result =
+                case maps:is_key(batch_entries, Entry) of
+                    true -> push_job_publisher:request_batch(Subject, Body, Timeout);
+                    false -> push_outbox_worker:send(Subject, Body, Timeout)
+                end,
+            Outbox ! {push_outbox_reply, self(), Result}
+        end
+    ),
     TRef = erlang:send_after(Timeout, Outbox, {request_deadline, Pid}),
     State#{inflight := Inflight#{Pid => {MRef, TRef, Entry}}}.
 
--spec finish_worker(pid(), ok | {error, term()}, state()) -> state().
+%% 释放请求监控并处理逐项结果和后续清理。
+-spec finish_worker(pid(), ok | {error, term()} | {batch_results, [map()]}, state()) -> state().
 finish_worker(Pid, Result, #{inflight := Inflight} = State) ->
     case maps:take(Pid, Inflight) of
         {{MRef, TRef, Entry}, Rest} ->
@@ -405,10 +601,42 @@ finish_worker(Pid, Result, #{inflight := Inflight} = State) ->
             Followups = maps:get(followups, State, #{}),
             Reads = maps:get(Pid, Followups, #{}),
             State1 = State#{inflight := Rest, followups => maps:remove(Pid, Followups)},
-            follow_up_clears(Entry, Reads, handle_result(Result, Entry, State1));
+            follow_up_clears(Entry, Reads, finish_entries(Result, Entry, State1));
         error ->
             State
     end.
+
+%% 逐项匹配唯一回复并仅重试未确认任务。
+-spec finish_entries(term(), entry(), state()) -> state().
+finish_entries({batch_results, Results}, #{batch_entries := Entries}, State) ->
+    %% 每个原始身份必须恰好匹配一次，成功兄弟不会随失败项重试。
+    lists:foldl(
+        fun(E, Acc) ->
+            Id = maps:get(item_id, E),
+            Matches = [R || #{<<"item_id">> := Key} = R <- Results, Key =:= Id],
+            Result =
+                case Matches of
+                    [#{<<"ok">> := true}] ->
+                        ok;
+                    [#{<<"ok">> := false} = R] ->
+                        {error, maps:get(<<"error">>, R, batch_item_failed)};
+                    _ ->
+                        {error, missing_or_duplicate_batch_result}
+                end,
+            handle_result(Result, E, Acc)
+        end,
+        State,
+        Entries
+    );
+finish_entries(Result, #{batch_entries := Entries}, State) ->
+    Failure =
+        case Result of
+            {error, _} -> Result;
+            _ -> {error, invalid_batch_reply}
+        end,
+    lists:foldl(fun(E, Acc) -> handle_result(Failure, E, Acc) end, State, Entries);
+finish_entries(Result, Entry, State) ->
+    handle_result(Result, Entry, State).
 
 -spec follow_up_clears(entry(), #{integer() => integer()}, state()) -> state().
 follow_up_clears(_Entry, Reads, State) when map_size(Reads) =:= 0 ->
@@ -484,10 +712,10 @@ drop_prepared(Entry, State) ->
     end.
 
 -spec schedule_retry(entry(), state()) -> state().
-schedule_retry(#{seq := Seq, attempts := Attempts} = Entry, #{jobs := Jobs} = State) ->
+schedule_retry(#{seq := Seq, attempts := Attempts} = Entry, State) ->
     NextAttempts = Attempts + 1,
     _ = erlang:send_after(retry_delay(NextAttempts, State), self(), {retry, Seq}),
-    State1 = State#{jobs := gb_trees:enter(Seq, Entry#{attempts := NextAttempts}, Jobs)},
+    State1 = queued_put(Entry#{attempts := NextAttempts}, State),
     shed_to_capacity(bump(retries, 1, State1)).
 
 -spec retry_delay(pos_integer(), state()) -> pos_integer().
@@ -530,6 +758,7 @@ prune(#{reads := Reads, active := Active, max_age_ms := MaxAge} = State) ->
         active := maps:filter(fun(_UserId, {_Seq, At}) -> At >= Cutoff end, Active)
     }.
 
+%% 汇总队列及逻辑任务在途统计。
 -spec build_stats(state()) -> map().
 build_stats(#{jobs := Jobs, inflight := Inflight, counters := Counters, dropped := Dropped}) ->
     maps:merge(
@@ -544,7 +773,10 @@ build_stats(#{jobs := Jobs, inflight := Inflight, counters := Counters, dropped 
         },
         Counters#{
             depth => gb_trees:size(Jobs),
-            inflight => map_size(Inflight),
+            inflight => lists:sum([
+                length(logical_entries(E))
+             || {_, _, E} <- maps:values(Inflight)
+            ]),
             dropped => Dropped
         }
     ).
@@ -582,3 +814,192 @@ env_pos_integer(Key, Default) ->
         Value when is_integer(Value), Value > 0 -> Value;
         _ -> Default
     end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+count(Counter, #{counters := Counters}) ->
+    maps:get(Counter, Counters, 0).
+
+an_expired_entry_is_dropped_without_the_users_who_read_it_test() ->
+    State = test_state(#{{7, 20} => {30, now_ms()}}),
+    Result = handle_result({error, timeout}, test_entry([7, 8]), State),
+    ?assertEqual(#{{message, expired} => 1}, maps:get(dropped, Result)),
+    ?assertEqual(1, count(truncations, Result)),
+    ?assertEqual(0, count(retries, Result)).
+
+an_expired_entry_every_recipient_read_is_not_counted_as_dropped_test() ->
+    State = test_state(#{{7, 20} => {30, now_ms()}, {8, 20} => {31, now_ms()}}),
+    Result = handle_result({error, timeout}, test_entry([7, 8]), State),
+    ?assertEqual(#{}, maps:get(dropped, Result)),
+    ?assertEqual(2, count(truncations, Result)).
+
+an_expired_clear_is_dropped_and_counted_by_kind_test() ->
+    State = test_state(#{{7, 20} => {30, now_ms()}, {8, 20} => {30, now_ms()}}),
+    Entry = (test_entry([7, 8]))#{kind := clear},
+    Result = handle_result({error, timeout}, Entry, State),
+    ?assertEqual(#{{clear, expired} => 1}, maps:get(dropped, Result)),
+    ?assertEqual(0, count(truncations, Result)).
+
+a_failed_entry_within_its_age_is_retried_test() ->
+    State = test_state(#{}),
+    Entry = (test_entry([7]))#{enqueued_at := now_ms()},
+    Result = handle_result({error, timeout}, Entry, State),
+    ?assertEqual(#{}, maps:get(dropped, Result)),
+    ?assertEqual(1, count(retries, Result)),
+    ?assertEqual({value, Entry#{attempts := 4}}, gb_trees:lookup(0, maps:get(jobs, Result))).
+
+an_entry_expired_at_dispatch_is_dropped_test() ->
+    Result = dispatch(test_entry([7]), test_state(#{})),
+    ?assertEqual(#{{message, expired} => 1}, maps:get(dropped, Result)),
+    ?assertEqual(0, map_size(maps:get(inflight, Result))).
+
+reported_drops_are_counted_by_kind_and_reason_test() ->
+    {noreply, State1} = handle_cast({dropped, message, payload_too_large}, test_state(#{})),
+    {noreply, State2} = handle_cast({dropped, message, payload_too_large}, State1),
+    {noreply, State3} = handle_cast({dropped, ring, outbox_unavailable}, State2),
+    ?assertEqual(
+        #{{message, payload_too_large} => 2, {ring, outbox_unavailable} => 1},
+        maps:get(dropped, build_stats(State3))
+    ).
+
+test_state(Reads) ->
+    #{
+        jobs => gb_trees:empty(),
+        ready => queue:new(),
+        inflight => #{},
+        followups => #{},
+        next_seq => 1,
+        reads => Reads,
+        active => #{},
+        counters => #{},
+        dropped => #{},
+        max_queue => ?DEFAULT_MAX_QUEUE,
+        max_inflight => ?DEFAULT_MAX_INFLIGHT,
+        request_timeout_ms => ?DEFAULT_REQUEST_TIMEOUT_MS,
+        max_age_ms => ?DEFAULT_MAX_AGE_MS,
+        retry_base_ms => ?DEFAULT_RETRY_BASE_MS
+    }.
+
+test_entry(UserIds) ->
+    #{
+        kind => message,
+        subject => <<"rpc.push.message">>,
+        job => #{<<"user_ids">> => [integer_to_binary(UserId) || UserId <- UserIds]},
+        body => <<"{}">>,
+        user_ids => UserIds,
+        channel_id => 20,
+        message_id => 30,
+        seq => 0,
+        enqueued_at => now_ms() - ?DEFAULT_MAX_AGE_MS,
+        attempts => 3
+    }.
+
+
+%% 验证连续清理分组遵守顺序屏障与批大小限制。
+-spec clear_batch_mixed_fifo_and_limit_test() -> term().
+clear_batch_mixed_fifo_and_limit_test() ->
+    E = (test_entry([7]))#{kind := clear, enqueued_at := now_ms(), item_id => <<"a">>},
+    S0 = test_state(#{}),
+    S1 = lists:foldl(
+        fun({Seq, Kind}, Acc) -> insert(E#{seq := Seq, kind := Kind}, Acc) end,
+        S0,
+        [{0, clear}, {1, clear}, {2, message}, {3, clear}]
+    ),
+    {Taken, S2} = take_clear_prefix(32, [], S1),
+    ?assertEqual([0, 1], [maps:get(seq, X) || X <- Taken]),
+    ?assertEqual({value, 2}, queue:peek(maps:get(ready, S2))),
+    S3 = lists:foldl(fun(Seq, Acc) -> insert(E#{seq := Seq}, Acc) end, S0, lists:seq(0, 39)),
+    {ThirtyTwo, S4} = take_clear_prefix(32, [], S3),
+    ?assertEqual(32, length(ThirtyTwo)),
+    ?assertEqual(8, gb_trees:size(maps:get(jobs, S4))),
+    ?assertEqual({value, 32}, queue:peek(maps:get(ready, S4))).
+
+%% 验证批次按逻辑任务占用容量并启动有限等待。
+-spec clear_batch_logical_admission_and_aggregation_test() -> term().
+clear_batch_logical_admission_and_aggregation_test() ->
+    E = (test_entry([7]))#{kind := clear, enqueued_at := now_ms(), item_id => <<"a">>},
+    Batch = E#{batch_entries => lists:duplicate(32, E)},
+    S0 = (test_state(#{}))#{max_inflight := 96, clear_batch_enabled => true},
+    S1 = S0#{inflight := #{self() => {make_ref(), make_ref(), Batch}}},
+    ?assertEqual(32, inflight_items(S1)),
+    S2 = pump_clear_batch(E, insert(E, S0)),
+    ?assertEqual(0, inflight_items(S2)),
+    ?assertEqual(1, gb_trees:size(maps:get(jobs, S2))),
+    ?assert(is_reference(maps:get(clear_batch_timer, S2))),
+    erlang:cancel_timer(maps:get(clear_batch_timer, S2)).
+
+%% 验证部分失败、缺失、重复及超时只重试相应任务。
+-spec clear_batch_partial_missing_duplicate_and_timeout_retry_test() -> term().
+clear_batch_partial_missing_duplicate_and_timeout_retry_test() ->
+    E = (test_entry([7]))#{
+        kind := clear,
+        enqueued_at := now_ms(),
+        item_id => <<"a">>,
+        job := #{
+            <<"v">> => 1,
+            <<"user_id">> => <<"7">>,
+            <<"channel_id">> => <<"20">>,
+            <<"message_id">> => <<"30">>,
+            <<"after_message_id">> => <<"29">>
+        }
+    },
+    E2 = E#{seq := 1, item_id := <<"b">>},
+    E3 = E#{seq := 2, item_id := <<"c">>},
+    Batch = E#{batch_entries => [E, E2, E3]},
+    Good = #{<<"item_id">> => <<"a">>, <<"ok">> => true},
+    Failed = #{
+        <<"item_id">> => <<"b">>,
+        <<"ok">> => false,
+        <<"error">> => <<"rpc_unavailable">>
+    },
+    %% 成功项结算后，只将失败和缺失项放回重试队列。
+    S = finish_entries({batch_results, [Good, Failed]}, Batch, test_state(#{})),
+    ?assertEqual(1, count(delivered, S)),
+    ?assertEqual(2, count(retries, S)),
+    ?assertEqual(false, gb_trees:is_defined(0, maps:get(jobs, S))),
+    Retried = gb_trees:get(1, maps:get(jobs, S)),
+    ?assertEqual(<<"b">>, maps:get(item_id, Retried)),
+    ?assertEqual(<<"29">>, maps:get(<<"after_message_id">>, maps:get(job, Retried))),
+    Duplicate = finish_entries(
+        {batch_results, [Good, Good]}, E#{batch_entries => [E]}, test_state(#{})
+    ),
+    ?assertEqual(1, count(retries, Duplicate)),
+    ?assertEqual(0, count(delivered, Duplicate)),
+    Timeout = finish_entries({error, timeout}, Batch, test_state(#{})),
+    ?assertEqual(3, count(retries, Timeout)),
+    ?assertEqual(0, count(delivered, Timeout)),
+    Unversioned = finish_entries(ok, Batch, test_state(#{})),
+    ?assertEqual(3, count(retries, Unversioned)),
+    ?assertEqual(0, count(delivered, Unversioned)).
+
+%% 验证手动未读清理保留各项原始边界。
+-spec clear_batch_manual_unread_keeps_each_original_frontier_test() -> term().
+clear_batch_manual_unread_keeps_each_original_frontier_test() ->
+    S0 = test_state(#{{7, 20} => {100, now_ms()}}),
+    E = (test_entry([7]))#{
+        kind := clear,
+        enqueued_at := now_ms(),
+        item_id => <<"a">>,
+        job := #{<<"message_id">> => <<"30">>, <<"after_message_id">> => <<"29">>}
+    },
+    E2 = E#{
+        seq := 1,
+        item_id := <<"b">>,
+        job := #{<<"message_id">> => <<"28">>, <<"after_message_id">> => <<"27">>}
+    },
+    {Taken, _} = take_clear_prefix(32, [], insert(E2, insert(E, S0))),
+    ?assertEqual([maps:get(job, E), maps:get(job, E2)], [maps:get(job, X) || X <- Taken]).
+
+%% Truncation must mutate both the queue tree and the extracted channel index.
+queued_reader_truncation_preserves_channel_index_test() ->
+    E = (test_entry([7, 8]))#{enqueued_at := now_ms()},
+    S0 = insert(E, (test_state(#{}))#{message_index => #{}}),
+    S1 = remove_reader(0, E, 7, S0),
+    ?assertEqual([8], maps:get(user_ids, gb_trees:get(0, maps:get(jobs, S1)))),
+    ?assertEqual([0], gb_sets:to_list(maps:get(20, maps:get(message_index, S1)))),
+    S2 = remove_reader(0, gb_trees:get(0, maps:get(jobs, S1)), 8, S1),
+    ?assert(gb_trees:is_empty(maps:get(jobs, S2))),
+    ?assertEqual(#{}, maps:get(message_index, S2)).
+
+-endif.

@@ -11,7 +11,14 @@
 -spec context(map(), integer(), map()) -> map().
 context(MessageData, ChannelId, State) ->
     MentionRoles = maps:get(<<"mention_roles">>, MessageData, []),
+    CandidateIds = guild_thread_mention_policy:candidates(MessageData),
+    Scope = case CandidateIds of
+        Ids when is_list(Ids) -> guild_thread_push:mention_view(ChannelId, Ids, State);
+        undefined -> guild_thread_push:scope(ChannelId, State)
+    end,
     #{
+        mention_candidate_ids => CandidateIds,
+        role_candidates => maps:get(<<"__thread_role_candidates">>, MessageData, undefined),
         mention_everyone => type_conv:is_true(
             maps:get(<<"mention_everyone">>, MessageData, false)
         ),
@@ -21,13 +28,16 @@ context(MessageData, ChannelId, State) ->
         format_members => guild_push_candidates:format_member_ids(MessageData),
         channel_id => ChannelId,
         thread_recipient => guild_thread_gate:recipient_active(ChannelId, State),
-        thread_scope => guild_thread_push:scope(ChannelId, State),
+        thread_scope => Scope,
         session_eligibility => maps:get(session_eligibility, State),
         grace_sessions => guild_push_engagement:held_sessions(maps:get(grace_hold, State, none))
     }.
 
 -spec members(ets:tid(), map(), map()) ->
     {ok, map()} | {error, table_unavailable}.
+members(_MembersTab, #{mention_candidate_ids := Ids, thread_scope := undefined}, _State)
+    when is_list(Ids) ->
+    {ok, initial_scan_acc()};
 members(MembersTab, Context, State) ->
     try
         Context1 = with_thread_role_adds(MembersTab, Context, State),
@@ -47,6 +57,8 @@ initial_scan_acc() ->
     }.
 
 -spec scan_user_ids(ets:tid(), map()) -> [user_id()].
+scan_user_ids(_MembersTab, #{mention_candidate_ids := Ids} = Context) when is_list(Ids) ->
+    lists:usort(Ids ++ maps:keys(maps:get(format_members, Context)));
 scan_user_ids(_MembersTab, #{thread_scope := #{members := Members}} = Context) ->
     lists:usort(
         maps:keys(Members) ++
@@ -110,7 +122,7 @@ with_thread_role_adds(MembersTab, #{thread_scope := Scope} = Context, State) whe
         role_adds => guild_thread_push:role_adds(
             Scope,
             Context,
-            {ets, MembersTab},
+            role_candidate_source(MembersTab, Context),
             guild_thread_push:role_visible(maps:get(channel_id, Context), State)
         )
     };
@@ -165,3 +177,12 @@ maybe_collect_format_member(UserId, Member, Context, Acc) ->
         false ->
             Acc
     end.
+
+%% Frozen role identities must never fall back to a live guild-wide role scan.
+-spec role_candidate_source(ets:tid(), map()) -> {ets, ets:tid()} | {map, map()}.
+role_candidate_source(Tab, #{role_candidates := Ids}) when is_list(Ids) ->
+    {map, maps:from_list([{Id, Member} || Id <- Ids,
+        Member <- [guild_push_candidates:lookup_member(Id, {ets, Tab})], is_map(Member)])};
+role_candidate_source(_Tab, #{mention_candidate_ids := Ids}) when is_list(Ids) ->
+    {map, #{}};
+role_candidate_source(Tab, _) -> {ets, Tab}.

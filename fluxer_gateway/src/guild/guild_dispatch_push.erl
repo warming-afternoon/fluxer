@@ -24,10 +24,38 @@ maybe_send_push_notifications(message_create, FinalData, GuildId, UpdatedState) 
             push_message_params:suppresses_notifications(FinalData)
     of
         true -> ok;
-        false -> maybe_spawn_push(FinalData, GuildId, UpdatedState)
+        false ->
+            case prepare_push(FinalData, UpdatedState) of
+                skip -> guild_push_metrics:count(thread_mentions_early_skip);
+                {send, PushData} -> maybe_spawn_push(PushData, GuildId, UpdatedState)
+            end
     end;
 maybe_send_push_notifications(_Event, _FinalData, _GuildId, _UpdatedState) ->
     ok.
+
+%% A forum starter has a separate watcher notification path. Detect it before
+%% mentions-only admission; ordinary thread messages must still fail early.
+-spec prepare_push(event_data(), guild_state()) -> skip | {send, map()}.
+prepare_push(Message, State) ->
+    ChannelId = snowflake_id:parse_optional(maps:get(<<"channel_id">>, Message, undefined)),
+    MessageId = snowflake_id:parse_optional(maps:get(<<"id">>, Message, undefined)),
+    case is_integer(ChannelId) andalso MessageId =:= ChannelId andalso
+        guild_thread_push:forum_starter(Message, ChannelId, maps:get(data, State, #{}))
+    of
+        {ForumId, _Members} when is_integer(ForumId) ->
+            Prepared = case guild_thread_mention_policy:prepare(Message, State) of
+                {send, MentionMessage} -> MentionMessage;
+                skip -> Message#{
+                    <<"mention_everyone">> => false,
+                    <<"mention_here">> => false,
+                    <<"mention_roles">> => [],
+                    <<"__thread_mention_candidates">> => [],
+                    <<"__thread_role_candidates">> => []
+                }
+            end,
+            {send, Prepared#{<<"__forum_starter_push">> => true}};
+        _ -> guild_thread_mention_policy:prepare(Message, State)
+    end.
 
 -spec maybe_spawn_push(event_data(), guild_id(), guild_state()) -> ok.
 maybe_spawn_push(FinalData, GuildId, UpdatedState) ->
@@ -165,7 +193,7 @@ spawn_push(FinalData, GuildId, UpdatedState, Gate) ->
             missing_members_table(FinalData, GuildId, UpdatedState, Gate)
     end.
 
--spec compact_push_state(ets:tid(), map(), guild_id(), guild_state()) -> guild_state().
+-spec compact_push_state(ets:tid() | undefined, map(), guild_id(), guild_state()) -> guild_state().
 compact_push_state(MembersTab, Data, GuildId, UpdatedState) ->
     Sessions = maps:get(sessions, UpdatedState, #{}),
     {SessionEligibility, Hold} = guild_push_engagement:snapshot(Sessions, UpdatedState),
@@ -216,7 +244,36 @@ missing_members_table(FinalData, GuildId, UpdatedState, Gate) ->
         "guild_push_members_table_unavailable: guild_id=~p phase=spawn",
         [GuildId]
     ),
-    spawn_legacy_push(FinalData, GuildId, UpdatedState, Gate).
+    case guild_thread_mention_policy:candidates(FinalData) of
+        Ids when is_list(Ids) ->
+            Data = maps:get(data, UpdatedState, #{}),
+            Members = maps:get(members_normalized, Data, #{}),
+            FormatIds = maps:keys(guild_push_candidates:format_member_ids(FinalData)),
+            Snapshot = case maps:get(<<"__forum_starter_push">>, FinalData, false) of
+                true -> Members; % broad forum watcher source, separate from bounded mention scan
+                false -> maps:with(Ids ++ FormatIds, Members)
+            end,
+            Compact = compact_push_state(undefined, Data, GuildId, UpdatedState),
+            spawn_push_worker(
+                fun() ->
+                    Temp = ets:new(thread_mention_fallback, [set]),
+                    try
+                        true = ets:insert(Temp, maps:to_list(Snapshot)),
+                        guild_push_delivery:compact(
+                            FinalData,
+                            GuildId,
+                            Compact#{members_ets => Temp}
+                        )
+                    after
+                        ets:delete(Temp)
+                    end
+                end,
+                GuildId,
+                Gate
+            );
+        undefined ->
+            spawn_legacy_push(FinalData, GuildId, UpdatedState, Gate)
+    end.
 
 -spec spawn_legacy_push(event_data(), guild_id(), guild_state(), push_gate()) -> ok.
 spawn_legacy_push(FinalData, GuildId, UpdatedState, Gate) ->

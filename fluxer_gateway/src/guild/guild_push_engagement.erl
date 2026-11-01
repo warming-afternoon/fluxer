@@ -18,10 +18,18 @@
 -spec snapshot(map(), map()) ->
     {#{integer() => boolean()}, grace_hold()}.
 snapshot(Sessions, State) ->
-    case presence_eligibility_enabled() of
-        true -> build_push_presence_eligibility(Sessions, State);
-        false -> build_legacy_session_eligibility(Sessions)
-    end.
+    PresenceMode = presence_eligibility_enabled(),
+    {Eligibility, Held} = guild_push_activity_cache:get(
+        Sessions, maps:get(member_presence, State, undefined), PresenceMode,
+        fun() ->
+            {Computed, Hold} = case PresenceMode of
+                true -> build_push_presence_eligibility(Sessions, State);
+                false -> build_legacy_session_eligibility(Sessions)
+            end,
+            {Computed, held_sessions(Hold)}
+        end
+    ),
+    {Eligibility, grace_hold(Held)}.
 
 -spec guild_pid() -> pid() | undefined.
 guild_pid() ->

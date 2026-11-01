@@ -8,11 +8,13 @@
 -define(GUILD_CALL_TIMEOUT, 4000).
 -define(RELOAD_ALL_TIMEOUT, 15000).
 
+%% 分派服务器生命周期与联合鉴权请求。
 -spec handle(binary(), map()) -> term().
 handle(<<"guild.dispatch">>, P) -> handle_dispatch(P);
 handle(<<"guild.dispatch_many">>, P) -> handle_dispatch_many(P);
 handle(<<"guild.get_data">>, P) -> handle_get_data(P);
 handle(<<"guild.get_auth_context">>, P) -> handle_get_auth_context(P);
+handle(<<"guild.get_channel_authorization">>, P) -> handle_get_channel_authorization(P);
 handle(<<"guild.start">>, P) -> handle_start(P);
 handle(<<"guild.stop">>, P) -> handle_stop(P);
 handle(<<"guild.reload">>, P) -> handle_reload(P);
@@ -29,8 +31,7 @@ handle_dispatch(#{<<"guild_id">> := GuildIdBin, <<"event">> := Event, <<"data">>
             "rpc guild.dispatch: guild_id=~p event=~p pid=~p alive=~p",
             [GuildId, EventAtom, Pid, IsAlive]
         ),
-        gen_server:cast(Pid, {dispatch, #{event => EventAtom, data => Data}}),
-        true
+        dispatch_request_to_owner(Pid, #{event => EventAtom, data => Data})
     end).
 
 -spec handle_dispatch_many(map()) -> term().
@@ -40,11 +41,31 @@ handle_dispatch_many(#{<<"guild_id">> := GuildIdBin, <<"events">> := Events}) wh
     GuildId = validation:snowflake_or_throw(<<"guild_id">>, GuildIdBin),
     Requests = [dispatch_request(Event) || Event <- Events],
     gateway_rpc_guild_infra:with_guild_unchecked(GuildId, fun(Pid) ->
-        gen_server:cast(Pid, {dispatch_many, Requests}),
+        %% 有票据的删除必须等待 owner 完成，不能把入队成功当作可清理 DB 的确认。
+        case lists:any(fun is_ticketed_delete/1, Requests) of
+            true -> lists:foreach(fun(Request) -> dispatch_request_to_owner(Pid, Request) end, Requests);
+            false -> gen_server:cast(Pid, {dispatch_many, Requests})
+        end,
         true
     end);
 handle_dispatch_many(_Params) ->
     gateway_rpc_error:raise(validation_invalid_params).
+
+%% 只改变带内部票据的删除，其他事件保留原异步分发契约。
+-spec dispatch_request_to_owner(pid(), map()) -> true.
+dispatch_request_to_owner(Pid, #{event := thread_delete, data := #{<<"_fluxer_lifecycle_ticket">> := _} = Data}) ->
+    case guild_query_handler:call(Pid, {dispatch_thread_delete, Data}, 4000) of
+        true -> true;
+        _ -> gateway_rpc_error:raise(<<"thread_delete_dispatch_failed">>)
+    end;
+dispatch_request_to_owner(Pid, Request) ->
+    gen_server:cast(Pid, {dispatch, Request}),
+    true.
+
+%% 识别内部删除票据，不扩大普通批量事件的同步范围。
+-spec is_ticketed_delete(map()) -> boolean().
+is_ticketed_delete(#{event := thread_delete, data := #{<<"_fluxer_lifecycle_ticket">> := _}}) -> true;
+is_ticketed_delete(_) -> false.
 
 -spec dispatch_request(term()) -> map().
 dispatch_request(#{<<"event">> := Event, <<"data">> := Data}) when is_binary(Event) ->
@@ -64,6 +85,46 @@ handle_get_auth_context(#{<<"guild_id">> := GuildIdBin, <<"user_id">> := UserIdB
     UserId = optional_user_id(UserIdBin),
     ChannelId = optional_channel_id(maps:get(<<"channel_id">>, Params, null)),
     get_auth_context_from_guild(GuildId, UserId, ChannelId).
+
+%% 校验联合鉴权参数并读取所属服务器的权限快照。
+-spec handle_get_channel_authorization(map()) -> term().
+handle_get_channel_authorization(
+    #{
+        <<"guild_id">> := GuildBin,
+        <<"user_id">> := UserBin,
+        <<"permission_target_channel_id">> := TargetBin,
+        <<"mode">> := Mode
+    } = Params
+) when Mode =:= <<"channel">>; Mode =:= <<"thread">> ->
+    %% 校验传输参数后才访问实际服务器所属进程。
+    GuildId = validation:snowflake_or_throw(<<"guild_id">>, GuildBin),
+    UserId = validation:snowflake_or_throw(<<"user_id">>, UserBin),
+    Target = validation:snowflake_or_throw(<<"permission_target_channel_id">>, TargetBin),
+    Context = optional_channel_id(maps:get(<<"context_channel_id">>, Params, null)),
+    Request =
+        {get_guild_channel_authorization, #{
+            %% 发起鉴权的用户标识。
+            user_id => UserId,
+
+            %% 需要读取的父频道上下文。
+            channel_id => Context,
+
+            %% 权限计算所针对的频道。
+            permission_target_channel_id => Target,
+
+            %% 普通频道或子频道鉴权模式。
+            mode => Mode
+        }},
+    case read_guild(GuildId, Request) of
+        #{auth_context := null} ->
+            gateway_rpc_error:raise(<<"forbidden">>);
+        #{auth_context := Result} ->
+            guild_data_wire:payload(Result);
+        _ ->
+            gateway_rpc_error:raise(<<"guild_data_error">>)
+    end;
+handle_get_channel_authorization(_) ->
+    gateway_rpc_error:raise(validation_invalid_params).
 
 -spec optional_channel_id(term()) -> integer() | null.
 optional_channel_id(Value) ->

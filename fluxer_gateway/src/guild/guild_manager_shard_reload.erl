@@ -105,10 +105,20 @@ reload_one_async(GuildId, Pid, From) ->
 
 -spec reply_reload_result(pid(), gen_server:from(), fetch_result()) -> ok.
 reply_reload_result(Pid, From, {ok, Data}) ->
-    _ = shard_utils:safe_gen_call_detailed(Pid, {reload, Data}, ?GUILD_CALL_TIMEOUT),
-    gen_server:reply(From, ok);
-reply_reload_result(_Pid, From, {error, _Reason}) ->
-    gen_server:reply(From, {error, fetch_failed}).
+    apply_reload_and_reply(Pid, From, Data, ?GUILD_CALL_TIMEOUT);
+reply_reload_result(_Pid, From, {error, _Reason} = Error) ->
+    gen_server:reply(From, Error).
+
+%% 只有owner确认应用完成才回复成功，超时或退出必须保留失败。
+-spec apply_reload_and_reply(pid(), gen_server:from(), map(), pos_integer()) -> ok.
+apply_reload_and_reply(Pid, From, Data, Timeout) ->
+    Result =
+        case shard_utils:safe_gen_call_detailed(Pid, {reload, Data}, Timeout) of
+            ok -> ok;
+            {error, _Reason} = Error -> Error;
+            Other -> {error, {invalid_reload_reply, Other}}
+        end,
+    gen_server:reply(From, Result).
 
 -spec reload_all_async(gen_server:from(), [{guild_id(), pid()}]) -> ok.
 reload_all_async(From, GuildsToReload) ->

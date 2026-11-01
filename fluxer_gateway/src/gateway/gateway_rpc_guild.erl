@@ -35,10 +35,19 @@ route(M, P) ->
     Handler(M, P).
 
 -define(HANDLER_MAP, #{
+    <<"guild.dispatch_thread_message">> => fun gateway_rpc_thread_mentions:handle/2,
+    <<"guild.prepare_thread_lifecycle">> => fun gateway_rpc_thread_lifecycle:handle/2,
+    <<"guild.resolve_thread_mention_decision">> => fun gateway_rpc_thread_mentions:handle/2,
+    <<"guild.thread_mention_capabilities">> => fun gateway_rpc_thread_mentions:handle/2,
+    <<"guild.register_thread_mention_component">> => fun gateway_rpc_thread_mentions:handle/2,
     <<"guild.dispatch">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.dispatch_many">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.get_data">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.get_auth_context">> => fun gateway_rpc_guild_lifecycle:handle/2,
+
+    %% 将联合鉴权请求交给服务器生命周期入口。
+    <<"guild.get_channel_authorization">> => fun gateway_rpc_guild_lifecycle:handle/2,
+
     <<"guild.start">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.stop">> => fun gateway_rpc_guild_lifecycle:handle/2,
     <<"guild.reload">> => fun gateway_rpc_guild_lifecycle:handle/2,
@@ -73,6 +82,7 @@ route(M, P) ->
     <<"guild.evict_visitors">> => fun gateway_rpc_guild_visitors:handle/2
 }).
 
+%% 按方法名称选择频道与服务器请求处理器。
 -spec route_handler(binary()) -> fun((binary(), map()) -> term()).
 route_handler(Method) -> maps:get(Method, ?HANDLER_MAP).
 

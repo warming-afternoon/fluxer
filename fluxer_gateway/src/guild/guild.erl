@@ -78,7 +78,10 @@ publish_read_model(_Result, _OldState) ->
 handle_call_internal({session_connect, Request}, {CallerPid, _}, State) ->
     handle_session_connect_call(Request, CallerPid, State);
 handle_call_internal(export_handoff_state, _From, State) ->
-    {reply, {ok, guild_handoff:export_handoff_state(State)}, State};
+    case guild_thread_lifecycle:handoff_safe(State) of
+        true -> {reply, {ok, guild_handoff:export_handoff_state(State)}, State};
+        false -> {reply, {error, thread_lifecycle_busy}, State}
+    end;
 handle_call_internal({get_guild_id}, _From, State) ->
     {reply, maps:get(id, State, undefined), State};
 handle_call_internal({get_voice_guild_state}, _From, State) ->
@@ -153,6 +156,8 @@ handle_cast_internal({thread_subscriptions, SessionId, Subscriptions}, State) wh
     is_binary(SessionId), is_map(Subscriptions)
 ->
     {noreply, guild_thread_subscriptions:update(SessionId, Subscriptions, State)};
+handle_cast_internal({thread_watch_update, Request}, State) when is_map(Request) ->
+    {noreply, guild_thread_watches:update(Request, State)};
 handle_cast_internal({patch_everyone_perms, Bit}, State) when is_integer(Bit), Bit > 0 ->
     {noreply, guild_maintenance:apply_everyone_perm_bit(Bit, State)};
 handle_cast_internal(Msg, State) when is_tuple(Msg) ->
@@ -161,6 +166,8 @@ handle_cast_internal(_, State) ->
     {noreply, State}.
 
 -spec handle_info_internal(term(), guild_state()) -> info_reply().
+handle_info_internal({thread_lifecycle_timeout, Ticket}, State) ->
+    {noreply, guild_thread_lifecycle:timeout(Ticket, State)};
 handle_info_internal({guild_health_probe, Ref}, State) when is_reference(Ref) ->
     gen_server:cast(guild_health, {pong, self(), Ref, erlang:monotonic_time(millisecond)}),
     {noreply, State};
@@ -209,6 +216,14 @@ handle_background_info(thread_list_sync_drain, State) ->
     {noreply, guild_thread_subscriptions:handle_drain(State)};
 handle_background_info(thread_member_list_flush, State) ->
     {noreply, guild_thread_subscriptions:handle_list_flush(State)};
+handle_background_info({thread_watch_sweep, Token}, State) ->
+    {noreply, guild_thread_watches:sweep(Token, State)};
+handle_background_info(thread_watch_fetch, State) ->
+    {noreply, guild_thread_watches:fetch(State)};
+handle_background_info({thread_watch_fetched, Ref, Result}, State) ->
+    {noreply, guild_thread_watches:fetched(Ref, Result, State)};
+handle_background_info({thread_watch_resolve, Ref, Ids, Outcome}, State) ->
+    {noreply, guild_thread_watches:resolve(Ref, Ids, Outcome, State)};
 handle_background_info(thread_load_retry, State) ->
     {noreply, guild_thread_load:handle_retry(State)};
 handle_background_info({thread_load_result, Ref, Result}, State) when is_reference(Ref) ->

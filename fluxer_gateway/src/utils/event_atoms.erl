@@ -120,6 +120,7 @@ message_event_map() ->
 thread_event_map() ->
     #{
         <<"FORUM_UNREADS">> => forum_unreads,
+        <<"THREAD_WATCH_ACK">> => thread_watch_ack,
         <<"THREAD_CREATE">> => thread_create,
         <<"THREAD_DELETE">> => thread_delete,
         <<"THREAD_LIST_SYNC">> => thread_list_sync,

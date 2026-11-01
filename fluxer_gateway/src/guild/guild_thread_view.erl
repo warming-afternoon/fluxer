@@ -11,31 +11,43 @@
     hide_for_non_viewer/4
 ]).
 
--spec guild_threads(integer(), map(), map() | undefined, map()) -> [map()].
-guild_threads(UserId, Opts, Member, State) ->
-    case {guild_thread_gate:store(State), maps:get(bot, Opts, false)} of
-        {undefined, _Bot} -> [];
-        {Tab, true} -> bot_threads(UserId, Member, Tab, State);
-        {Tab, false} -> joined_threads(UserId, Member, Tab, State);
-        {_Tab, Bot} -> error({case_clause, Bot})
+-type guild_state() :: map().
+
+%% 按统一目录规则返回可见线程及用户已加入的论坛帖子
+-spec guild_threads(integer(), map(), map() | undefined, guild_state()) -> [map()].
+guild_threads(UserId, _Opts, Member, State) ->
+    case guild_thread_gate:store(State) of
+        undefined ->
+            [];
+        Tab ->
+            directory_threads(UserId, Member, Tab, State)
     end.
 
--spec bot_threads(integer(), map() | undefined, ets:table(), map()) -> [map()].
-bot_threads(UserId, Member, Tab, State) ->
+%% 构造当前用户可见的目录子频道及自身成员信息。
+-spec directory_threads(integer(), map() | undefined, ets:table(), guild_state()) -> [map()].
+directory_threads(UserId, Member, Tab, State) ->
     [
         with_own_member(UserId, Thread, Tab)
-     || Thread <- guild_thread_store:threads(Tab), can_view(UserId, Thread, Member, State)
+     || Thread <- visible_candidates(
+            UserId, candidate_threads(all, UserId, Tab, State), Member, State
+        )
     ].
 
--spec joined_threads(integer(), map() | undefined, ets:table(), map()) -> [map()].
-joined_threads(UserId, Member, Tab, State) ->
-    [
-        with_own_member(UserId, Thread, Tab)
-     || ThreadId <- guild_thread_store:user_thread_ids(Tab, UserId),
-        Thread <- [guild_thread_store:get_thread(Tab, ThreadId)],
-        Thread =/= undefined,
-        can_view(UserId, Thread, Member, State)
-    ].
+%% 在同一遍历内复用父权限且保留可见结果顺序。
+-spec visible_candidates(integer(), [map()], map() | undefined, guild_state()) -> [map()].
+visible_candidates(UserId, Threads, Member, State) ->
+    %% 权限缓存由本次遍历创建，结果顺序与输入候选保持一致。
+    {Results, _} = lists:mapfoldl(
+        fun(Thread, Cache) ->
+            {Perms, Next} = guild_thread_permissions:resolve_cached(
+                UserId, Thread, Member, State, Cache
+            ),
+            {{Thread, bitset:has(Perms, constants:view_channel_permission())}, Next}
+        end,
+        #{},
+        Threads
+    ),
+    [Thread || {Thread, true} <- Results].
 
 -spec with_own_member(integer(), map(), ets:table()) -> map().
 with_own_member(UserId, Thread, Tab) ->
@@ -62,6 +74,8 @@ can_view(UserId, Thread, Member, State) ->
     Perms = guild_thread_permissions:resolve(UserId, Thread, Member, State),
     bitset:has(Perms, constants:view_channel_permission()).
 
+%% 过滤指定同步范围内的成员资格和访问权限
+%% 筛选目录门允许且当前成员可见的子频道。
 -spec viewable_thread_ids(
     integer(), [integer()] | all | joined, map() | undefined, map()
 ) ->
@@ -71,19 +85,34 @@ viewable_thread_ids(UserId, Parents, Member, State) ->
         undefined ->
             [];
         Tab ->
+            Candidates = [
+                Thread
+             || Thread <- candidate_threads(Parents, UserId, Tab, State),
+                guild_thread_gate:directory_allowed(UserId, Thread, State)
+            ],
             [
                 {thread_id(Thread), Thread}
-             || Thread <- candidate_threads(Parents, UserId, Tab),
-                can_view(UserId, Thread, Member, State)
+             || Thread <- visible_candidates(UserId, Candidates, Member, State)
             ]
     end.
 
--spec candidate_threads([integer()] | all | joined, integer(), ets:table()) -> [map()].
-candidate_threads(all, _UserId, Tab) ->
-    guild_thread_store:threads(Tab);
-candidate_threads(joined, UserId, Tab) ->
-    stored_threads(guild_thread_store:user_thread_ids(Tab, UserId), Tab);
-candidate_threads(Parents, _UserId, Tab) ->
+%% 合并用户加入索引与普通父频道索引，避免连接时扫描全部论坛帖子
+-spec candidate_threads([integer()] | all | joined, integer(), ets:table(), guild_state()) ->
+    [map()].
+candidate_threads(Scope, UserId, Tab, State) when Scope =:= all; Scope =:= joined ->
+    Data = maps:get(data, State, State),
+    PlainParents = [
+        Id
+     || {Id, Channel} <- maps:to_list(guild_data_index_channels:channel_index(Data)),
+        lists:member(maps:get(<<"type">>, Channel, undefined), [0, 5])
+    ],
+    %% 复用父频道和用户索引，减少每个连接的目录构造成本
+    Ids = lists:usort(
+        guild_thread_store:user_thread_ids(Tab, UserId) ++
+            lists:append([guild_thread_store:parent_thread_ids(Tab, P) || P <- PlainParents])
+    ),
+    stored_threads(Ids, Tab);
+candidate_threads(Parents, _UserId, Tab, _State) ->
     stored_threads(
         lists:append([guild_thread_store:parent_thread_ids(Tab, P) || P <- Parents]), Tab
     ).

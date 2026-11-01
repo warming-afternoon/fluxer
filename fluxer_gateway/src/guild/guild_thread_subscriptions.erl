@@ -24,8 +24,9 @@
 -define(MAX_MEMBER_LISTS, 10).
 -define(MAX_LIST_MEMBERS, 1000).
 -define(MAX_PRESENCE_USERS, 1000).
--define(SYNC_JITTER_MS, 5000).
--define(SYNC_RATE, 20).
+-define(DEFAULT_SYNC_JITTER_MS, 500).
+-define(DEFAULT_SYNC_RATE, 80).
+-define(SYNC_RETRY_MS, 100).
 -define(LIST_FLUSH_MS, 250).
 -define(COUNTS_KEY, {?MODULE, list_sync}).
 
@@ -99,11 +100,14 @@ apply_member_lists(Ids, Session, State) when is_list(Ids) ->
 apply_member_lists(_Other, Session, _State) ->
     {Session, []}.
 
+%% 显式成员列表订阅只检查真实访问权限，不建立关注或消息订阅。
 -spec viewable_thread(map(), integer(), guild_state()) -> boolean().
 viewable_thread(Session, ThreadId, State) ->
     case guild_thread_gate:thread(ThreadId, State) of
-        undefined -> false;
-        Thread -> session_can_view(Session, Thread, State)
+        undefined ->
+            false;
+        Thread ->
+            session_can_view(Session, Thread, State)
     end.
 
 -spec session_can_view(map(), map(), guild_state()) -> boolean().
@@ -115,6 +119,14 @@ session_can_view(#{user_id := UserId}, Thread, State) when is_integer(UserId) ->
 session_can_view(_Session, _Thread, _State) ->
     false.
 
+sync_rate() -> configured_positive(thread_sync_rate, ?DEFAULT_SYNC_RATE).
+sync_jitter_ms() -> configured_positive(thread_sync_jitter_ms, ?DEFAULT_SYNC_JITTER_MS).
+configured_positive(Key, Default) ->
+    case fluxer_gateway_env:get_optional(Key) of
+        Value when is_integer(Value), Value > 0 -> Value;
+        _ -> Default
+    end.
+
 -spec schedule_sync(binary(), guild_state()) -> guild_state().
 schedule_sync(SessionId, State) ->
     Pending = maps:get(thread_sync_pending, State, #{}),
@@ -123,7 +135,7 @@ schedule_sync(SessionId, State) ->
             State;
         false ->
             _ = erlang:send_after(
-                rand:uniform(?SYNC_JITTER_MS) - 1, self(), {thread_list_sync_tick, SessionId}
+                rand:uniform(sync_jitter_ms()) - 1, self(), {thread_list_sync_tick, SessionId}
             ),
             State#{thread_sync_pending => Pending#{SessionId => scheduled}}
     end.
@@ -195,7 +207,7 @@ drain(State) ->
 -spec drain_session(binary(), queue:queue(), guild_state()) -> guild_state().
 drain_session(SessionId, Rest, State) ->
     Now = erlang:monotonic_time(millisecond),
-    case take_token(Now, maps:get(thread_sync_bucket, State, {?SYNC_RATE, Now})) of
+    case take_token(Now, maps:get(thread_sync_bucket, State, {sync_rate(), Now})) of
         {ok, Bucket} ->
             send_full_sync(SessionId, State),
             Pending = maps:remove(SessionId, maps:get(thread_sync_pending, State, #{})),
@@ -205,7 +217,7 @@ drain_session(SessionId, Rest, State) ->
                 })
             );
         {wait, {Tokens, _} = Bucket} ->
-            arm_drain(ceil((1 - Tokens) * 1000 / ?SYNC_RATE), State#{
+            arm_drain(ceil((1 - Tokens) * 1000 / sync_rate()), State#{
                 thread_sync_bucket => Bucket
             })
     end.
@@ -226,7 +238,7 @@ arm_drain(DelayMs, State) ->
 -spec take_token(integer(), {number(), integer()}) ->
     {ok, {number(), integer()}} | {wait, {number(), integer()}}.
 take_token(Now, {Tokens0, Last}) ->
-    Tokens = min(?SYNC_RATE, Tokens0 + (Now - Last) * ?SYNC_RATE / 1000),
+    Tokens = min(sync_rate(), Tokens0 + (Now - Last) * sync_rate() / 1000),
     case Tokens >= 1 of
         true -> {ok, {Tokens - 1, Now}};
         false -> {wait, {Tokens, Now}}
@@ -595,3 +607,180 @@ list_sync_counts() ->
         undefined -> #{};
         Counters -> #{R => counters:get(Counters, reason_index(R)) || R <- [full, access]}
     end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+token_bucket_allows_twenty_per_second_test() ->
+    Now = 1000,
+    Bucket = lists:foldl(
+        fun(_, B) ->
+            {ok, Next} = take_token(Now, B),
+            Next
+        end,
+        {sync_rate(), Now},
+        lists:seq(1, sync_rate())
+    ),
+    ?assertMatch({wait, _}, take_token(Now, Bucket)),
+    ?assertMatch({ok, _}, take_token(Now + 50, Bucket)).
+
+queued_syncs_share_one_drain_timer_test_() ->
+    {spawn, fun queued_syncs_share_one_drain_timer/0}.
+
+queued_syncs_share_one_drain_timer() ->
+    Ids = [integer_to_binary(N) || N <- lists:seq(1, 1000)],
+    Now = erlang:monotonic_time(millisecond),
+    State0 = #{id => 1, sessions => #{}, thread_sync_bucket => {0, Now + 60000}},
+    State1 = lists:foldl(fun schedule_sync/2, State0, Ids ++ Ids),
+    ?assertEqual(1000, map_size(maps:get(thread_sync_pending, State1))),
+    State2 = lists:foldl(fun handle_tick/2, State1, Ids ++ Ids),
+    ?assertEqual(1000, queue:len(maps:get(thread_sync_queue, State2))),
+    ?assertEqual(true, maps:get(thread_sync_timer, State2)),
+    State3 = handle_drain(State2#{
+        thread_sync_bucket => {sync_rate(), erlang:monotonic_time(millisecond)}
+    }),
+    Left = queue:len(maps:get(thread_sync_queue, State3)),
+    ?assert(Left =< 1000 - sync_rate() andalso Left >= 1000 - sync_rate() - 2),
+    ?assertEqual(true, maps:get(thread_sync_timer, State3)),
+    ?assertEqual(1, count_drains(300, 0)).
+
+presence_changes_coalesce_into_one_flush_test_() ->
+    {spawn, fun presence_changes_coalesce_into_one_flush/0}.
+
+presence_changes_coalesce_into_one_flush() ->
+    Me = self(),
+    Viewer = #{
+        pid => Me, user_id => 1, thread_viewer => true, viewable_channels => #{5 => true}
+    },
+    Sessions = #{
+        <<"a">> => Viewer#{thread_member_lists => [10]},
+        <<"b">> => Viewer#{user_id => 2, thread_member_lists => [10, 11]},
+        <<"c">> => #{pid => Me, thread_viewer => false},
+        <<"d">> => Viewer#{thread_member_lists => [12]},
+        <<"e">> => Viewer#{
+            user_id => 3, viewable_channels => #{}, thread_member_lists => [10, 11]
+        }
+    },
+    State0 = #{
+        id => 1,
+        data => store_data([10, 11, 12]),
+        sessions => Sessions,
+        connected_user_ids => sets:new(),
+        thread_presence_users => #{7 => [10], 8 => [10, 11]},
+        thread_list_sessions => list_sessions(Sessions)
+    },
+    ?assertEqual(State0, presence_changed(9, State0)),
+    State1 = lists:foldl(fun presence_changed/2, State0, [7, 8, 7, 8, 9]),
+    ?assertEqual(#{10 => true, 11 => true}, maps:get(thread_list_dirty, State1)),
+    ?assertEqual([], list_updates()),
+    receive
+        thread_member_list_flush -> ok
+    after 1000 -> error(no_flush)
+    end,
+    receive
+        thread_member_list_flush -> error(second_flush)
+    after 300 -> ok
+    end,
+    State2 = handle_list_flush(State1),
+    ?assertNot(maps:is_key(thread_list_dirty, State2)),
+    ?assertNot(maps:is_key(thread_list_flush, State2)),
+    ?assertEqual([<<"10">>, <<"10">>, <<"11">>], lists:sort(list_updates())),
+    ?assertEqual(State2, member_lists_changed(99, State2)),
+    ?assertMatch(
+        #{
+            thread_list_dirty := #{12 := true},
+            thread_list_refresh := true,
+            thread_list_flush := true
+        },
+        member_lists_changed(12, State2)
+    ).
+
+flush_drops_presence_users_of_departed_list_sessions_test_() ->
+    {spawn, fun flush_drops_presence_users_of_departed_list_sessions/0}.
+
+flush_drops_presence_users_of_departed_list_sessions() ->
+    Viewer = #{
+        pid => self(),
+        user_id => 1,
+        thread_viewer => true,
+        viewable_channels => #{5 => true},
+        thread_member_lists => [10]
+    },
+    State0 = #{
+        id => 1,
+        data => store_data([10]),
+        sessions => #{<<"b">> => maps:without([thread_member_lists], Viewer)},
+        connected_user_ids => sets:new(),
+        thread_presence_users => #{7 => [10]},
+        thread_list_sessions => #{10 => [<<"a">>, <<"b">>]}
+    },
+    State1 = presence_changed(7, State0),
+    receive
+        thread_member_list_flush -> ok
+    after 1000 -> error(no_flush)
+    end,
+    State2 = handle_list_flush(State1),
+    ?assertEqual([], list_updates()),
+    ?assertNot(maps:is_key(thread_presence_users, State2)),
+    ?assertNot(maps:is_key(thread_list_sessions, State2)),
+    ?assertEqual(State2, presence_changed(7, State2)).
+
+flush_waits_for_the_thread_load_test_() ->
+    {spawn, fun flush_waits_for_the_thread_load/0}.
+
+flush_waits_for_the_thread_load() ->
+    Sessions = #{
+        <<"a">> => #{
+            pid => self(),
+            user_id => 1,
+            thread_viewer => true,
+            viewable_channels => #{5 => true},
+            thread_member_lists => [10]
+        }
+    },
+    State0 = #{
+        id => 1,
+        data => store_data([10]),
+        sessions => Sessions,
+        connected_user_ids => sets:new(),
+        thread_list_dirty => #{10 => true},
+        thread_list_flush => true,
+        thread_load => #{status => loading, queue => [], queued => 0}
+    },
+    State1 = handle_list_flush(State0),
+    ?assertEqual([], list_updates()),
+    ?assertEqual(#{10 => true}, maps:get(thread_list_dirty, State1)),
+    ?assertNot(maps:is_key(thread_list_flush, State1)),
+    Loaded = State1#{thread_load => #{status => ready, queue => [], queued => 0}},
+    State2 = resync_after_load(maps:remove(thread_list_dirty, Loaded)),
+    ?assertMatch(#{thread_list_dirty := #{10 := true}, thread_list_flush := true}, State2),
+    State3 = handle_list_flush(State2),
+    ?assertEqual([<<"10">>], list_updates()),
+    ?assertNot(maps:is_key(thread_list_dirty, State3)).
+
+store_data(ThreadIds) ->
+    Tab = guild_thread_store:new(),
+    lists:foreach(
+        fun(Id) ->
+            guild_thread_store:put_thread(Tab, #{
+                <<"id">> => integer_to_binary(Id), <<"parent_id">> => <<"5">>, <<"type">> => 11
+            })
+        end,
+        ThreadIds
+    ),
+    #{thread_store => Tab, thread_gate => #{active => true}}.
+
+list_updates() ->
+    receive
+        {'$gen_cast', {dispatch, thread_member_list_update, #{<<"thread_id">> := Id}}} ->
+            [Id | list_updates()]
+    after 0 -> []
+    end.
+
+count_drains(Timeout, Count) ->
+    receive
+        thread_list_sync_drain -> count_drains(Timeout, Count + 1)
+    after Timeout -> Count
+    end.
+
+-endif.

@@ -12,16 +12,22 @@
     recompute_session_viewers/1,
     state_opts/1,
     thread/2,
+    directory_allowed/3,
+    delivery_member_allowed/3,
     is_thread_id/2,
     channel_visible/3,
     pre_update_filter/3,
     event_scope/3,
     viewer_sessions/1,
     thread_sessions/6,
+    with_message_channel_context/3,
     thread_view_access/4,
     needs_variant/1,
     recipient_active/2
 ]).
+
+-type guild_state() :: map().
+-type session_pair() :: {binary(), map()}.
 
 -type thread_ctx() :: {map(), integer() | undefined, binary() | undefined, map()}.
 -type access_memo() :: #{integer() => boolean()}.
@@ -151,7 +157,32 @@ safe_get_thread(Tab, ThreadId) ->
 is_thread_id(ChannelId, State) ->
     thread(ChannelId, State) =/= undefined.
 
--spec is_gated_channel_id(integer(), map()) -> boolean().
+%% 自动同步继续只带关注帖子，不作为主动目录查询的权限判断。
+-spec directory_allowed(integer() | undefined, map(), guild_state()) -> boolean().
+directory_allowed(UserId, Thread, State) ->
+    delivery_member_allowed(UserId, Thread, State).
+
+%% 普通内容事件要求论坛成员，浏览和直接提及由调用者独立处理。
+-spec delivery_member_allowed(integer() | undefined, map(), guild_state()) -> boolean().
+delivery_member_allowed(UserId, Thread, State) ->
+    ParentId = guild_thread_permissions:parent_id(Thread),
+    case channel_types:is_thread_only(channel_type(ParentId, State)) of
+        true ->
+            ThreadId = snowflake_id:parse(maps:get(<<"id">>, Thread)),
+            case thread(ThreadId, State) of
+                undefined ->
+                    lists:member(
+                        UserId,
+                        snowflake_id:parse_list(maps:get(<<"_fluxer_member_ids">>, Thread, []))
+                    );
+                _ ->
+                    is_thread_member(UserId, ThreadId, State)
+            end;
+        false ->
+            true
+    end.
+
+-spec is_gated_channel_id(integer(), guild_state()) -> boolean().
 is_gated_channel_id(ChannelId, State) ->
     needs_variant(State) andalso
         case channel_type(ChannelId, State) of
@@ -261,8 +292,9 @@ viewer_sessions(Sessions) ->
         fun(_Sid, Session) -> is_map(Session) andalso session_viewer(Session) end, Sessions
     ).
 
--spec thread_sessions(atom(), map(), integer(), map(), binary() | undefined, map()) ->
-    [{binary(), map()}].
+%% 筛选线程事件的在线接收者，并保留最终的会话和权限检查
+-spec thread_sessions(atom(), map(), integer(), map(), binary() | undefined, guild_state()) ->
+    [session_pair()].
 thread_sessions(Event, Data, ThreadId, Thread, SessionIdOpt, State) ->
     MessageId =
         case guild_dispatch_filter:is_message_access_filtered_event(Event) of
@@ -270,22 +302,245 @@ thread_sessions(Event, Data, ThreadId, Thread, SessionIdOpt, State) ->
             false -> undefined
         end,
     Ctx = {Thread, guild_thread_permissions:parent_id(Thread), MessageId, State},
-    {Pairs, _Memo} = maps:fold(
-        fun(Sid, Session, {Acc, Memo}) ->
-            Candidate =
+    Candidates = delivery_candidates(Event, Data, ThreadId, Thread, State),
+    {Pairs, _Memo, _DeliveryCtx} = maps:fold(
+        fun(Sid, Session, {Acc, Memo, DeliveryCtx0}) ->
+            case
                 Sid =/= SessionIdOpt andalso is_map(Session) andalso
                     session_viewer(Session) andalso
-                    not type_conv:is_true(maps:get(pending_connect, Session, false)) andalso
-                    thread_interested(Session, ThreadId, State) andalso Session,
-            {Ok, Memo1} = thread_access(Candidate, Ctx, Memo),
-            {[{Sid, Session} || Ok] ++ Acc, Memo1}
+                    maps:get(pending_connect, Session, false) =/= true
+            of
+                true ->
+                    %% 上下文延迟到首个可参与筛选的设备，保持空受众的原异常语义。
+                    DeliveryCtx = message_delivery_context(DeliveryCtx0, Thread, State),
+                    Interested = message_delivery_interested(
+                        Event, Data, Session, ThreadId, Thread, State, DeliveryCtx
+                    ),
+                    case
+                        Interested orelse
+                            (watch_event(Event) andalso
+                                guild_thread_watches:watching(Sid, ThreadId, State))
+                    of
+                        true ->
+                            {Ok, Memo1} = thread_access(Session, Ctx, Memo),
+                            {prepend(Ok, Sid, Session, Acc), Memo1, DeliveryCtx};
+                        false ->
+                            {Acc, Memo, DeliveryCtx}
+                    end;
+                false ->
+                    {Acc, Memo, DeliveryCtx0}
+            end
         end,
-        {[], #{}},
-        maps:get(sessions, State)
+        {[], #{}, undefined},
+        Candidates
     ),
     Pairs.
 
--spec thread_interested(map(), integer(), map()) -> boolean().
+%% 从帖子成员与直接提及用户中查找在线设备，减少论坛事件的全会话扫描
+-spec delivery_candidates(atom(), map(), integer(), map(), guild_state()) -> map().
+delivery_candidates(Event, Data, ThreadId, Thread, State) ->
+    Sessions = maps:get(sessions, State, #{}),
+    ParentId = guild_thread_permissions:parent_id(Thread),
+    case channel_types:is_thread_only(channel_type(ParentId, State)) of
+        false ->
+            Sessions;
+        true ->
+            %% 只有消息创建允许直接提及的非成员进入候选集合
+            Mentions =
+                case Event of
+                    message_create ->
+                        snowflake_id:parse_list([
+                            Id
+                         || #{<<"id">> := Id} <- maps:get(<<"mentions">>, Data, [])
+                        ]);
+                    _ ->
+                        []
+                end,
+            MemberSessions = maps:merge(
+                member_candidates(Event, ThreadId, Thread, State, Sessions),
+                guild_online_session_index:for_users(Sessions, Mentions)
+            ),
+            case watch_event(Event) of
+                true ->
+                    maps:merge(
+                        MemberSessions,
+                        maps:with(guild_thread_watches:sessions(ThreadId, State), Sessions)
+                    );
+                false ->
+                    MemberSessions
+            end
+    end.
+
+%% 仅已加载活跃帖的消息创建使用可信计数，其他事件保留成员快照和原错误语义。
+-spec member_candidates(atom(), integer(), map(), guild_state(), map()) -> map().
+member_candidates(Event, ThreadId, Thread, State, Sessions) ->
+    Loaded = thread(ThreadId, State),
+    Tab = store(State),
+    case {Event, Loaded} of
+        {message_create, #{<<"thread_metadata">> := #{<<"archived">> := false}}} ->
+            case guild_thread_store:member_count(Tab, ThreadId) of
+                Count when is_integer(Count), Count >= 0 ->
+                    {_Direction, _OnlineCount, _Scanned, Candidates} =
+                        guild_online_session_index:for_thread_members(
+                            Sessions, Tab, ThreadId, Count
+                        ),
+                    Candidates;
+                unknown ->
+                    guild_online_session_index:for_users(
+                        Sessions, guild_thread_store:member_ids(Tab, ThreadId)
+                    )
+            end;
+        _ ->
+            Members =
+                case Loaded of
+                    undefined ->
+                        snowflake_id:parse_list(maps:get(<<"_fluxer_member_ids">>, Thread, []));
+                    _ ->
+                        guild_thread_store:member_ids(Tab, ThreadId)
+                end,
+            guild_online_session_index:for_users(Sessions, Members)
+    end.
+%% 浏览订阅仅接收内容变化，不自动增加输入状态或成员列表事件
+-spec watch_event(atom()) -> boolean().
+watch_event(Event) ->
+    lists:member(Event, [
+        message_create,
+        message_update,
+        message_delete,
+        message_delete_bulk,
+        message_reaction_add,
+        message_reaction_add_many,
+        message_reaction_remove,
+        message_reaction_remove_all,
+        message_reaction_remove_emoji,
+        channel_pins_update
+    ]).
+
+%% 普通论坛事件要求成员资格，消息创建允许带权限检查的直接提及例外
+-spec delivery_interested(atom(), map(), map(), integer(), map(), guild_state()) -> boolean().
+delivery_interested(Event, Data, Session, ThreadId, Thread, State) ->
+    UserId = maps:get(user_id, Session, undefined),
+    (delivery_member_allowed(UserId, Thread, State) andalso
+        thread_interested(Session, ThreadId, State)) orelse
+        (Event =:= message_create andalso is_integer(UserId) andalso
+            lists:any(
+                fun
+                    (#{<<"id">> := Id}) -> snowflake_id:parse_maybe(Id) =:= UserId;
+                    (_) -> false
+                end,
+                maps:get(<<"mentions">>, Data, [])
+            )).
+
+%% 仅当前进程拥有的受保护成员表允许消息内复用，其他表保留原逐设备读取。
+-spec message_delivery_context(term(), map(), guild_state()) -> term().
+message_delivery_context(undefined, Thread, State) ->
+    Tab = store(State),
+    Reusable =
+        try
+            Tab =:= undefined orelse
+                (ets:info(Tab, owner) =:= self() andalso ets:info(Tab, protection) =/= public)
+        catch
+            error:badarg -> false
+        end,
+    case Reusable of
+        false ->
+            legacy;
+        true ->
+            ParentId = guild_thread_permissions:parent_id(Thread),
+            case channel_types:is_thread_only(channel_type(ParentId, State)) of
+                false ->
+                    {public, Tab};
+                true ->
+                    Id = snowflake_id:parse(maps:get(<<"id">>, Thread)),
+                    case thread(Id, State) of
+                        undefined ->
+                            Members = snowflake_id:parse_list(
+                                maps:get(<<"_fluxer_member_ids">>, Thread, [])
+                            ),
+                            {{snapshot, Members}, Tab};
+                        _ ->
+                            {{stored, Id}, Tab}
+                    end
+            end
+    end;
+message_delivery_context(Context, _Thread, _State) ->
+    Context.
+
+%% 单消息仅复用帖子上下文，成员资格保持原逐设备直接读取与短路顺序。
+-spec message_delivery_interested(
+    atom(), map(), map(), integer(), map(), guild_state(), term()
+) -> boolean().
+message_delivery_interested(Event, Data, Session, ThreadId, Thread, State, legacy) ->
+    delivery_interested(Event, Data, Session, ThreadId, Thread, State);
+message_delivery_interested(Event, Data, Session, ThreadId, _Thread, State, {Mode, Tab}) ->
+    UserId = maps:get(user_id, Session, undefined),
+    Allowed =
+        case Mode of
+            public -> true;
+            {snapshot, Members} -> lists:member(UserId, Members);
+            {stored, Id} -> message_member(UserId, Id, Tab)
+        end,
+    (Allowed andalso
+        (maps:get(bot, Session, false) =:= true orelse
+            lists:member(ThreadId, maps:get(thread_member_lists, Session, [])) orelse
+            message_member(UserId, ThreadId, Tab) orelse
+            (maps:get(thread_subscribed, Session, false) =:= true andalso
+                not session_passive:is_passive(maps:get(id, State, 0), Session)))) orelse
+        (Event =:= message_create andalso is_integer(UserId) andalso
+            lists:any(
+                fun
+                    (#{<<"id">> := Id}) -> snowflake_id:parse_maybe(Id) =:= UserId;
+                    (_) -> false
+                end,
+                maps:get(<<"mentions">>, Data, [])
+            )).
+
+%% 上下文中的成员表仍逐次直接查询，不构造或携带成员结果缓存。
+-spec message_member(term(), integer(), ets:table() | undefined) -> boolean().
+message_member(UserId, ThreadId, Tab) when is_integer(UserId), Tab =/= undefined ->
+    guild_thread_store:is_member(Tab, ThreadId, UserId);
+message_member(_UserId, _ThreadId, _Tab) ->
+    false.
+
+%% 在接收者完成实际权限筛选后，一次构造所属帖子的公共模型，不改变订阅或成员关系
+-spec with_message_channel_context(atom(), map(), guild_state()) -> map().
+with_message_channel_context(message_create, Data, State) ->
+    case event_scope(message_create, Data, State) of
+        {thread, _ThreadId, Thread} ->
+            %% 内部上下文补齐被存储容量淘汰的帖子基础字段，白名单排除用户专属及内部状态
+            Base = maps:get(<<"_fluxer_thread">>, Data, #{}),
+            Context = maps:with(
+                [
+                    <<"id">>,
+                    <<"guild_id">>,
+                    <<"parent_id">>,
+                    <<"type">>,
+                    <<"name">>,
+                    <<"owner_id">>,
+                    <<"last_message_id">>,
+                    <<"last_pin_timestamp">>,
+                    <<"rate_limit_per_user">>,
+                    <<"flags">>,
+                    <<"thread_metadata">>,
+                    <<"applied_tags">>,
+                    <<"message_count">>,
+                    <<"total_message_sent">>,
+                    <<"member_count">>
+                ],
+                (maps:merge(Thread, Base))#{<<"guild_id">> => maps:get(<<"guild_id">>, Data)}
+            ),
+            Data#{<<"channel_context">> => Context};
+        _ ->
+            maps:remove(<<"channel_context">>, Data)
+    end;
+with_message_channel_context(_Event, Data, _State) ->
+    Data.
+
+-spec prepend(boolean(), binary(), map(), [session_pair()]) -> [session_pair()].
+prepend(true, Sid, Session, Acc) -> [{Sid, Session} | Acc];
+prepend(false, _Sid, _Session, Acc) -> Acc.
+
+-spec thread_interested(map(), integer(), guild_state()) -> boolean().
 thread_interested(Session, ThreadId, State) ->
     type_conv:is_true(maps:get(bot, Session, false)) orelse
         lists:member(ThreadId, maps:get(thread_member_lists, Session, [])) orelse
@@ -398,8 +653,13 @@ channel_scoped_gated(Data, State) ->
 -spec thread_or_context(integer(), map(), map()) -> map() | undefined.
 thread_or_context(ChannelId, Data, State) ->
     case thread(ChannelId, State) of
-        undefined -> guild_state_threads:thread_context(ChannelId, Data);
-        Thread -> Thread
+        undefined ->
+            case guild_state_threads:thread_context(ChannelId, Data) of
+                undefined -> guild_thread_watches:context(ChannelId, State);
+                Context -> Context
+            end;
+        Thread ->
+            Thread
     end.
 
 -spec needs_variant(map()) -> boolean().

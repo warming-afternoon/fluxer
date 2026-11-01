@@ -39,6 +39,8 @@ safe_cleanup(Fun, Label) ->
 -spec cleanup_per_guild_ets(map()) -> ok.
 cleanup_per_guild_ets(State) ->
     Data = maps:get(data, State, #{}),
+    guild_thread_role_index:destroy(Data),
+    _ = guild_thread_lifecycle:cleanup(State),
     safe_delete_ets(maps:get(members_ets, Data, undefined)),
     safe_delete_ets(maps:get(thread_store, Data, undefined)),
     safe_delete_ets(maps:get(member_presence, State, undefined)),

@@ -18,6 +18,8 @@
     get_member/3,
     remove_member/3,
     is_member/3,
+    member_count/2,
+    member_ids_page/4,
     member_ids/2,
     members/2,
     user_thread_ids/2,
@@ -43,6 +45,7 @@
     {{t, thread_id()}, map()}
     | {{m, thread_id(), user_id()}, map()}
     | {{u, user_id(), thread_id()}, true}
+    | {{mc, thread_id()}, non_neg_integer()}
     | {{p, integer(), thread_id()}, true}.
 
 -spec init() -> ok.
@@ -58,7 +61,8 @@ init() ->
     ok = guild_thread_dispatch:init_counters(),
     ok = guild_thread_load:init_counters(),
     ok = guild_thread_flip:init_counters(),
-    ok = guild_thread_subscriptions:init_counters().
+    ok = guild_thread_subscriptions:init_counters(),
+    ok = guild_thread_watch_metrics:init().
 
 -spec ensure_counter(term(), pos_integer()) -> ok.
 ensure_counter(Key, Size) ->
@@ -158,7 +162,9 @@ store_thread(Tab, ThreadId, Thread) ->
     end,
     case Known of
         true -> known;
-        false -> new
+        false ->
+            true = ets:insert(Tab, {{mc, ThreadId}, 0}),
+            new
     end.
 
 -spec enforce_cap(tab()) -> ok.
@@ -201,19 +207,36 @@ remove_thread(Tab, ThreadId) ->
 
 -spec remove_stored_thread(tab(), thread_id(), map()) -> ok.
 remove_stored_thread(Tab, ThreadId, Thread) ->
-    lists:foreach(
-        fun(UserId) -> remove_member(Tab, ThreadId, UserId) end, member_ids(Tab, ThreadId)
-    ),
+    ok = remove_thread_members(Tab, ThreadId),
     case snowflake_id:parse_optional(maps:get(<<"parent_id">>, Thread, undefined)) of
         ParentId when is_integer(ParentId) -> ets:delete(Tab, {p, ParentId, ThreadId});
         _ -> true
     end,
     true = ets:delete(Tab, {t, ThreadId}),
+    true = ets:delete(Tab, {mc, ThreadId}),
     ok.
+
+%% Remove relationships in bounded chunks rather than copying the complete roster.
+-spec remove_thread_members(tab(), thread_id()) -> ok.
+remove_thread_members(Tab, ThreadId) ->
+    case member_ids_page(Tab, ThreadId, undefined, 512) of
+        [] -> ok;
+        Ids ->
+            lists:foreach(fun(UserId) -> remove_member(Tab, ThreadId, UserId) end, Ids),
+            remove_thread_members(Tab, ThreadId)
+    end.
 
 -spec put_member(tab(), thread_id(), user_id(), map()) -> ok.
 put_member(Tab, ThreadId, UserId, Member) ->
-    true = ets:insert(Tab, [{{m, ThreadId, UserId}, Member}, {{u, UserId, ThreadId}, true}]),
+    case ets:insert_new(Tab, {{m, ThreadId, UserId}, Member}) of
+        true ->
+            case ets:member(Tab, {mc, ThreadId}) of
+                true -> _ = ets:update_counter(Tab, {mc, ThreadId}, {2, 1});
+                false -> ok
+            end;
+        false -> true = ets:insert(Tab, {{m, ThreadId, UserId}, Member})
+    end,
+    true = ets:insert(Tab, {{u, UserId, ThreadId}, true}),
     ok.
 
 -spec get_member(tab(), thread_id(), user_id()) -> map() | undefined.
@@ -225,13 +248,40 @@ get_member(Tab, ThreadId, UserId) ->
 
 -spec remove_member(tab(), thread_id(), user_id()) -> ok.
 remove_member(Tab, ThreadId, UserId) ->
-    true = ets:delete(Tab, {m, ThreadId, UserId}),
+    case ets:take(Tab, {m, ThreadId, UserId}) of
+        [] -> ok;
+        [_] ->
+            case ets:member(Tab, {mc, ThreadId}) of
+                true -> _ = ets:update_counter(Tab, {mc, ThreadId}, {2, -1, 0, 0});
+                false -> ok
+            end
+    end,
     true = ets:delete(Tab, {u, UserId, ThreadId}),
     ok.
 
 -spec is_member(tab(), thread_id(), user_id()) -> boolean().
 is_member(Tab, ThreadId, UserId) ->
     ets:member(Tab, {m, ThreadId, UserId}).
+
+%% 缺失派生计数表示旧代存储尚未重建，禁止为一次消息回退全表扫描。
+-spec member_count(tab(), thread_id()) -> non_neg_integer() | unknown.
+member_count(Tab, ThreadId) ->
+    try ets:lookup(Tab, {mc, ThreadId}) of
+        [{_, Count}] when is_integer(Count), Count >= 0 -> Count;
+        _ -> unknown
+    catch error:badarg -> unknown end.
+
+%% ordered_set前缀游标只复制本页标识，跨帖子边界立即停止。
+-spec member_ids_page(tab(), thread_id(), user_id() | undefined, pos_integer()) -> [user_id()].
+member_ids_page(Tab, ThreadId, After, Limit) when Limit > 0, Limit =< 1000 ->
+    Start = case After of undefined -> 0; _ -> After end,
+    member_ids_page_next(Tab, ThreadId, ets:next(Tab, {m, ThreadId, Start}), Limit, []).
+
+-spec member_ids_page_next(tab(), thread_id(), term(), non_neg_integer(), [user_id()]) -> [user_id()].
+member_ids_page_next(_Tab, _ThreadId, _Key, 0, Acc) -> lists:reverse(Acc);
+member_ids_page_next(Tab, ThreadId, {m, ThreadId, UserId} = Key, Left, Acc) ->
+    member_ids_page_next(Tab, ThreadId, ets:next(Tab, Key), Left - 1, [UserId | Acc]);
+member_ids_page_next(_Tab, _ThreadId, _Key, _Left, Acc) -> lists:reverse(Acc).
 
 -spec member_ids(tab(), thread_id()) -> [user_id()].
 member_ids(Tab, ThreadId) ->
@@ -308,8 +358,25 @@ export(Tab) ->
 import(Rows) ->
     Tab = new(),
     true = ets:insert(Tab, [Row || Row = {_, _} <- Rows, is_valid_row(Row)]),
+    lists:foreach(
+        fun(Thread) ->
+            ThreadId = snowflake_id:parse(maps:get(<<"id">>, Thread)),
+            true = ets:insert(Tab, {{mc, ThreadId}, 0}),
+            rebuild_member_count(Tab, ThreadId, undefined)
+        end,
+        threads(Tab)
+    ),
     Tab.
 
+%% 旧handoff不含计数，新handoff的派生计数也不能直接作为可信来源。
+-spec rebuild_member_count(tab(), thread_id(), user_id() | undefined) -> ok.
+rebuild_member_count(Tab, ThreadId, After) ->
+    case member_ids_page(Tab, ThreadId, After, 512) of
+        [] -> ok;
+        Ids ->
+            _ = ets:update_counter(Tab, {mc, ThreadId}, {2, length(Ids)}),
+            rebuild_member_count(Tab, ThreadId, lists:last(Ids))
+    end.
 -spec is_valid_row(term()) -> boolean().
 is_valid_row({{t, T}, Thread}) when is_integer(T), is_map(Thread) -> true;
 is_valid_row({{m, T, U}, Member}) when is_integer(T), is_integer(U), is_map(Member) -> true;

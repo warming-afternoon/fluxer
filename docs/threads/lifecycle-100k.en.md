@@ -1,0 +1,9 @@
+# Bounded thread lifecycle
+
+`guild_thread_store` maintains derived `{mc, ThreadId}` counts with idempotent membership inserts/removals. Missing counts return `unknown`; imports rebuild counts from actual rows, and hot delivery does not repair them by scanning all followers. Ordered prefix paging returns at most 1,000 IDs; cleanup/restore use 512-row intermediates. Cold loading has a 200-page per-thread budget and rejects nonadvancing cursors or incomplete results.
+
+Lifecycle preparation builds a protected ETS snapshot outside the owner, checks version/count and strict ID ordering, and validates keeper ownership. At most four operations are retained per guild. Ready snapshots live at most ten minutes. Active snapshots block handoff. The original 5-second API budget is unchanged; preparation is bounded to four seconds and failures propagate.
+
+Frozen DB memberships survive until owner-acknowledged deletion. A lost keeper can rebuild the same ticket only while the original frozen version/count remain valid. Owner acknowledgement consumes the ticket; the API persists `delete_dispatched` before cleanup. Final channel/state cleanup shares an atomic batch. Failure before the durable acknowledgement marker can repeat an idempotent delete event. This is not a device-receipt or exactly-once guarantee and has no automatic background scanner.
+
+Unarchive temporarily queues only that thread's events, at most 1,024 events / 4 MiB. Ticket-specific timeout, overflow and load failure enter the existing complete reload without publishing partial membership. Current permissions are checked against the prepared context before deletion delivery. No full follower list enters event payloads. See the bilingual maintenance guide for migration, legacy partial-purge limitations, rollout and rollback.

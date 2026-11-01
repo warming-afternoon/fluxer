@@ -142,7 +142,11 @@ put_member(Member, Data) when is_map(Member), is_map(Data) ->
                 member_list_revision => make_ref(),
                 <<"member_role_index">> => RoleIndex2
             },
-            invalidate_sorted_member_ids(Data1)
+            invalidate_sorted_member_ids(
+                guild_thread_role_index:update_member(
+                    Data1, UserId, ExistingRoles, UpdatedRoles
+                )
+            )
     end;
 put_member(_, Data) ->
     Data.
@@ -150,13 +154,17 @@ put_member(_, Data) ->
 -spec put_member_map(term(), guild_data()) -> guild_data().
 put_member_map(MemberMap, Data) when is_map(MemberMap), is_map(Data) ->
     NormalizedMemberMap = normalize_member_map(MemberMap),
-    Data#{
+    Updated = Data#{
         <<"members">> => NormalizedMemberMap,
         members_normalized => NormalizedMemberMap,
         member_list_revision => make_ref(),
         members_sorted_ids => lists:sort(maps:keys(NormalizedMemberMap)),
         <<"member_role_index">> => build_member_role_index(NormalizedMemberMap)
-    };
+    },
+    case maps:is_key(thread_role_counts, Data) of
+        true -> guild_thread_role_index:rebuild(Data, Updated);
+        false -> Updated
+    end;
 put_member_map(_, Data) ->
     Data.
 
@@ -175,7 +183,9 @@ remove_member(UserId, Data) when is_integer(UserId), is_map(Data) ->
         member_list_revision => make_ref(),
         <<"member_role_index">> => RoleIndex1
     },
-    invalidate_sorted_member_ids(Data1);
+    invalidate_sorted_member_ids(
+        guild_thread_role_index:update_member(Data1, UserId, MemberRoles, [])
+    );
 remove_member(_, Data) ->
     Data.
 

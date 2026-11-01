@@ -97,21 +97,34 @@ env_gateway_config() ->
         )
     }).
 
+%% 从环境变量读取网关基础配置与批传输开关。
 -spec env_gateway_base_config() -> map().
 env_gateway_base_config() ->
     #{
         <<"port">> => env_int("FLUXER_GATEWAY_PORT", 8771),
         <<"gateway_role">> => env_optional_binary("FLUXER_GATEWAY_ROLE"),
         <<"rpc_auth_token">> => env_binary("FLUXER_GATEWAY_RPC_AUTH_TOKEN", <<>>),
+        %% 控制推送清理发送端的批传输能力。
+        <<"clear_batch_enabled">> => env_bool_strict(
+            "FLUXER_GATEWAY_CLEAR_BATCH_ENABLED", true
+        ),
+
         <<"push_enabled">> => env_bool("FLUXER_GATEWAY_PUSH_ENABLED", true),
         <<"push_enrolled_clear_notifications_enabled">> => env_bool(
             "FLUXER_GATEWAY_PUSH_ENROLLED_CLEAR_NOTIFICATIONS_ENABLED", true
+        ),
+        <<"thread_mentions">> => env_thread_mentions_config(),
+        <<"thread_sync_rate">> => env_int("FLUXER_GATEWAY_THREAD_SYNC_RATE", 80),
+        <<"thread_sync_jitter_ms">> => env_int("FLUXER_GATEWAY_THREAD_SYNC_JITTER_MS", 500),
+        <<"push_outbox_max_inflight">> => env_int(
+            "FLUXER_GATEWAY_PUSH_OUTBOX_MAX_INFLIGHT", 96
         ),
         <<"push_outbox_request_timeout_ms">> => env_int(
             "FLUXER_GATEWAY_PUSH_OUTBOX_REQUEST_TIMEOUT_MS", 100000
         ),
         <<"logger_level">> => env_optional_binary("FLUXER_GATEWAY_LOGGER_LEVEL"),
         <<"api_rpc_endpoint">> => env_optional_binary("FLUXER_GATEWAY_API_RPC_ENDPOINT"),
+        <<"internal_api_rpc_urls">> => env_optional_binary("FLUXER_INTERNAL_API_RPC_URLS"),
         <<"cluster_enabled">> => env_bool("FLUXER_GATEWAY_CLUSTER_ENABLED", false),
         <<"cluster_discovery_dns_name">> => env_optional_binary(
             "FLUXER_GATEWAY_CLUSTER_DISCOVERY_DNS_NAME"
@@ -136,6 +149,12 @@ env_gateway_base_config() ->
         ),
         <<"presence_push_buffer_max_bytes">> => env_int(
             "FLUXER_GATEWAY_PRESENCE_PUSH_BUFFER_MAX_BYTES", 1048576
+        ),
+        <<"thread_member_load_concurrency">> => env_int(
+            "FLUXER_GATEWAY_THREAD_MEMBER_LOAD_CONCURRENCY", 2
+        ),
+        <<"guild_member_load_concurrency">> => env_int(
+            "FLUXER_GATEWAY_GUILD_MEMBER_LOAD_CONCURRENCY", 4
         ),
         <<"gateway_http_rpc_max_concurrency">> => env_int(
             "FLUXER_GATEWAY_HTTP_RPC_MAX_CONCURRENCY", 512
@@ -197,6 +216,7 @@ build_core_config(Service, Internal, Nats, Proxy) ->
         trust_client_ip_header => get_bool(Proxy, <<"trust_client_ip_header">>, false),
         api_internal_url => get_binary(Internal, <<"api">>, <<"http://127.0.0.1:8088">>),
         api_rpc_endpoint => get_optional_binary(Service, <<"api_rpc_endpoint">>),
+        internal_api_rpc_urls => internal_api_rpc_urls(Service),
         nats_core_url => get_string(Nats, <<"core_url">>, "nats://127.0.0.1:4222"),
         nats_auth_token => get_string(Nats, <<"auth_token">>, ""),
         rpc_auth_token => get_string(Service, <<"rpc_auth_token">>, ""),
@@ -204,6 +224,7 @@ build_core_config(Service, Internal, Nats, Proxy) ->
             get_int(Service, <<"gateway_nats_rpc_max_handlers">>, 512)
     }.
 
+%% 构造推送资源限制和批传输配置。
 -spec build_push_config(map(), map(), map()) -> config().
 build_push_config(Service, Public, Instance) ->
     #{
@@ -215,8 +236,11 @@ build_push_config(Service, Public, Instance) ->
         push_enrolled_clear_notifications_enabled => get_bool(
             Service, <<"push_enrolled_clear_notifications_enabled">>, true
         ),
+        %% 在发送端进程启动时确定批清理开关。
+        push_clear_batch_enabled => get_bool(Service, <<"clear_batch_enabled">>, true),
+
         push_outbox_max_queue => get_int(Service, <<"push_outbox_max_queue">>, 10000),
-        push_outbox_max_inflight => get_int(Service, <<"push_outbox_max_inflight">>, 64),
+        push_outbox_max_inflight => get_int(Service, <<"push_outbox_max_inflight">>, 96),
         push_outbox_request_timeout_ms => get_int(
             Service, <<"push_outbox_request_timeout_ms">>, 100000
         ),
@@ -347,11 +371,33 @@ visitor_limit_default(guild_visitor_sessions_per_ip) -> 20.
 -spec build_misc_config(map()) -> config().
 build_misc_config(Service) ->
     #{
+        thread_sync_rate => positive_config(Service, <<"thread_sync_rate">>, 80),
+        thread_sync_jitter_ms => positive_config(Service, <<"thread_sync_jitter_ms">>, 500),
+        thread_member_load_concurrency => thread_member_concurrency(Service),
+        thread_mentions => thread_mentions_config(Service),
+        guild_member_load_concurrency => guild_member_concurrency(Service),
         voice_state_counts_sync_interval_ms =>
             get_int(Service, <<"voice_state_counts_sync_interval_ms">>, 30000),
         zstd_window_log => get_int(Service, <<"zstd_window_log">>, 17),
         logger_level => get_log_level(Service, <<"logger_level">>, info)
     }.
+
+%% 帖子成员加载只接受串行或两批并发。
+-spec thread_member_concurrency(map()) -> 1 | 2.
+thread_member_concurrency(Service) ->
+    Value = get_int(Service, <<"thread_member_load_concurrency">>, 2),
+    case Value of
+        1 -> 1;
+        2 -> 2;
+        _ -> erlang:error({invalid_thread_member_load_concurrency, Value})
+    end.
+
+guild_member_concurrency(Service) ->
+    Value = get_int(Service, <<"guild_member_load_concurrency">>, 4),
+    case lists:member(Value, [1, 2, 4, 8]) of
+        true -> Value;
+        false -> erlang:error({invalid_guild_member_load_concurrency, Value})
+    end.
 
 -spec get_map(map(), [binary()]) -> map().
 get_map(Map, Keys) ->
@@ -460,6 +506,26 @@ env_bool(Name, Default) ->
         "no" -> false;
         "" -> Default;
         _ -> Default
+    end.
+
+%% 严格读取布尔环境配置，避免非法输入静默改变批传输能力。
+-spec env_bool_strict(string(), boolean()) -> boolean().
+env_bool_strict(Name, Default) ->
+    parse_env_bool_strict(Name, env_string(Name, ""), Default).
+
+%% 规范化受支持的布尔值并拒绝其他非空输入。
+-spec parse_env_bool_strict(string(), string(), boolean()) -> boolean().
+parse_env_bool_strict(Name, RawValue, Default) ->
+    Value = string:trim(string:lowercase(RawValue)),
+    case Value of
+        "1" -> true;
+        "true" -> true;
+        "yes" -> true;
+        "0" -> false;
+        "false" -> false;
+        "no" -> false;
+        "" -> Default;
+        _ -> erlang:error({invalid_boolean_env, Name, Value})
     end.
 
 -spec get_int(map(), binary(), integer()) -> integer().
@@ -627,3 +693,119 @@ public_endpoint(Url, Public) ->
 -spec optional_string(binary() | undefined) -> string() | undefined.
 optional_string(undefined) -> undefined;
 optional_string(Bin) when is_binary(Bin) -> binary_to_list(Bin).
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+%% 验证批传输默认值、显式覆盖及非法环境配置。
+-spec clear_batch_default_override_and_env_validation_test() -> term().
+clear_batch_default_override_and_env_validation_test() ->
+    ?assertEqual(true, maps:get(push_clear_batch_enabled, build_config(#{}))),
+    FalseRaw = #{<<"services">> => #{<<"gateway">> => #{<<"clear_batch_enabled">> => false}}},
+    TrueRaw = #{<<"services">> => #{<<"gateway">> => #{<<"clear_batch_enabled">> => true}}},
+    ?assertEqual(false, maps:get(push_clear_batch_enabled, build_config(FalseRaw))),
+    ?assertEqual(true, maps:get(push_clear_batch_enabled, build_config(TrueRaw))),
+    ?assertEqual(true, parse_env_bool_strict("TEST", "", true)),
+    ?assertEqual(false, parse_env_bool_strict("TEST", "false", true)),
+    ?assertEqual(true, parse_env_bool_strict("TEST", "true", true)),
+    ?assertEqual(false, parse_env_bool_strict("TEST", "  No  ", true)),
+    ?assertEqual(true, parse_env_bool_strict("TEST", " YES ", false)),
+    ?assertError(
+        {invalid_boolean_env, "TEST", "maybe"},
+        parse_env_bool_strict("TEST", "maybe", true)
+    ).
+-endif.
+
+%% 受控重启更新地址列表，拒绝凭据、重复地址及非 RPC 路径。
+positive_config(Service, Key, Default) ->
+    case get_int(Service, Key, Default) of
+        Value when Value > 0 -> Value;
+        Value -> erlang:error({invalid_gateway_config, Key, Value})
+    end.
+
+internal_api_rpc_urls(Service) ->
+    case get_optional_binary(Service, <<"internal_api_rpc_urls">>) of
+        undefined ->
+            [];
+        Raw ->
+            Urls = [string:trim(U) || U <- binary:split(Raw, <<",">>, [global])],
+            true = length(Urls) > 0 andalso length(Urls) =< 512,
+            true = length(lists:usort(Urls)) =:= length(Urls),
+            true = lists:all(fun valid_internal_rpc_url/1, Urls),
+            Urls
+    end.
+valid_internal_rpc_url(Url) ->
+    case uri_string:parse(Url) of
+        #{scheme := Scheme, host := Host, path := <<"/internal/rpc">>} = M ->
+            (Scheme =:= <<"http">> orelse Scheme =:= <<"https">>) andalso byte_size(Host) > 0 andalso
+                not maps:is_key(userinfo, M) andalso not maps:is_key(query, M) andalso
+                not maps:is_key(fragment, M);
+        _ ->
+            false
+    end.
+
+%% 真实启动环境使用严格布尔值，实例门槛由部署配置明确给定。
+-spec env_thread_mentions_config() -> map().
+env_thread_mentions_config() ->
+    #{
+        <<"enabled">> => env_bool_strict("FLUXER_GATEWAY_THREAD_MENTIONS_ENABLED", false),
+        <<"expected_api_instances">> => env_int(
+            "FLUXER_GATEWAY_THREAD_MENTIONS_EXPECTED_API_INSTANCES", 0
+        ),
+        <<"expected_worker_instances">> => env_int(
+            "FLUXER_GATEWAY_THREAD_MENTIONS_EXPECTED_WORKER_INSTANCES", 0
+        ),
+        <<"expected_api_instance_ids">> => unicode:characters_to_binary(
+            env_string(
+                "FLUXER_GATEWAY_THREAD_MENTIONS_EXPECTED_API_INSTANCE_IDS", ""
+            )
+        ),
+        <<"expected_worker_instance_ids">> => unicode:characters_to_binary(
+            env_string(
+                "FLUXER_GATEWAY_THREAD_MENTIONS_EXPECTED_WORKER_INSTANCE_IDS", ""
+            )
+        )
+    }.
+
+%% 缺少完整租约时仅使用安全回退，不恢复全帖子设备广播。
+-spec thread_mentions_config(map()) -> map().
+thread_mentions_config(Service) ->
+    Raw = maps:get(<<"thread_mentions">>, Service, #{}),
+    #{
+        enabled => maps:get(<<"enabled">>, Raw, false) =:= true,
+        expected_api_instances => max(0, get_int(Raw, <<"expected_api_instances">>, 0)),
+        expected_worker_instances => max(0, get_int(Raw, <<"expected_worker_instances">>, 0)),
+        expected_api_instance_ids => thread_mention_instance_ids(
+            maps:get(<<"expected_api_instance_ids">>, Raw, [])
+        ),
+        expected_worker_instance_ids => thread_mention_instance_ids(
+            maps:get(<<"expected_worker_instance_ids">>, Raw, [])
+        )
+    }.
+
+%% JSON 使用字符串数组，环境使用逗号分隔清单；重复或非法身份拒绝启动。
+-spec thread_mention_instance_ids(term()) -> [binary()].
+thread_mention_instance_ids(Value) ->
+    Values =
+        case Value of
+            <<>> ->
+                [];
+            Bin when is_binary(Bin) ->
+                [string:trim(Id) || Id <- binary:split(Bin, <<",">>, [global])];
+            List when is_list(List) -> List;
+            _ ->
+                error(invalid_thread_mention_instance_ids)
+        end,
+    Valid =
+        length(Values) =< 256 andalso length(lists:usort(Values)) =:= length(Values) andalso
+            lists:all(
+                fun(Id) ->
+                    is_binary(Id) andalso byte_size(Id) > 0 andalso byte_size(Id) =< 128 andalso
+                        re:run(Id, <<"^[A-Za-z0-9._:-]+$">>, [{capture, none}]) =:= match
+                end,
+                Values
+            ),
+    case Valid of
+        true -> lists:sort(Values);
+        false -> error(invalid_thread_mention_instance_ids)
+    end.

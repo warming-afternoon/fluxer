@@ -12,10 +12,15 @@ route_call(Tag, Msg, From, State) ->
         query -> guild_query_handler:handle_call(Msg, From, State);
         voice -> guild_voice_handler:handle_call(Msg, From, State);
         subscription -> guild_subscription_handler:handle_call(Msg, From, State);
-        undefined -> {reply, ok, State}
+        undefined -> {reply, {error, unsupported_request}, State}
     end.
 
 -spec query_call_handler(term()) -> query | voice | subscription | undefined.
+query_call_handler(dispatch_thread_message_v2) -> query;
+query_call_handler(prepare_thread_lifecycle) -> query;
+query_call_handler(dispatch_thread_delete) -> query;
+query_call_handler(resolve_thread_mention_decision) -> query;
+query_call_handler(get_guild_channel_authorization) -> query;
 query_call_handler(resolve_mention_sources_page) -> query;
 query_call_handler(get_counts) -> query;
 query_call_handler(get_viewer_counts) -> query;

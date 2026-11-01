@@ -85,6 +85,7 @@ caller_timeout_ms(list_guild_members) -> 10000;
 caller_timeout_ms(search_guild_members) -> 10000;
 caller_timeout_ms(Tag) -> rpc_caller_timeout_ms(Tag).
 
+%% 为服务器只读请求选择调用超时。
 -spec rpc_caller_timeout_ms(term()) -> pos_integer() | undefined.
 rpc_caller_timeout_ms(resolve_mention_sources_page) -> 4000;
 rpc_caller_timeout_ms(get_user_permissions) -> 4000;
@@ -92,6 +93,7 @@ rpc_caller_timeout_ms(can_manage_roles) -> 4000;
 rpc_caller_timeout_ms(can_manage_role) -> 4000;
 rpc_caller_timeout_ms(get_guild_data) -> 4000;
 rpc_caller_timeout_ms(get_guild_auth_context) -> 4000;
+rpc_caller_timeout_ms(get_guild_channel_authorization) -> 4000;
 rpc_caller_timeout_ms(get_guild_member) -> 4000;
 rpc_caller_timeout_ms(has_member) -> 4000;
 rpc_caller_timeout_ms(get_members_with_role) -> 4000;
@@ -107,6 +109,17 @@ rpc_caller_timeout_ms(_Tag) -> undefined.
 -spec handle_query(term(), gen_server:from(), guild_state()) ->
     {reply, term(), guild_state()}
     | {noreply, guild_state()}.
+handle_query({dispatch_thread_message_v2, #{protocol_version := 2, data := Data}}, _From, State) ->
+    {noreply, NextState} = guild_dispatch:handle_dispatch(message_create, Data, State),
+    {reply, true, NextState};
+handle_query({dispatch_thread_message_v2, _Request}, _From, State) ->
+    {reply, {error, unsupported_protocol}, State};
+handle_query({dispatch_thread_delete, Data}, _From, State) ->
+    guild_thread_lifecycle:dispatch_delete(Data, State);
+handle_query({prepare_thread_lifecycle, Request}, _From, State) ->
+    guild_thread_lifecycle:handle_prepare(Request, State);
+handle_query({resolve_thread_mention_decision, Request}, _From, State) ->
+    {reply, gateway_rpc_thread_mentions:decide(Request, State), State};
 handle_query({get_counts}, _From, State) ->
     handle_get_counts(State);
 handle_query({get_viewer_counts, #{user_id := UserId}}, _From, State) when is_integer(UserId) ->
@@ -363,6 +376,8 @@ handle_call_sync(Msg, State) ->
 -spec handle_call_data(term(), guild_state()) -> {reply, term(), guild_state()}.
 handle_call_data({get_guild_data, Req}, State) ->
     guild_data:get_guild_data(request_map(Req), State);
+handle_call_data({get_guild_channel_authorization, Req}, State) ->
+    guild_data:get_channel_authorization(request_map(Req), State);
 handle_call_data({get_guild_auth_context, Req}, State) ->
     guild_data:get_auth_context(request_map(Req), State);
 handle_call_data({get_guild_member, Req}, State) ->

@@ -52,6 +52,14 @@ should_skip_dispatch(_Event, State) ->
 
 -spec process_dispatch(event(), event_data(), guild_state()) -> {noreply, guild_state()}.
 process_dispatch(Event, EventData, State) ->
+    case guild_thread_lifecycle:maybe_defer(Event, EventData, State) of
+        {deferred, NextState} -> {noreply, NextState};
+        pass -> process_dispatch_ready(Event, EventData, State)
+    end.
+
+%% 生命周期恢复完成后才做原有过滤和有序分发。
+-spec process_dispatch_ready(event(), event_data(), guild_state()) -> {noreply, guild_state()}.
+process_dispatch_ready(Event, EventData, State) ->
     case
         {
             guild_thread_gate:pre_update_filter(Event, EventData, State),
@@ -97,13 +105,21 @@ process_regular_dispatch(Event, EventData, State) ->
     FilteredSessions = filter_dispatch_sessions(
         Event, FinalData0, SessionIdOpt, Sessions, FilterState
     ),
-    FinalData = strip_thread_internal(FinalData0, UpdatedState),
+    FinalData = strip_thread_internal(
+        guild_thread_gate:with_message_channel_context(Event, FinalData0, FilterState),
+        UpdatedState
+    ),
     ?LOG_DEBUG(
         "process_dispatch: event=~p guild_id=~p total_sessions=~p filtered_sessions=~p",
         [Event, GuildId, map_size(Sessions), length(FilteredSessions)]
     ),
     guild_dispatch_send:dispatch_to_sessions(FilteredSessions, Event, FinalData, UpdatedState),
-    guild_dispatch_push:maybe_send_push_notifications(Event, FinalData, GuildId, UpdatedState),
+    PushData =
+        case maps:find(<<"_thread_mention_decision">>, FinalData0) of
+            {ok, Decision} -> FinalData#{<<"_thread_mention_decision">> => Decision};
+            error -> FinalData
+        end,
+    guild_dispatch_push:maybe_send_push_notifications(Event, PushData, GuildId, UpdatedState),
     FinalState = guild_dispatch_member_list:maybe_broadcast_member_list_update(
         Event, FinalData, State, UpdatedState
     ),
@@ -129,7 +145,8 @@ filter_dispatch_sessions(Event, Data, SessionIdOpt, Sessions, State) ->
     end.
 
 -spec strip_thread_internal(event_data(), guild_state()) -> event_data().
-strip_thread_internal(Data, State) ->
+strip_thread_internal(Data0, State) ->
+    Data = maps:remove(<<"_thread_mention_decision">>, Data0),
     case guild_thread_gate:needs_variant(State) of
         true -> guild_thread_payload:strip_internal(Data);
         false -> Data

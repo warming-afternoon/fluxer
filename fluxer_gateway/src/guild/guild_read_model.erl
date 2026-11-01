@@ -105,11 +105,18 @@ read_live(Owner, Request, Snapshot) ->
 read({Tag, Request}, Snapshot) ->
     State = materialize_member(maps:get(user_id, Request, null), Snapshot),
     case Tag of
-        get_guild_data -> reply(guild_data:get_guild_data(Request, State));
-        get_guild_auth_context -> reply(guild_data:get_auth_context(Request, State));
-        get_guild_member -> reply(guild_data_members:get_guild_member(Request, State));
-        has_member -> reply(guild_data_members:has_member(Request, State));
-        _ -> miss
+        get_guild_data ->
+            reply(guild_data:get_guild_data(Request, State));
+        get_guild_auth_context ->
+            reply(guild_data:get_auth_context(Request, State));
+        get_guild_channel_authorization ->
+            reply(guild_data:get_channel_authorization(Request, State));
+        get_guild_member ->
+            reply(guild_data_members:get_guild_member(Request, State));
+        has_member ->
+            reply(guild_data_members:has_member(Request, State));
+        _ ->
+            miss
     end.
 
 -spec materialize_member(integer() | null, map()) -> map().

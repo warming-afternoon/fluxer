@@ -27,7 +27,7 @@
 -define(FLIP_RETRIES, 5).
 -define(FLIP_RETRY_DELAY_MS, 1000).
 -define(MEMBER_PAGE_LIMIT, 1000).
--define(MEMBER_PAGES_PER_THREAD, 2).
+-define(MEMBER_PAGES_PER_THREAD, 200).
 -define(MEMBER_THREAD_BATCH, 100).
 -define(FETCH_COUNTS_KEY, {?MODULE, fetch_counts}).
 -define(EXTRA_KEYS, [thread_gate, thread_tainted, thread_load, thread_rows, thread_rows_at]).
@@ -97,6 +97,7 @@ with_paged_members(GuildId, Threads, Data) ->
         Id
      || T <- Threads, is_map(T), Id <- [maps:get(<<"id">>, T, undefined)], is_binary(Id)
     ],
+
     try fetch_thread_members(GuildId, ThreadIds, []) of
         {ok, Members} -> {ok, Data#{<<"thread_members">> => Members}};
         {error, Reason} -> {error, Reason}
@@ -104,30 +105,51 @@ with_paged_members(GuildId, Threads, Data) ->
         Class:Reason -> {error, {Class, Reason}}
     end.
 
--spec fetch_thread_members(integer(), [binary()], [[map()]]) ->
-    {ok, [map()]} | {error, term()}.
-fetch_thread_members(_GuildId, [], Acc) ->
-    {ok, lists:append(lists:reverse(Acc))};
+%% 独立帖子批次最多两批并行，单批页游标仍串行推进，最终按原批次顺序还原。
+-spec fetch_thread_members(integer(), [binary()], [[map()]]) -> {ok, [map()]} | {error, term()}.
 fetch_thread_members(GuildId, ThreadIds, Acc) ->
-    {Batch, Rest} = lists:split(min(?MEMBER_THREAD_BATCH, length(ThreadIds)), ThreadIds),
-    case
+    Limit =
+        case fluxer_gateway_env:get(thread_member_load_concurrency) of
+            undefined -> 2;
+            N -> N
+        end,
+    Batches = member_batches(ThreadIds, []),
+    Fetch = fun(Batch) ->
         fetch_member_pages(
-            GuildId, Batch, undefined, Acc, ?MEMBER_PAGES_PER_THREAD * length(Batch)
+            GuildId, Batch, undefined, [], ?MEMBER_PAGES_PER_THREAD * length(Batch)
         )
-    of
-        {ok, Acc1} -> fetch_thread_members(GuildId, Rest, Acc1);
-        {error, Reason} -> {error, Reason}
+    end,
+    case guild_thread_member_loader:run(Batches, Limit, Fetch) of
+        {ok, Results} ->
+            Members = lists:append([lists:append(lists:reverse(Pages)) || Pages <- Results]),
+            {ok, lists:append(lists:reverse(Acc)) ++ Members};
+        {error, _} = Error ->
+            Error
     end.
+
+%% 分批只改变调度，不改变帖子顺序、每批上限或页内游标。
+-spec member_batches([binary()], [[binary()]]) -> [[binary()]].
+member_batches([], Acc) ->
+    lists:reverse(Acc);
+member_batches(Ids, Acc) ->
+    {Batch, Rest} = lists:split(min(?MEMBER_THREAD_BATCH, length(Ids)), Ids),
+    member_batches(Rest, [Batch | Acc]).
 
 -spec fetch_member_pages(
     integer(), [binary()], binary() | undefined, [[map()]], non_neg_integer()
 ) ->
     {ok, [[map()]]} | {error, term()}.
-fetch_member_pages(_GuildId, [], _After, Acc, _PagesLeft) ->
-    {ok, Acc};
-fetch_member_pages(_GuildId, _ThreadIds, _After, Acc, 0) ->
-    {ok, Acc};
 fetch_member_pages(GuildId, ThreadIds, After, Acc, PagesLeft) ->
+    fetch_member_pages_counted(GuildId, ThreadIds, After, Acc, PagesLeft, #{}).
+
+%% 总批次预算之外逐帖记页数，不能让单个异常帖子借用其他帖子的预算。
+-spec fetch_member_pages_counted(integer(), [binary()], binary() | undefined,
+    [[map()]], non_neg_integer(), map()) -> {ok, [[map()]]} | {error, term()}.
+fetch_member_pages_counted(_GuildId, [], _After, Acc, _PagesLeft, _Counts) ->
+    {ok, Acc};
+fetch_member_pages_counted(_GuildId, _ThreadIds, _After, _Acc, 0, _Counts) ->
+    {error, thread_member_page_budget_exhausted};
+fetch_member_pages_counted(GuildId, ThreadIds, After, Acc, PagesLeft, Counts0) ->
     Request0 = #{
         <<"type">> => <<"list_thread_members">>,
         <<"guild_id">> => integer_to_binary(GuildId),
@@ -139,26 +161,58 @@ fetch_member_pages(GuildId, ThreadIds, After, Acc, PagesLeft) ->
             undefined -> Request0;
             _ -> Request0#{<<"after_user_id">> => After}
         end,
-    Result =
-        case rpc_client:call(Request) of
-            {ok, #{<<"members">> := Members} = Page} when is_list(Members) ->
-                Acc1 = [[M || M <- Members, is_map(M)] | Acc],
-                {next, next_member_cursor(Page, ThreadIds), Acc1};
-            {ok, _Invalid} ->
-                {error, invalid_thread_members_page};
-            {error, Reason} ->
-                {error, Reason}
-        end,
-    case Result of
-        {next, done, CursorAcc} ->
-            {ok, CursorAcc};
-        {next, {Remaining, Next}, CursorAcc} ->
-            fetch_member_pages(GuildId, Remaining, Next, CursorAcc, PagesLeft - 1);
-        {next, invalid, _CursorAcc} ->
+    case rpc_client:call(Request) of
+        {ok, #{<<"members">> := Members} = Page} when is_list(Members) ->
+
+            Counts = count_member_pages(Members, ThreadIds, Counts0),
+            Acc1 = [[M || M <- Members, is_map(M)] | Acc],
+            case next_member_cursor(Page, ThreadIds) of
+                done ->
+                    {ok, Acc1};
+                {Remaining, Next} ->
+                    case member_cursor_advances(ThreadIds, After, Remaining, Next) of
+                        false ->
+                            {error, non_advancing_thread_member_cursor};
+                        true ->
+                            fetch_member_pages_counted(GuildId, Remaining, Next, Acc1,
+                                PagesLeft - 1, Counts)
+                    end;
+                invalid ->
+                    {error, invalid_thread_members_page}
+            end;
+        {ok, _Invalid} ->
             {error, invalid_thread_members_page};
         {error, _Reason} = Error ->
             Error
     end.
+
+%% A remaining suffix may shrink; within one thread the numeric cursor must advance.
+-spec member_cursor_advances([binary()], binary() | undefined, [binary()], binary() | undefined) -> boolean().
+member_cursor_advances(Previous, _After, Remaining, _Next) when Previous =/= Remaining ->
+    true;
+member_cursor_advances(_Previous, After, _Remaining, Next) when is_binary(Next) ->
+    try
+        N = binary_to_integer(Next),
+        A = case After of undefined -> 0; _ -> binary_to_integer(After) end,
+        N > A
+    catch error:badarg -> false end;
+member_cursor_advances(_Previous, _After, _Remaining, _Next) ->
+    false.
+
+%% 只遍历本页记录与最多百个帖子的小计数，不展开成员全集。
+-spec count_member_pages([map()], [binary()], map()) -> map().
+count_member_pages(Members, ThreadIds, Counts) ->
+    true = length(Members) =< ?MEMBER_PAGE_LIMIT,
+    Allowed = maps:from_keys(ThreadIds, true),
+    Touched = maps:from_keys([hd(ThreadIds) | [maps:get(<<"id">>, M) || M <- Members]], true),
+    maps:fold(fun(ThreadId, true, Acc) ->
+        true = maps:is_key(ThreadId, Allowed),
+        Next = maps:get(ThreadId, Acc, 0) + 1,
+        case Next =< ?MEMBER_PAGES_PER_THREAD of
+            true -> Acc#{ThreadId => Next};
+            false -> error(thread_member_page_budget_exhausted)
+        end
+    end, Counts, Touched).
 
 -spec next_member_cursor(map(), [binary()]) ->
     done | invalid | {[binary()], binary() | undefined}.
@@ -294,8 +348,9 @@ install_active(#{thread_rows := Rows} = Extras, State) when is_list(Rows) ->
 install_active(#{thread_kept := Tab}, State) ->
     start_retry(put_store(Tab, loading, State));
 install_active(#{thread_load := {ok, Payload}}, State) when is_map(Payload) ->
-    State1 = put_store(guild_thread_store:new(), ready, State),
-    apply_payload(Payload, State1);
+    State1 = put_store(guild_thread_store:new(), loading, State),
+    Applied = apply_payload(Payload, State1),
+    Applied#{thread_load => #{status => ready, queue => [], queued => 0, attempt => 0}};
 install_active(_Extras, State) ->
     start_retry(put_store(guild_thread_store:new(), loading, State)).
 
@@ -315,6 +370,7 @@ put_store(Tab, Status, State) ->
 
 -spec apply_payload(payload() | map(), map()) -> map().
 apply_payload(Payload, State) ->
+
     case guild_thread_gate:store(State) of
         undefined ->
             State;
@@ -322,7 +378,9 @@ apply_payload(Payload, State) ->
             ok = guild_thread_store:load(
                 Tab, maps:get(threads, Payload, []), maps:get(members, Payload, [])
             ),
-            merge_parent_settings(maps:get(parent_settings, Payload, []), State)
+            Applied = merge_parent_settings(maps:get(parent_settings, Payload, []), State),
+
+            Applied
     end.
 
 -spec merge_parent_settings([map()], map()) -> map().
@@ -412,9 +470,8 @@ start_retry(#{thread_load := Load0} = State) ->
             _ -> false
         end,
     Load = maps:remove(ref, Load0),
-    Timer = erlang:send_after(
-        retry_delay(maps:get(attempt, Load, 0)), self(), thread_load_retry
-    ),
+    Delay = retry_delay(maps:get(attempt, Load, 0)),
+    Timer = erlang:send_after(Delay, self(), thread_load_retry),
     State#{thread_load => Load#{status => loading, timer => Timer}}.
 
 -spec retry_delay(non_neg_integer()) -> non_neg_integer().
@@ -466,9 +523,10 @@ handle_load_result(Ref, Result, #{thread_load := #{ref := Ref} = Load} = State) 
         end,
     case Snapshot of
         {loaded, LoadedPayload, LoadedState} when is_map(LoadedPayload) ->
-            State2 = apply_payload(LoadedPayload, LoadedState#{
+            Applied = apply_payload(LoadedPayload, LoadedState),
+            State2 = Applied#{
                 thread_load => #{status => ready, queue => [], queued => 0, attempt => 0}
-            }),
+            },
             State3 = replay(lists:reverse(maps:get(queue, Load, [])), State2),
             guild_thread_subscriptions:resync_after_load(State3);
         {loaded, InvalidPayload, _LoadedState} ->
@@ -506,6 +564,7 @@ replay(Events, State) ->
 
 -spec deactivate(map()) -> map().
 deactivate(State) ->
+    CleanState = guild_thread_lifecycle:cleanup(State),
     Data = maps:get(data, State),
     ok = guild_thread_store:retire(maps:get(thread_store, Data, undefined)),
     _ =
@@ -513,7 +572,9 @@ deactivate(State) ->
             #{timer := Timer} when is_reference(Timer) -> erlang:cancel_timer(Timer);
             _ -> false
         end,
-    maps:remove(thread_load, State#{data => maps:remove(thread_store, Data)}).
+    guild_thread_watches:clear(
+        maps:remove(thread_load, CleanState#{data => maps:remove(thread_store, Data)})
+    ).
 
 -spec list_field(binary(), map()) -> [map()].
 list_field(Key, Map) ->
@@ -546,3 +607,493 @@ fetch_counts() ->
              || R <- [ok, error, refetch]
             ])
     end.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+member_cursor_requires_numeric_progress_test() ->
+    ?assert(member_cursor_advances([<<"1">>], <<"9">>, [<<"1">>], <<"10">>)),
+    ?assertNot(member_cursor_advances([<<"1">>], <<"10">>, [<<"1">>], <<"9">>)),
+    ?assertNot(member_cursor_advances([<<"1">>], <<"10">>, [<<"1">>], <<"10">>)),
+    ?assertNot(member_cursor_advances([<<"1">>], undefined, [<<"1">>], undefined)),
+    ?assert(member_cursor_advances([<<"1">>, <<"2">>], <<"10">>, [<<"2">>], undefined)).
+
+member_page_budget_must_not_publish_partial_test() ->
+    ?assertEqual(
+        {error, thread_member_page_budget_exhausted},
+        fetch_member_pages(1, [<<"1">>], undefined, [[#{}]], 0)
+    ).
+
+member_batch_boundaries_preserve_all_ids_test() ->
+    Ids = [integer_to_binary(I) || I <- lists:seq(1, 205)],
+    Batches = member_batches(Ids, []),
+    ?assertEqual([100, 100, 5], [length(B) || B <- Batches]),
+    ?assertEqual(Ids, lists:append(Batches)).
+
+channels_collection_inactive_keeps_channels_test() ->
+    Response = #{<<"channels">> => [#{<<"id">> => <<"1">>}]},
+    ?assertEqual(
+        {[#{<<"id">> => <<"1">>}], #{
+            thread_gate => #{active => false, version => 0}, thread_tainted => false
+        }},
+        channels_collection(Response)
+    ).
+
+channels_collection_active_merges_forums_and_defers_threads_test() ->
+    Response = #{
+        <<"channels">> => [#{<<"id">> => <<"1">>}],
+        <<"thread_only_channels">> => [#{<<"id">> => <<"2">>, <<"type">> => 15}],
+        <<"thread_gate">> => #{<<"active">> => true, <<"config_version">> => 4},
+        <<"thread_tainted">> => true,
+        <<"threads">> => [
+            #{
+                <<"id">> => <<"10">>,
+                <<"parent_id">> => <<"1">>,
+                <<"type">> => 11,
+                <<"member_ids_preview">> => [<<"7">>]
+            }
+        ],
+        <<"thread_members">> => [
+            #{<<"id">> => <<"10">>, <<"user_id">> => <<"7">>, <<"flags">> => 1}
+        ]
+    },
+    {Channels, Extras} = channels_collection(Response),
+    ?assertEqual([<<"1">>, <<"2">>], [maps:get(<<"id">>, C) || C <- Channels]),
+    ?assertEqual(
+        #{thread_gate => #{active => true, version => 4}, thread_tainted => true}, Extras
+    ).
+
+load_payload_normalizes_threads_and_members_test() ->
+    Payload = load_payload(#{
+        <<"threads">> => [
+            #{
+                <<"id">> => <<"10">>,
+                <<"parent_id">> => <<"1">>,
+                <<"type">> => 11,
+                <<"member_ids_preview">> => [<<"7">>]
+            }
+        ],
+        <<"thread_members">> => [
+            #{<<"id">> => <<"10">>, <<"user_id">> => <<"7">>, <<"flags">> => 1}
+        ]
+    }),
+    #{threads := [Thread], members := [Member]} = Payload,
+    ?assertEqual(10, maps:get(<<"id">>, Thread)),
+    ?assertEqual([7], maps:get(<<"member_ids_preview">>, Thread)),
+    ?assertEqual(7, maps:get(<<"user_id">>, Member)).
+
+take_extras_strips_the_guild_map_test() ->
+    Data = #{
+        <<"guild">> => #{<<"id">> => <<"5">>, <<"thread_gate">> => #{<<"active">> => true}},
+        thread_tainted => true
+    },
+    {Extras, Rest} = take_extras(Data),
+    ?assertEqual(#{<<"guild">> => #{<<"id">> => <<"5">>}}, Rest),
+    ?assertEqual(
+        #{thread_gate => #{active => true, version => 0}, thread_tainted => true}, Extras
+    ).
+
+handoff_export_respects_the_row_budget_test() ->
+    Tab = guild_thread_store:new(),
+    ok = guild_thread_store:put_thread(Tab, #{<<"id">> => 10, <<"parent_id">> => 1}),
+    Data = #{thread_store => Tab, thread_gate => #{active => true}},
+    Exported = export_handoff(#{
+        data => Data, thread_load => #{status => ready, queue => [], queued => 0}
+    }),
+    ?assertNot(maps:is_key(thread_store, Exported)),
+    ?assertEqual(3, length(maps:get(thread_rows, Exported))),
+    guild_thread_store:destroy(Tab).
+
+handoff_export_while_loading_forces_a_refetch_test() ->
+    Tab = guild_thread_store:new(),
+    ok = guild_thread_store:put_thread(Tab, #{<<"id">> => 10, <<"parent_id">> => 1}),
+    Gate = #{active => true, version => 1},
+    Exported = export_handoff(#{
+        data => #{thread_store => Tab, thread_gate => Gate},
+        thread_load => #{status => loading, queue => [], queued => 0}
+    }),
+    guild_thread_store:destroy(Tab),
+    ?assertNot(maps:is_key(thread_store, Exported)),
+    ?assertNot(maps:is_key(thread_rows, Exported)),
+    {Extras, _} = take_extras(Exported),
+    Installed = install(Extras, #{id => 5, data => #{}, sessions => #{}}),
+    ?assert(loading(Installed)),
+    #{thread_load := #{timer := Timer}} = Installed,
+    erlang:cancel_timer(Timer),
+    deactivate(Installed).
+
+install_imports_fresh_rows_and_refetches_stale_ones_test() ->
+    Tab = guild_thread_store:new(),
+    ok = guild_thread_store:put_thread(Tab, #{<<"id">> => 10, <<"parent_id">> => 1}),
+    Rows = guild_thread_store:export(Tab),
+    guild_thread_store:destroy(Tab),
+    Base = #{id => 5, data => #{<<"channels">> => []}, sessions => #{}},
+    Gate = #{active => true, version => 1},
+    Fresh = install(
+        #{
+            thread_gate => Gate,
+            thread_rows => Rows,
+            thread_rows_at => erlang:system_time(millisecond)
+        },
+        Base
+    ),
+    ?assertNotEqual(undefined, guild_thread_gate:thread(10, Fresh)),
+    ?assertNot(loading(Fresh)),
+    Stale = install(#{thread_gate => Gate, thread_rows => Rows, thread_rows_at => 0}, Base),
+    ?assert(loading(Stale)),
+    ?assertEqual(undefined, guild_thread_gate:thread(10, Stale)),
+    #{thread_load := #{timer := Timer}} = Stale,
+    erlang:cancel_timer(Timer),
+    deactivate(Fresh),
+    deactivate(Stale).
+
+fetch_flip_data_pages_thread_members_test() ->
+    meck:new(rpc_client, [no_link]),
+    meck:expect(rpc_client, call, fun
+        (#{<<"type">> := <<"guild_thread_flip_data">>, <<"paged_members">> := true}) ->
+            {ok, #{
+                <<"config_version">> => 1,
+                <<"threads">> => [#{<<"id">> => <<"10">>}, #{<<"id">> => <<"11">>}]
+            }};
+        (
+            #{<<"type">> := <<"list_thread_members">>, <<"thread_ids">> := [<<"10">>, <<"11">>]} =
+                R
+        ) ->
+            case maps:get(<<"after_user_id">>, R, undefined) of
+                undefined ->
+                    {ok, #{
+                        <<"members">> => [#{<<"id">> => <<"10">>, <<"user_id">> => <<"7">>}],
+                        <<"has_more">> => true,
+                        <<"next_thread_id">> => <<"10">>,
+                        <<"next_after_user_id">> => <<"7">>
+                    }};
+                <<"7">> ->
+                    {ok, #{
+                        <<"members">> => [#{<<"id">> => <<"10">>, <<"user_id">> => <<"8">>}],
+                        <<"has_more">> => true,
+                        <<"next_thread_id">> => <<"11">>,
+                        <<"next_after_user_id">> => null
+                    }}
+            end;
+        (#{<<"type">> := <<"list_thread_members">>, <<"thread_ids">> := [<<"11">>]} = R) ->
+            ?assertNot(maps:is_key(<<"after_user_id">>, R)),
+            {ok, #{
+                <<"members">> => [#{<<"id">> => <<"11">>, <<"user_id">> => <<"9">>}],
+                <<"has_more">> => false
+            }}
+    end),
+    try
+        {ok, Data} = fetch_flip_data(5, 1),
+        ?assertEqual(
+            [<<"7">>, <<"8">>, <<"9">>],
+            [maps:get(<<"user_id">>, M) || M <- maps:get(<<"thread_members">>, Data)]
+        ),
+        ?assertEqual(4, meck:num_calls(rpc_client, call, '_'))
+    after
+        meck:unload(rpc_client)
+    end.
+
+fetch_flip_data_batches_many_threads_per_rpc_test() ->
+    Ids = [integer_to_binary(N) || N <- lists:seq(1, 250)],
+    meck:new(rpc_client, [no_link]),
+    meck:expect(rpc_client, call, fun
+        (#{<<"type">> := <<"guild_thread_flip_data">>}) ->
+            {ok, #{
+                <<"config_version">> => 1, <<"threads">> => [#{<<"id">> => Id} || Id <- Ids]
+            }};
+        (#{<<"type">> := <<"list_thread_members">>, <<"thread_ids">> := Batch}) ->
+            {ok, #{
+                <<"members">> => [#{<<"id">> => Id, <<"user_id">> => <<"7">>} || Id <- Batch],
+                <<"has_more">> => false
+            }}
+    end),
+    try
+        {ok, Data} = fetch_flip_data(5, 1),
+        ?assertEqual(Ids, [maps:get(<<"id">>, M) || M <- maps:get(<<"thread_members">>, Data)]),
+        ?assertEqual(4, meck:num_calls(rpc_client, call, '_'))
+    after
+        meck:unload(rpc_client)
+    end.
+
+fetch_flip_data_rejects_a_cursor_outside_the_batch_test() ->
+    meck:new(rpc_client, [no_link]),
+    meck:expect(rpc_client, call, fun
+        (#{<<"type">> := <<"guild_thread_flip_data">>}) ->
+            {ok, #{<<"config_version">> => 1, <<"threads">> => [#{<<"id">> => <<"10">>}]}};
+        (#{<<"type">> := <<"list_thread_members">>}) ->
+            {ok, #{
+                <<"members">> => [], <<"has_more">> => true, <<"next_thread_id">> => <<"99">>
+            }}
+    end),
+    try
+        ?assertEqual({error, invalid_thread_members_page}, fetch_flip_data(5, 1))
+    after
+        meck:unload(rpc_client)
+    end.
+
+loaded_forum_without_a_config_row_gets_default_surface_fields_test() ->
+    Forum = #{<<"id">> => <<"2">>, <<"type">> => 15, <<"name">> => <<"forum">>},
+    Data = guild_data_index:put_channels([Forum], #{}),
+    Settings = #{
+        <<"channel_id">> => <<"2">>,
+        <<"available_tags">> => [],
+        <<"default_tag_setting">> => <<"match_some">>,
+        <<"default_forum_layout">> => 0,
+        <<"flags">> => 0
+    },
+    State = install(
+        #{
+            thread_gate => #{active => true, version => 1},
+            thread_load =>
+                {ok, #{threads => [], members => [], parent_settings => [Settings]}}
+        },
+        #{id => 5, data => Data, sessions => #{}}
+    ),
+    [Loaded] = guild_data_index_channels:channel_list(maps:get(data, State)),
+    ?assertEqual([], maps:get(<<"available_tags">>, Loaded)),
+    ?assertEqual(<<"match_some">>, maps:get(<<"default_tag_setting">>, Loaded)),
+    ?assertEqual(0, maps:get(<<"default_forum_layout">>, Loaded)),
+    deactivate(State).
+
+fetch_flip_data_fails_on_a_failed_member_page_test() ->
+    meck:new(rpc_client, [no_link]),
+    meck:expect(rpc_client, call, fun
+        (#{<<"type">> := <<"guild_thread_flip_data">>}) ->
+            {ok, #{<<"config_version">> => 1, <<"threads">> => [#{<<"id">> => <<"10">>}]}};
+        (#{<<"type">> := <<"list_thread_members">>}) ->
+            {error, timeout}
+    end),
+    try
+        ?assertEqual({error, timeout}, fetch_flip_data(5, 1))
+    after
+        meck:unload(rpc_client)
+    end.
+
+fetch_flip_data_fails_when_a_member_page_throws_test() ->
+    meck:new(rpc_client, [no_link]),
+    meck:expect(rpc_client, call, fun
+        (#{<<"type">> := <<"guild_thread_flip_data">>}) ->
+            {ok, #{<<"config_version">> => 1, <<"threads">> => [#{<<"id">> => <<"10">>}]}};
+        (#{<<"type">> := <<"list_thread_members">>}) ->
+            error(circuit_open)
+    end),
+    try
+        ?assertEqual({error, {error, circuit_open}}, fetch_flip_data(5, 1))
+    after
+        meck:unload(rpc_client)
+    end.
+
+fetch_flip_data_keeps_inline_members_from_an_older_api_test() ->
+    Inline = #{
+        <<"config_version">> => 1,
+        <<"threads">> => [#{<<"id">> => <<"10">>}],
+        <<"thread_members">> => [#{<<"id">> => <<"10">>, <<"user_id">> => <<"7">>}]
+    },
+    meck:new(rpc_client, [no_link]),
+    meck:expect(rpc_client, call, fun(_) -> {ok, Inline} end),
+    try
+        ?assertEqual({ok, Inline}, fetch_flip_data(5, 1)),
+        ?assertEqual(1, meck:num_calls(rpc_client, call, '_'))
+    after
+        meck:unload(rpc_client)
+    end.
+
+install_inactive_creates_no_store_test() ->
+    State = install(#{}, #{id => 5, data => #{}, sessions => #{}}),
+    ?assertEqual(#{}, maps:get(data, State)),
+    ?assertNot(maps:is_key(thread_load, State)).
+
+queue_overflow_triggers_refetch_test() ->
+    Stale = make_ref(),
+    State0 = #{
+        id => 5,
+        data => #{thread_gate => #{active => true, version => 1}},
+        thread_load => #{
+            status => loading,
+            queue => [],
+            queued => ?LOAD_QUEUE_CAP,
+            attempt => 0,
+            ref => Stale
+        }
+    },
+    State = queue_event(thread_update, #{}, State0),
+    #{thread_load := #{queued := 0, queue := [], attempt := 1, timer := Timer} = Load} = State,
+    ?assertNot(maps:is_key(ref, Load)),
+    ?assertEqual(State, handle_load_result(Stale, {ok, #{}}, State)),
+    Remaining = erlang:cancel_timer(Timer),
+    ?assert(is_integer(Remaining) andalso Remaining > 25000).
+
+deactivate_orphans_an_inflight_fetch_test() ->
+    Stale = make_ref(),
+    State = deactivate(#{
+        id => 5,
+        data => #{},
+        thread_load => #{status => loading, ref => Stale}
+    }),
+    ?assertNot(maps:is_key(thread_load, State)),
+    ?assertEqual(State, handle_load_result(Stale, {ok, #{}}, State)).
+
+events_during_a_backoff_are_not_queued_test() ->
+    ok = guild_thread_store:init(),
+    Tab = guild_thread_store:new(),
+    Timer = erlang:send_after(600000, self(), thread_load_retry),
+    State0 = #{
+        id => 5,
+        data => #{thread_store => Tab, thread_gate => #{active => true, version => 1}},
+        thread_load => #{
+            status => loading, queue => [], queued => 0, attempt => 3, timer => Timer
+        }
+    },
+    Message = #{<<"id">> => <<"400">>, <<"channel_id">> => <<"300">>, <<"type">> => 0},
+    try
+        State = lists:foldl(
+            fun(_, Acc) ->
+                guild_state_threads:after_regular_event(message_create, Message, Acc)
+            end,
+            State0,
+            lists:seq(1, ?LOAD_QUEUE_CAP + 1)
+        ),
+        ?assertMatch(
+            #{thread_load := #{queued := 0, queue := [], attempt := 3, timer := Timer}}, State
+        ),
+        ?assert(is_integer(erlang:read_timer(Timer)))
+    after
+        erlang:cancel_timer(Timer),
+        guild_thread_store:destroy(Tab)
+    end.
+
+queued_deletes_do_not_replay_onto_the_snapshot_test() ->
+    ok = guild_thread_store:init(),
+    Loading = guild_thread_store:new(),
+    Ref = make_ref(),
+    State0 = #{
+        id => 5,
+        disable_permission_cache_updates => true,
+        sessions => #{},
+        data => #{thread_store => Loading, thread_gate => #{active => true, version => 1}},
+        thread_load => #{status => loading, queue => [], queued => 0, attempt => 0, ref => Ref}
+    },
+    State1 = guild_state_threads:after_regular_event(
+        message_delete, #{<<"id">> => <<"401">>, <<"channel_id">> => <<"300">>}, State0
+    ),
+    State2 = guild_state_threads:after_regular_event(
+        message_delete_bulk,
+        #{<<"ids">> => [<<"402">>, <<"403">>], <<"channel_id">> => <<"300">>},
+        State1
+    ),
+    ?assertMatch(#{thread_load := #{queued := 2}}, State2),
+    Payload = load_payload(#{
+        <<"threads">> => [
+            #{
+                <<"id">> => <<"300">>,
+                <<"parent_id">> => <<"100">>,
+                <<"type">> => 11,
+                <<"last_message_id">> => <<"400">>,
+                <<"message_count">> => 5,
+                <<"total_message_sent">> => 8,
+                <<"thread_metadata">> => #{<<"archived">> => false}
+            }
+        ]
+    }),
+    State3 = handle_load_result(Ref, {ok, Payload}, State2),
+    Fresh = guild_thread_gate:store(State3),
+    try
+        ?assertEqual(
+            5, maps:get(<<"message_count">>, guild_thread_store:get_thread(Fresh, 300))
+        )
+    after
+        guild_thread_store:destroy(Fresh),
+        guild_thread_store:destroy(Loading)
+    end.
+
+regular_channel_messages_during_a_load_are_not_queued_test() ->
+    ok = guild_thread_store:init(),
+    Tab = guild_thread_store:new(),
+    Ref = make_ref(),
+    State0 = #{
+        id => 5,
+        disable_permission_cache_updates => true,
+        sessions => #{},
+        data => #{
+            thread_store => Tab,
+            thread_gate => #{active => true, version => 1},
+            <<"channels">> => [#{<<"id">> => <<"100">>, <<"type">> => 0}]
+        },
+        thread_load => #{status => loading, queue => [], queued => 0, attempt => 1, ref => Ref}
+    },
+    try
+        State1 = lists:foldl(
+            fun(N, Acc) ->
+                guild_state_threads:after_regular_event(
+                    message_create,
+                    #{<<"id">> => integer_to_binary(1000 + N), <<"channel_id">> => <<"100">>},
+                    Acc
+                )
+            end,
+            State0,
+            lists:seq(1, ?LOAD_QUEUE_CAP + 1)
+        ),
+        ?assertMatch(#{thread_load := #{queued := 0, ref := Ref, attempt := 1}}, State1),
+        ?assertNot(maps:is_key(timer, maps:get(thread_load, State1))),
+        State2 = guild_state_threads:after_regular_event(
+            message_create, #{<<"id">> => <<"5000">>, <<"channel_id">> => <<"300">>}, State1
+        ),
+        ?assertMatch(#{thread_load := #{queued := 1}}, State2)
+    after
+        guild_thread_store:retire(Tab)
+    end.
+
+store_events_during_a_load_replay_onto_the_fresh_store_test() ->
+    ok = guild_thread_store:init(),
+    Loading = guild_thread_store:new(),
+    Ref = make_ref(),
+    State0 = #{
+        id => 5,
+        disable_permission_cache_updates => true,
+        sessions => #{},
+        data => #{thread_store => Loading, thread_gate => #{active => true, version => 1}},
+        thread_load => #{status => loading, queue => [], queued => 0, attempt => 0, ref => Ref}
+    },
+    Message = #{<<"id">> => <<"400">>, <<"channel_id">> => <<"300">>, <<"type">> => 0},
+    State1 = guild_state_threads:after_regular_event(message_create, Message, State0),
+    State2 = guild_state_threads:after_regular_event(
+        channel_delete, #{<<"id">> => <<"200">>, <<"type">> => 0}, State1
+    ),
+    State3 = guild_state_threads:after_regular_event(
+        guild_member_remove, #{<<"user">> => #{<<"id">> => <<"7">>}}, State2
+    ),
+    Thread = fun(Id, Parent) ->
+        #{
+            <<"id">> => integer_to_binary(Id),
+            <<"parent_id">> => integer_to_binary(Parent),
+            <<"type">> => 11,
+            <<"message_count">> => 0,
+            <<"total_message_sent">> => 0,
+            <<"thread_metadata">> => #{<<"archived">> => false}
+        }
+    end,
+    Payload = load_payload(#{
+        <<"threads">> => [Thread(300, 100), Thread(301, 200)],
+        <<"thread_members">> => [#{<<"id">> => <<"300">>, <<"user_id">> => <<"7">>}]
+    }),
+    State4 = handle_load_result(Ref, {ok, Payload}, State3),
+    Fresh = guild_thread_gate:store(State4),
+    try
+        ?assertNotEqual(Loading, Fresh),
+        ?assertNot(loading(State4)),
+        Loaded = guild_thread_store:get_thread(Fresh, 300),
+        ?assertEqual(400, snowflake_id:parse_maybe(maps:get(<<"last_message_id">>, Loaded))),
+        ?assertEqual(1, maps:get(<<"message_count">>, Loaded)),
+        ?assertEqual(undefined, guild_thread_store:get_thread(Fresh, 301)),
+        ?assertEqual([], guild_thread_store:member_ids(Fresh, 300)),
+        State5 = replay([{message_create, Message}], State4),
+        ?assertEqual(
+            1, maps:get(<<"message_count">>, guild_thread_store:get_thread(Fresh, 300))
+        ),
+        _ = State5
+    after
+        guild_thread_store:destroy(Fresh),
+        guild_thread_store:destroy(Loading)
+    end.
+
+-endif.

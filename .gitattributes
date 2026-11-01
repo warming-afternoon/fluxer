@@ -3,6 +3,9 @@ fluxer_static/** -text -diff
 fluxer_static/**/*.md text diff
 fluxer_static/*.sh text eol=lf diff
 fluxer_static/*.sha256 text eol=lf diff
+# Keep Linux shell entrypoints LF after Windows checkouts.
+/fluxer_gateway/scripts/*.sh text eol=lf
+/tools/ci/*.sh text eol=lf
 packages/fonts/files/** -text -diff
 fluxer_app/src/features/voice/utils/noise_suppression/deepfilternet3/*.wasm -text -diff
 fluxer_app/src/features/voice/utils/noise_suppression/deepfilternet3/*.tar.gz -text -diff

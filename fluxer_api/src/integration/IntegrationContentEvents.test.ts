@@ -55,7 +55,14 @@ describe('authoritative native content snapshots', () => {
 		vi.stubEnv('INTEGRATION_NATS_URL', 'nats://test');
 		vi.stubEnv('INTEGRATION_GUILD_ID', '1');
 		vi.stubEnv('INTEGRATION_FORUM_CHANNEL_IDS', '22,23,24,25');
-		source.state.mockResolvedValue({guildId: 1n, parentId: 22n, hasStarter: true, archived: false, locked: false});
+		source.state.mockResolvedValue({
+			guildId: 1n,
+			parentId: 22n,
+			hasStarter: true,
+			archived: false,
+			locked: false,
+			createdAt: new Date('2020-01-02T03:04:05Z'),
+		});
 		source.channel.mockResolvedValue({name: '原生作品', ownerId: 11n});
 		source.message.mockResolvedValue({content: '原生正文', authorId: 11n, attachments: []});
 		source.stats.mockResolvedValue({messageCount: 4});
@@ -78,6 +85,7 @@ describe('authoritative native content snapshots', () => {
 			expect.objectContaining({
 				creation_operation_id: 'task-7',
 				snapshot: expect.objectContaining({
+					created_at: '2020-01-02T03:04:05.000Z',
 					body: '原生正文',
 					reply_count: 3,
 					reactions: [

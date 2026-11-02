@@ -7,6 +7,7 @@ import {Logger} from '@app/api/Logger';
 import {getCacheService} from '@app/api/middleware/ServiceSingletons';
 import {IntegrationCreationEventGate} from '@app/integration/IntegrationCreationEventGate';
 import {IntegrationEventJournal} from '@app/integration/IntegrationEventJournal';
+import {snowflakeToDate} from '@fluxer/snowflake/src/Snowflake';
 
 export interface ContentResource {
 	/** 原生服务器范围 */
@@ -105,6 +106,7 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 		const parentConfig = state ? await repository.threads.getParentConfig(state.guildId, state.parentId) : null;
 		const appliedIds = new Set((state?.appliedTags ?? []).map((id) => id.toString()));
 		const snapshot = {
+			created_at: (state?.createdAt ?? snowflakeToDate(threadId)).toISOString(),
 			title: channel?.name ?? '',
 			body: starter?.content ?? '',
 			author_id: starter?.authorId?.toString() ?? channel?.ownerId?.toString() ?? null,

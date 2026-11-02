@@ -61,7 +61,7 @@ export class ThreadMoveService {
 			channelRepository.channelData.findUnique(params.targetParentId),
 			channelRepository.threads.getState(params.threadId),
 		]);
-		if (!channel || !source || !target || !state) throw new UnknownChannelError();
+		if (!channel || !source || !target || !state || state.deleting) throw new UnknownChannelError();
 		if (
 			!source.isThreadOnly() ||
 			!target.isThreadOnly() ||

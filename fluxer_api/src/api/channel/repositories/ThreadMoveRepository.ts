@@ -7,6 +7,7 @@ import {Db} from '@app/api/database/CassandraTypes';
 import type {ChannelRow} from '@app/api/database/types/ChannelTypes';
 import {ThreadState} from '@app/api/models/ThreadState';
 import {
+	ActiveThreadsByGuild,
 	ArchivedThreadsByParent,
 	Channels,
 	ThreadState as States,
@@ -46,7 +47,7 @@ export class ThreadMoveRepository {
 		for (let attempt = 0; attempt < 5; attempt++) {
 			const current = await this.repository.threads.getState(threadId);
 			const channel = await fetchOne<ChannelRow>(FETCH_CHANNEL.bind({channel_id: threadId, soft_deleted: false}));
-			if (!current || !channel) throw new UnknownChannelError();
+			if (!current || current.deleting || !channel) throw new UnknownChannelError();
 			if (current.parentId !== sourceParentId && current.parentId !== targetParentId) {
 				throw new Error('Thread has moved beyond this operation');
 			}
@@ -107,6 +108,7 @@ export class ThreadMoveRepository {
 					);
 			}
 			await batch.execute(false);
+			await this.assertNotDeleted(next);
 			await this.repository.threads.repairThreadIndexes([threadId]);
 			if (sourceParentId !== targetParentId) await this.repository.threads.releaseForumPin(sourceParentId, threadId);
 			// 小批量成员修复，不复制消息，也不将全体成员塞入一个跨分区大 batch。
@@ -147,7 +149,12 @@ export class ThreadMoveRepository {
 							);
 							await memberBatch.execute(false);
 							// 移动期间退帖不能由迟到的索引写入留下幽灵成员。
-							if (!(await this.repository.threads.getMember(threadId, member.userId))) {
+							const liveState = await this.repository.threads.getState(threadId);
+							if (
+								!liveState ||
+								liveState.deleteDispatched ||
+								!(await this.repository.threads.getMember(threadId, member.userId))
+							) {
 								await deleteOneOrMany(
 									ThreadMembersByUser.deleteByPk({
 										user_id: member.userId,
@@ -175,11 +182,41 @@ export class ThreadMoveRepository {
 						{last_message_id: channelIdToMessageId(threadId)},
 					),
 				);
-			const latest = await this.repository.threads.getState(threadId);
-			if (!latest) throw new UnknownChannelError();
+			const latest = await this.assertNotDeleted(next);
 			if (latest.stateVersion !== next.stateVersion) continue;
 			return latest;
 		}
 		throw new ServiceUnavailableError();
+	}
+
+	/** 删除确认后仅清理本移动可能迟到的侧索引，不修改原生主行或消息。 */
+	private async assertNotDeleted(state: ThreadState): Promise<ThreadState> {
+		const current = await this.repository.threads.getState(state.threadId);
+		if (!current || current.deleteDispatched) {
+			const cleanup = new BatchBuilder();
+			cleanup.addPrepared(ThreadsByParent.deleteByPk({parent_id: state.parentId, thread_id: state.threadId}));
+			cleanup.addPrepared(ActiveThreadsByGuild.deleteByPk({guild_id: state.guildId, thread_id: state.threadId}));
+			if (state.archiveTimestamp) {
+				cleanup.addPrepared(
+					ArchivedThreadsByParent.deleteByPk({
+						parent_id: state.parentId,
+						is_private: state.isPrivate,
+						archive_timestamp: state.archiveTimestamp,
+						thread_id: state.threadId,
+					}),
+				);
+			}
+			await cleanup.execute(false);
+			await executeConditional(
+				Channels.conditionalPatchByPk(
+					{channel_id: state.parentId, soft_deleted: false},
+					{last_message_id: Db.clear()},
+					{last_message_id: channelIdToMessageId(state.threadId)},
+				),
+			);
+			throw new UnknownChannelError();
+		}
+		if (current.deleting) throw new UnknownChannelError();
+		return current;
 	}
 }

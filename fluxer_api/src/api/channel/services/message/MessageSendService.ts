@@ -65,6 +65,7 @@ import type {UserRepository} from '@app/api/user/repositories/UserRepository';
 import {isContentHidden, isDirectDeliverySuppressed} from '@app/api/user/UserHelpers';
 import {assertGuildMemberCanCommunicate} from '@app/api/utils/GuildCommunicationUtils';
 import {checkGuildVerificationWithResponse} from '@app/api/utils/GuildVerificationUtils';
+import {IntegrationAttachmentManifest} from '@app/integration/IntegrationAttachmentManifest';
 import {
 	ChannelTypes,
 	MessageReferenceTypes,
@@ -372,6 +373,15 @@ export class MessageSendService {
 		for (let index = 0; index < attachments.length; index++) {
 			const attachment = attachments[index];
 			if (!('upload_filename' in attachment) || !attachment.upload_filename) continue;
+			const preparedSize = await new IntegrationAttachmentManifest().preparedUploadSize(
+				attachment.upload_filename,
+				user.id,
+				channelId,
+			);
+			if (preparedSize !== null) {
+				uploadedAttachmentSizes.push({size: preparedSize});
+				continue;
+			}
 			const pendingUpload = await this.deps.attachmentUploadTraceRepository.getPendingUpload({
 				uploadKey: attachment.upload_filename,
 				userId: user.id,

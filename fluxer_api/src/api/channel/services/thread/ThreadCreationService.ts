@@ -49,6 +49,7 @@ import type {ThreadState} from '@app/api/models/ThreadState';
 import type {User} from '@app/api/models/User';
 import {deleteThreadSearchDocuments} from '@app/api/search/thread/ThreadSearchService';
 import {assertAccountNotLimited} from '@app/api/user/AccountLimit';
+import {IntegrationError} from '@app/integration/IntegrationError';
 import {AuditLogActionType} from '@fluxer/constants/src/AuditLogActionType';
 import {ChannelTypes, MessageReferenceTypes, MessageTypes, Permissions} from '@fluxer/constants/src/ChannelConstants';
 import {
@@ -72,6 +73,7 @@ import {MaxActiveThreadsError} from '@fluxer/errors/src/domains/channel/MaxActiv
 import {ThreadAlreadyCreatedForMessageError} from '@fluxer/errors/src/domains/channel/ThreadAlreadyCreatedForMessageError';
 import {UnknownMessageError} from '@fluxer/errors/src/domains/channel/UnknownMessageError';
 import {SlowmodeRateLimitError} from '@fluxer/errors/src/domains/core/SlowmodeRateLimitError';
+import {FluxerError} from '@fluxer/errors/src/FluxerError';
 import type {
 	StartForumThreadRequest,
 	StartForumThreadResponse,
@@ -293,7 +295,12 @@ export class ThreadCreationService {
 					requestCache: params.requestCache,
 				}));
 		} catch (error) {
-			await this.discardThread(view, members, parent);
+			// 持久服务操作保留未确认资源与已扫描附件，重试恢复同一线程和首消息。
+			const terminal =
+				(error instanceof FluxerError && error.status >= 400 && error.status < 500 && error.status !== 429) ||
+				(error instanceof IntegrationError && !error.retryable);
+			if (!params.preparedThreadId || terminal || process.env.FLUXER_THREAD_POLICY_ENABLED !== 'true')
+				await this.discardThread(view, members, parent);
 			await this.ctx.rateLimitService.resetLimit(slowmodeThreadKey(parent.id, user.id));
 			throw error;
 		}

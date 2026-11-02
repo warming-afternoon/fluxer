@@ -2,10 +2,13 @@
 
 import {createAuthHarness, createTestAccount} from '@app/api/auth/tests/AuthTestUtils';
 import {createChannelID, createGuildID} from '@app/api/BrandedTypes';
+import {Config, getConfig} from '@app/api/Config';
 import {createApiContext} from '@app/api/CreateApiContext';
 import {ChannelRepository} from '@app/api/channel/ChannelRepository';
+import {AttachmentUploadTraceRepository} from '@app/api/channel/repositories/message/AttachmentUploadTraceRepository';
 import type {ThreadPolicy} from '@app/api/channel/services/thread/ThreadPolicyRepository';
 import {ThreadPolicyRepository} from '@app/api/channel/services/thread/ThreadPolicyRepository';
+import {loadFixture} from '@app/api/channel/tests/AttachmentTestUtils';
 import {createGuild, setupTestGuildWithMembers} from '@app/api/channel/tests/ChannelTestUtils';
 import {threadsRequest} from '@app/api/channel/tests/ThreadTestUtils';
 import {clearChannelThreadsTaintCacheForTesting} from '@app/api/experiment/ChannelThreadsGate';
@@ -73,6 +76,7 @@ describe('restricted content RPC native business paths', () => {
 	});
 	afterEach(() => {
 		vi.unstubAllEnvs();
+		getConfig().presignedAttachmentUploadsEnabled = false;
 	});
 	afterAll(async () => {
 		await harness?.shutdown();
@@ -309,12 +313,18 @@ describe('restricted content RPC native business paths', () => {
 		);
 		vi.stubEnv('FLUXER_THREAD_POLICY_ENABLED', 'true');
 		const policies = new Map<string, ThreadPolicy>();
-		vi.spyOn(ThreadPolicyRepository.prototype, 'set').mockImplementation(async (_channel, _user, policy) => {
+		const policyChannels = new Map<string, bigint>();
+		vi.spyOn(ThreadPolicyRepository.prototype, 'set').mockImplementation(async (channel, _user, policy) => {
+			policyChannels.set(policy.source, channel);
 			policies.set(policy.source, policy);
 		});
-		vi.spyOn(ThreadPolicyRepository.prototype, 'list').mockImplementation(async () => [...policies.values()]);
-		vi.spyOn(ThreadPolicyRepository.prototype, 'hasActiveLock').mockImplementation(async () =>
-			[...policies.values()].some((policy) => policy.kind === 'lock' && policy.active),
+		vi.spyOn(ThreadPolicyRepository.prototype, 'list').mockImplementation(async (channel) =>
+			[...policies.values()].filter((policy) => policyChannels.get(policy.source) === channel),
+		);
+		vi.spyOn(ThreadPolicyRepository.prototype, 'hasActiveLock').mockImplementation(async (channel) =>
+			[...policies.values()].some(
+				(policy) => policyChannels.get(policy.source) === channel && policy.kind === 'lock' && policy.active,
+			),
 		);
 		const service = new IntegrationContentService(createApiContext(), new MemoryOperations());
 		const base = {
@@ -395,13 +405,20 @@ describe('restricted content RPC native business paths', () => {
 		vi.stubEnv('FLUXER_THREAD_POLICY_ENABLED', 'true');
 		const stored: Array<{channel: bigint; user: bigint; policy: ThreadPolicy}> = [];
 		vi.spyOn(ThreadPolicyRepository.prototype, 'set').mockImplementation(async (channel, user, policy) => {
-			expect(await new ChannelRepository().channelData.findUnique(channel)).toBeNull();
+			if (policy.active) expect(await new ChannelRepository().channelData.findUnique(channel)).toBeNull();
+			const previous = stored.findIndex(
+				(item) => item.channel === channel && item.user === user && item.policy.source === policy.source,
+			);
+			if (previous >= 0) stored.splice(previous, 1);
 			stored.push({channel, user, policy});
 		});
 		vi.spyOn(ThreadPolicyRepository.prototype, 'list').mockImplementation(async (channel, user) =>
 			stored
 				.filter((item) => item.channel === channel && (item.user === user || item.user === 0n))
 				.map((item) => item.policy),
+		);
+		vi.spyOn(ThreadPolicyRepository.prototype, 'hasActiveLock').mockImplementation(async (channel) =>
+			stored.some((item) => item.channel === channel && item.policy.kind === 'lock' && item.policy.active),
 		);
 		const operations = new MemoryOperations();
 		const service = new IntegrationContentService(createApiContext(), operations);
@@ -529,5 +546,190 @@ describe('restricted content RPC native business paths', () => {
 			archived: false,
 			externalLocked: false,
 		});
+	});
+	it('recovers the same scanned attachment after binding interruption and keeps native pending state closed', async () => {
+		const owner = await createTestAccount(harness);
+		await ensureSessionStarted(harness, owner.token);
+		const guild = await createGuild(harness, owner.token, 'attachment recovery');
+		const forum = await threadsRequest<{id: string}>(harness, owner.token)
+			.post(`/guilds/${guild.id}/channels`)
+			.body({name: 'images', type: ChannelTypes.GUILD_FORUM})
+			.execute();
+		vi.stubEnv('INTEGRATION_GUILD_ID', guild.id);
+		vi.stubEnv(
+			'INTEGRATION_FORUM_CHANNEL_IDS',
+			[forum.id, '111111111111111111', '222222222222222222', '333333333333333333'].join(','),
+		);
+		vi.stubEnv('FLUXER_THREAD_POLICY_ENABLED', 'true');
+		getConfig().presignedAttachmentUploadsEnabled = true;
+		const policies = new Map<string, {channel: bigint; policy: ThreadPolicy}>();
+		vi.spyOn(ThreadPolicyRepository.prototype, 'set').mockImplementation(async (channel, user, policy) => {
+			policies.set(`${channel}:${user}:${policy.source}`, {channel, policy});
+		});
+		vi.spyOn(ThreadPolicyRepository.prototype, 'list').mockImplementation(async (channel) =>
+			[...policies.values()].filter((item) => item.channel === channel).map((item) => item.policy),
+		);
+		vi.spyOn(ThreadPolicyRepository.prototype, 'hasActiveLock').mockImplementation(async (channel) =>
+			[...policies.values()].some(
+				(item) => item.channel === channel && item.policy.active && item.policy.kind === 'lock',
+			),
+		);
+		const operations = new MemoryOperations();
+		vi.spyOn(IntegrationOperationRepository.prototype, 'allocate').mockImplementation(async (record) => {
+			const existing = operations.records.get(record.operation_id);
+			if (existing && existing.fingerprint !== record.fingerprint)
+				throw new IntegrationError('OPERATION_CONFLICT', 'attachment plan changed');
+			return existing ?? operations.allocate(record);
+		});
+		vi.spyOn(IntegrationOperationRepository.prototype, 'find').mockImplementation(
+			async (id) => operations.records.get(id) ?? null,
+		);
+		vi.spyOn(IntegrationOperationRepository.prototype, 'completeOnce').mockImplementation(async (id, result) => {
+			const record = operations.records.get(id)!;
+			if (!record.result) record.result = JSON.stringify(result);
+			return JSON.parse(record.result);
+		});
+		const bytes = loadFixture('yeah.png');
+		const upload = await threadsRequest<{
+			attachments: Array<{
+				id: number;
+				filename: string;
+				file_size: number;
+				content_type: string;
+				upload_filename: string;
+			}>;
+		}>(harness, owner.token)
+			.post(`/channels/${forum.id}/attachments`)
+			.body({attachments: [{id: 0, filename: 'cover.png', file_size: bytes.length, content_type: 'image/png'}]})
+			.execute();
+		const {id, filename, file_size, content_type, upload_filename} = upload.attachments[0]!;
+		const descriptor = {id, filename, file_size, content_type, upload_filename};
+		await harness.storageService.uploadObject({
+			bucket: Config.s3.buckets.uploads,
+			key: descriptor.upload_filename,
+			body: bytes,
+			contentType: 'image/png',
+		});
+		const copy = vi.spyOn(harness.storageService, 'copyObjectWithMetadataStripping');
+		const binding = AttachmentUploadTraceRepository.prototype.bindAttachment;
+		vi.spyOn(AttachmentUploadTraceRepository.prototype, 'bindAttachment')
+			.mockRejectedValueOnce(new Error('binding interrupted'))
+			.mockImplementation(binding);
+		const service = new IntegrationContentService(createApiContext(), operations);
+		const request = {
+			version: 1,
+			request_id: 'request_attachment_recovery',
+			operation_id: 'operation_attachment_recovery',
+			actor_user_id: owner.userId,
+			guild_id: guild.id,
+			channel_id: forum.id,
+			name: 'cover',
+			content: 'image body',
+			attachments: [descriptor],
+		};
+		await expect(service.dispatch('rpc.content.v1.thread.create_service', request)).rejects.toThrow(
+			'binding interrupted',
+		);
+		const plan = JSON.parse(operations.records.get(request.operation_id)!.payload).operation_plan;
+		const pending = await threadsRequest<{thread_metadata: {locked: boolean; archived: boolean}}>(harness, owner.token)
+			.get(`/channels/${plan.thread_id}`)
+			.execute();
+		expect(pending.thread_metadata).toMatchObject({locked: true, archived: true});
+		await threadsRequest(harness, owner.token)
+			.post(`/channels/${plan.thread_id}/messages`)
+			.body({content: 'premature'})
+			.expect(403)
+			.execute();
+		await harness.storageService.deleteObject(Config.s3.buckets.uploads, descriptor.upload_filename);
+		const recovered = (await service.dispatch('rpc.content.v1.thread.create_service', request)) as {thread_id: string};
+		expect(recovered.thread_id).toBe(plan.thread_id);
+		expect(copy).toHaveBeenCalledTimes(1);
+		const starter = await threadsRequest<{content: string; attachments: Array<{id: string; filename: string}>}>(
+			harness,
+			owner.token,
+		)
+			.get(`/channels/${recovered.thread_id}/messages/${recovered.thread_id}`)
+			.execute();
+		expect(starter.attachments).toHaveLength(1);
+		expect(starter.attachments[0]!.filename).toBe('cover.png');
+		const opened = await threadsRequest<{thread_metadata: {locked: boolean; archived: boolean}}>(harness, owner.token)
+			.get(`/channels/${recovered.thread_id}`)
+			.execute();
+		expect(opened.thread_metadata).toMatchObject({locked: false, archived: false});
+		const extraUpload = await threadsRequest<{attachments: Array<typeof descriptor>}>(harness, owner.token)
+			.post(`/channels/${recovered.thread_id}/attachments`)
+			.body({attachments: [{id: 0, filename: 'first.png', file_size: bytes.length, content_type: 'image/png'}]})
+			.execute();
+		const extraRaw = extraUpload.attachments[0]!;
+		const extra = {
+			id: extraRaw.id,
+			filename: extraRaw.filename,
+			file_size: extraRaw.file_size,
+			content_type: extraRaw.content_type,
+			upload_filename: extraRaw.upload_filename,
+		};
+		await harness.storageService.uploadObject({
+			bucket: Config.s3.buckets.uploads,
+			key: extra.upload_filename,
+			body: bytes,
+			contentType: 'image/png',
+		});
+		await service.dispatch('rpc.content.v1.starter.edit_service', {
+			version: 1,
+			request_id: 'request_attachment_order',
+			operation_id: 'operation_attachment_order',
+			actor_user_id: owner.userId,
+			guild_id: guild.id,
+			thread_id: recovered.thread_id,
+			attachments: [extra, {id: starter.attachments[0]!.id}],
+		});
+		const reordered = await threadsRequest<{attachments: Array<{filename: string}>}>(harness, owner.token)
+			.get(`/channels/${recovered.thread_id}/messages/${recovered.thread_id}`)
+			.execute();
+		expect(reordered.attachments.map((attachment) => attachment.filename)).toEqual(['first.png', 'cover.png']);
+
+		await service.dispatch('rpc.content.v1.starter.edit_service', {
+			version: 1,
+			request_id: 'request_attachment_remove',
+			operation_id: 'operation_attachment_remove',
+			actor_user_id: owner.userId,
+			guild_id: guild.id,
+			thread_id: recovered.thread_id,
+			attachments: [],
+		});
+		const removed = await threadsRequest<{content: string; attachments: Array<unknown>}>(harness, owner.token)
+			.get(`/channels/${recovered.thread_id}/messages/${recovered.thread_id}`)
+			.execute();
+		expect(removed.content).toBe('image body');
+		expect(removed.attachments ?? []).toHaveLength(0);
+		const rejectedUpload = await threadsRequest<{attachments: Array<typeof descriptor>}>(harness, owner.token)
+			.post(`/channels/${forum.id}/attachments`)
+			.body({attachments: [{id: 0, filename: 'rejected.png', file_size: bytes.length, content_type: 'image/png'}]})
+			.execute();
+		const rejectedRaw = rejectedUpload.attachments[0]!;
+		const rejected = {
+			id: rejectedRaw.id,
+			filename: rejectedRaw.filename,
+			file_size: rejectedRaw.file_size,
+			content_type: rejectedRaw.content_type,
+			upload_filename: rejectedRaw.upload_filename,
+		};
+		await harness.storageService.uploadObject({
+			bucket: Config.s3.buckets.uploads,
+			key: rejected.upload_filename,
+			body: bytes,
+			contentType: 'image/png',
+		});
+		vi.spyOn(AttachmentUploadTraceRepository.prototype, 'bindAttachment').mockResolvedValue(null);
+		const terminal = {...request, operation_id: 'operation_attachment_terminal', attachments: [rejected]};
+		await expect(service.dispatch('rpc.content.v1.thread.create_service', terminal)).rejects.toMatchObject({
+			retryable: false,
+		});
+		const terminalPlan = JSON.parse(operations.records.get(terminal.operation_id)!.payload).operation_plan;
+		await threadsRequest(harness, owner.token).get(`/channels/${terminalPlan.thread_id}`).expect(404).execute();
+		await expect(service.dispatch('rpc.content.v1.thread.create_service', terminal)).rejects.toMatchObject({
+			retryable: false,
+		});
+		expect(await new ChannelRepository().threads.listParentThreads(createChannelID(BigInt(forum.id)))).toHaveLength(1);
 	});
 });

@@ -41,6 +41,7 @@ import type {MessageSnapshot} from '@app/api/models/MessageSnapshot';
 import type {User} from '@app/api/models/User';
 import type {ReadStateService} from '@app/api/read_state/ReadStateService';
 import type {UserRepository} from '@app/api/user/repositories/UserRepository';
+import {IntegrationAttachmentManifest} from '@app/integration/IntegrationAttachmentManifest';
 import {MessageFlags, Permissions, SENDABLE_MESSAGE_FLAGS} from '@fluxer/constants/src/ChannelConstants';
 import {ATTACHMENT_MAX_SIZE_NON_PREMIUM} from '@fluxer/constants/src/LimitConstants';
 import {UserFlags} from '@fluxer/constants/src/UserConstants';
@@ -458,7 +459,7 @@ export class MessagePersistenceService {
 				};
 				type EditAttachment = EditNewAttachment | EditExistingAttachment;
 				const newAttachments: Array<AttachmentToProcess> = [];
-				const existingAttachments: Array<MessageAttachment> = [];
+				const existingAttachments = new Map<string, MessageAttachment>();
 				for (const att of data.attachments as Array<EditAttachment>) {
 					if ('upload_filename' in att && att.upload_filename) {
 						newAttachments.push(att as AttachmentToProcess);
@@ -477,7 +478,7 @@ export class MessagePersistenceService {
 							if ('description' in existingAtt && existingAtt.description !== undefined) {
 								updated.description = existingAtt.description;
 							}
-							existingAttachments.push(updated);
+							existingAttachments.set(existingAtt.id.toString(), updated);
 						}
 					}
 				}
@@ -501,6 +502,15 @@ export class MessagePersistenceService {
 					);
 					const uploadedSizes: Array<number> = [];
 					for (const [index, attachment] of newAttachments.entries()) {
+						const preparedSize = await new IntegrationAttachmentManifest().preparedUploadSize(
+							attachment.upload_filename,
+							uploadUserId,
+							channel.id,
+						);
+						if (preparedSize !== null) {
+							uploadedSizes.push(Number(preparedSize));
+							continue;
+						}
 						const uploadedFile = await this.storageService.getObjectMetadata(
 							Config.s3.buckets.uploads,
 							attachment.upload_filename,
@@ -528,7 +538,14 @@ export class MessagePersistenceService {
 						updatedRowData.content = getContentMessage('content.virus_detected', params.locale);
 					}
 				}
-				const allAttachments = [...existingAttachments, ...processedNewAttachments];
+				let uploadedIndex = 0;
+				const allAttachments = (data.attachments as Array<EditAttachment>).flatMap((attachment) => {
+					const item =
+						'upload_filename' in attachment
+							? processedNewAttachments[uploadedIndex++]
+							: existingAttachments.get(attachment.id.toString());
+					return item ? [item] : [];
+				});
 				updatedRowData.attachments = allAttachments.length > 0 ? allAttachments : null;
 			} else {
 				updatedRowData.attachments = null;

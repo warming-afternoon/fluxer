@@ -20,6 +20,7 @@ import {Logger} from '@app/api/Logger';
 import type {Channel} from '@app/api/models/Channel';
 import type {Message} from '@app/api/models/Message';
 import {mapWithConcurrency} from '@app/api/utils/ConcurrencyUtils';
+import {IntegrationAttachmentManifest} from '@app/integration/IntegrationAttachmentManifest';
 import {MessageAttachmentFlags} from '@fluxer/constants/src/ChannelConstants';
 import {MAX_MEDIA_DURATION_SECONDS} from '@fluxer/constants/src/LimitConstants';
 import {ValidationErrorCodes} from '@fluxer/constants/src/ValidationErrorCodes';
@@ -87,6 +88,18 @@ export class AttachmentProcessingService {
 		hasVirusDetected: boolean;
 	}> {
 		validateAttachmentIds(params.attachments.map((a) => ({id: BigInt(a.id)})));
+		const manifests = new IntegrationAttachmentManifest();
+		const checkpoint = await manifests.begin({
+			messageId: params.message.id,
+			channelId: params.message.channelId,
+			uploadChannelId: params.uploadChannelId ?? params.message.channelId,
+			actorId: params.uploadUserId,
+			attachments: params.attachments,
+		});
+		if (checkpoint?.result) {
+			if (!checkpoint.result.hasVirusDetected) await this.bindPreparedUploads(params, checkpoint.result.attachments);
+			return checkpoint.result;
+		}
 		const retainedLocalPaths: Array<string> = [];
 		let results: Array<ProcessedAttachment>;
 		let copyResults: Array<ProcessedStorageObjectMetadata | null>;
@@ -128,10 +141,42 @@ export class AttachmentProcessingService {
 			await Promise.all(retainedLocalPaths.map((localPath) => fs.promises.unlink(localPath).catch(() => undefined)));
 		}
 		if (hasVirusDetected) {
+			if (checkpoint) {
+				const stored = await manifests.save(checkpoint, {attachments: [], hasVirusDetected: true});
+				if (!stored.hasVirusDetected) await this.bindPreparedUploads(params, stored.attachments);
+				for (const result of results)
+					this.deleteUploadObject(result.copyOperation.sourceBucket, result.copyOperation.sourceKey);
+				return stored;
+			}
 			for (const result of results) {
 				this.deleteUploadObject(result.copyOperation.sourceBucket, result.copyOperation.sourceKey);
 			}
 			return {attachments: [], hasVirusDetected: true};
+		}
+		const processedAttachments: Array<MessageAttachment> = results.map((result, index) => {
+			const finalObject = copyResults[index];
+			if (result.applyFinalObjectMetadata && finalObject)
+				return {
+					...result.attachment,
+					content_type: finalObject.contentType,
+					content_hash: finalObject.contentHash,
+					size: BigInt(finalObject.contentLength),
+					width: finalObject.width ?? result.attachment.width,
+					height: finalObject.height ?? result.attachment.height,
+				};
+			return result.attachment;
+		});
+		if (checkpoint) {
+			const stored = await manifests.save(checkpoint, {attachments: processedAttachments, hasVirusDetected: false});
+			if (!stored.hasVirusDetected) await this.bindPreparedUploads(params, stored.attachments);
+			const retainedIds = new Set(stored.attachments.map((attachment) => attachment.attachment_id));
+			for (const attachment of processedAttachments)
+				if (!retainedIds.has(attachment.attachment_id))
+					this.deleteUploadObject(
+						Config.s3.buckets.cdn,
+						makeAttachmentCdnKey(params.message.channelId, attachment.attachment_id, attachment.filename),
+					);
+			return stored;
 		}
 		const bindingResults = await Promise.all(
 			results.map(async (result, index) => ({
@@ -157,21 +202,53 @@ export class AttachmentProcessingService {
 				{filename: unboundResult.result.attachment.filename},
 			);
 		}
-		const processedAttachments: Array<MessageAttachment> = results.map((result, index) => {
-			const finalObject = copyResults[index];
-			if (result.applyFinalObjectMetadata && finalObject) {
-				return {
-					...result.attachment,
-					content_type: finalObject.contentType,
-					content_hash: finalObject.contentHash,
-					size: BigInt(finalObject.contentLength),
-					width: finalObject.width ?? result.attachment.width,
-					height: finalObject.height ?? result.attachment.height,
-				};
-			}
-			return result.attachment;
-		});
 		return {attachments: processedAttachments, hasVirusDetected: false};
+	}
+
+	/** 内部持久操作重用已扫描的 CDN 附件，上传归属与永久编号仍必须逐项吻合 */
+	private async bindPreparedUploads(
+		params: {
+			message: Message;
+			attachments: Array<AttachmentToProcess>;
+			uploadUserId: UserID;
+			uploadChannelId?: ChannelID;
+		},
+		prepared: Array<MessageAttachment>,
+	): Promise<void> {
+		if (prepared.length !== params.attachments.length) throw new Error('Prepared attachment cardinality mismatch');
+		for (let index = 0; index < prepared.length; index++) {
+			const attachment = prepared[index]!;
+			const upload = params.attachments[index]!;
+			const trace = await this.attachmentUploadTraceRepository.getByUploadKey(upload.upload_filename);
+			if (
+				!trace ||
+				trace.user_id !== params.uploadUserId ||
+				trace.channel_id !== (params.uploadChannelId ?? params.message.channelId)
+			)
+				throw InputValidationError.fromCode(
+					`attachments.${index}.upload_filename`,
+					ValidationErrorCodes.UPLOADED_ATTACHMENT_NOT_FOUND,
+				);
+			const object = await this.storageService.getObjectMetadata(
+				Config.s3.buckets.cdn,
+				makeAttachmentCdnKey(params.message.channelId, attachment.attachment_id, attachment.filename),
+			);
+			if (!object)
+				throw InputValidationError.fromCode(
+					`attachments.${index}.upload_filename`,
+					ValidationErrorCodes.FILE_NOT_FOUND,
+				);
+			if (trace.attachment_id == null || trace.attachment_id === attachment.attachment_id) {
+				await this.attachmentUploadTraceRepository.bindAttachment(upload.upload_filename, attachment.attachment_id);
+			}
+			const bound = await this.attachmentUploadTraceRepository.getByUploadKey(upload.upload_filename);
+			if (bound?.attachment_id !== attachment.attachment_id)
+				throw InputValidationError.fromCode(
+					`attachments.${index}.upload_filename`,
+					ValidationErrorCodes.UPLOADED_ATTACHMENT_NOT_FOUND,
+				);
+			// 临时源对象交给既有保留策略，服务操作尚未完成时不能破坏恢复输入。
+		}
 	}
 
 	private async processAttachment(params: ProcessAttachmentParams): Promise<ProcessedAttachment> {

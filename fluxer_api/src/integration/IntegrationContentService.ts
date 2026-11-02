@@ -3,7 +3,9 @@
 import {createHash} from 'node:crypto';
 import type {ApiContext} from '@app/api/ApiContext';
 import {createChannelID, createGuildID, createMessageID, createUserID} from '@app/api/BrandedTypes';
+import {Config} from '@app/api/Config';
 import {ChannelRepository} from '@app/api/channel/ChannelRepository';
+import {makeAttachmentCdnKey} from '@app/api/channel/services/message/MessageHelpers';
 import {ThreadMoveService} from '@app/api/channel/services/thread/ThreadMoveService';
 import {ThreadPolicyProjectionService} from '@app/api/channel/services/thread/ThreadPolicyProjectionService';
 import {
@@ -13,8 +15,10 @@ import {
 import {ThreadPolicyService} from '@app/api/channel/services/thread/ThreadPolicyService';
 import {createRequestCache} from '@app/api/middleware/RequestCacheMiddleware';
 import {RequestServices} from '@app/api/middleware/ServiceMiddleware';
-import {getGuildAuditLogService, getGuildRepository} from '@app/api/middleware/ServiceSingletons';
+import {getGuildAuditLogService, getGuildRepository, getStorageService} from '@app/api/middleware/ServiceSingletons';
 import {isAccountClosed, isTemporarilyBanned} from '@app/api/user/UserHelpers';
+import {IntegrationAttachmentManifest} from '@app/integration/IntegrationAttachmentManifest';
+import {withIntegrationAttachmentOperation} from '@app/integration/IntegrationAttachmentOperation';
 import {prepareIntegrationContentChange} from '@app/integration/IntegrationContentHooks';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {IntegrationOperationRepository} from '@app/integration/IntegrationOperationRepository';
@@ -84,15 +88,20 @@ export class IntegrationContentService {
 		const lease = await this.context.services.cache.acquireLock(key, 120);
 		if (!lease) throw new IntegrationError('BUSY', 'Operation is already executing', true);
 		let hasPersistedPlan = false;
+		let resultPersisted = false;
+		let preparedPlan: P | null = null;
 		try {
 			let record = await this.operations.find(request.operation_id);
 			if (record && (record.fingerprint !== fingerprint || record.actor_id !== BigInt(request.actor_user_id)))
 				throw new IntegrationError('OPERATION_CONFLICT', 'Operation belongs to another immutable request');
 			if (record?.result) {
+				resultPersisted = true;
 				await this.operations.releaseResource(resource, request.operation_id);
 				const result = JSON.parse(record.result);
 				if (result?.__integration_error)
 					throw new IntegrationError(result.__integration_error.code, result.__integration_error.message);
+				await this.completeInitialization(subject, request, result);
+				await this.operations.releaseResource(resource, request.operation_id);
 				return result as R;
 			}
 			await this.operations.lockResource(resource, request.operation_id);
@@ -106,10 +115,13 @@ export class IntegrationContentService {
 				});
 			hasPersistedPlan = true;
 			const saved = JSON.parse(record.payload);
-			const result = await apply((saved.operation_plan ?? saved) as P);
+			preparedPlan = (saved.operation_plan ?? saved) as P;
+			const result = await apply(preparedPlan);
 			if (!(await this.context.services.cache.extendLock(key, lease, 120)))
 				throw new IntegrationError('BUSY', 'Operation lease expired; retry the same operation', true);
 			await this.operations.complete(request.operation_id, result);
+			resultPersisted = true;
+			await this.completeInitialization(subject, request, result);
 			await this.operations.releaseResource(resource, request.operation_id);
 			return result;
 		} catch (error) {
@@ -121,7 +133,22 @@ export class IntegrationContentService {
 					: error instanceof FluxerError && error.status >= 400 && error.status < 500 && error.status !== 429
 						? new IntegrationError(error.code, error.code)
 						: null;
-			if (hasPersistedPlan && terminal) {
+			if (hasPersistedPlan && terminal && !resultPersisted) {
+				if (subject === 'rpc.content.v1.thread.create_service') {
+					const threadId = (preparedPlan as {thread_id?: string} | null)?.thread_id;
+					if (threadId) {
+						const manifest = await new IntegrationAttachmentManifest(this.operations).result(
+							request.operation_id,
+							threadId,
+							threadId,
+						);
+						for (const attachment of manifest?.attachments ?? [])
+							await getStorageService().deleteObject(
+								Config.s3.buckets.cdn,
+								makeAttachmentCdnKey(createChannelID(BigInt(threadId)), attachment.attachment_id, attachment.filename),
+							);
+					}
+				}
 				await this.operations.complete(request.operation_id, {
 					__integration_error: {code: terminal.code, message: terminal.message},
 				});
@@ -132,6 +159,26 @@ export class IntegrationContentService {
 		} finally {
 			await this.context.services.cache.releaseLock(key, lease);
 		}
+	}
+
+	/** 默认主帖也在创建成功持久化前保持初始化锁，只有完成结果可释放自己的来源 */
+	private async completeInitialization(subject: string, request: ServiceRequest, result: unknown): Promise<void> {
+		if (
+			subject !== 'rpc.content.v1.thread.create_service' ||
+			process.env.FLUXER_THREAD_POLICY_ENABLED !== 'true' ||
+			(request as ServiceRequest & {defer_open?: boolean}).defer_open
+		)
+			return;
+		const threadId = (result as {thread_id?: string}).thread_id;
+		if (!threadId) throw new IntegrationError('OPERATION_CONFLICT', 'Completed creation has no native thread');
+		await new ThreadPolicyRepository().set(createChannelID(BigInt(threadId)), 0n, {
+			source: 'forum_initializing',
+			kind: 'lock',
+			active: false,
+			version: 1,
+			expires_at: null,
+		});
+		await new ThreadPolicyProjectionService(this.context).project(createChannelID(BigInt(threadId)));
 	}
 
 	/** 将明确枚举的内容 RPC 适配到原生业务层 */
@@ -280,7 +327,7 @@ export class IntegrationContentService {
 								{initializingStarter: true},
 							);
 						}
-						if (request.defer_open) {
+						if (request.defer_open || process.env.FLUXER_THREAD_POLICY_ENABLED === 'true') {
 							if (process.env.FLUXER_THREAD_POLICY_ENABLED !== 'true')
 								throw new IntegrationError('UNAVAILABLE', 'Initialization policies are not enabled', true);
 							await new ThreadPolicyRepository().set(createChannelID(BigInt(plan.thread_id)), 0n, {
@@ -297,19 +344,33 @@ export class IntegrationContentService {
 							thread_id: plan.thread_id,
 							creation_operation_id: request.operation_id,
 						});
-						await services.threadService.creation.createForumPost({
-							viewer,
-							user,
-							parentAuth,
-							body: {
-								name: request.name,
-								message: {content: request.content, allowed_mentions: {parse: [], replied_user: false}},
-							},
-							requestCache: cache,
-							auditLogReason: `Forum operation ${request.operation_id}`,
-							preparedThreadId: createChannelID(BigInt(plan.thread_id)),
-							deferOpen: request.defer_open,
-						});
+						await withIntegrationAttachmentOperation(
+							request.operation_id,
+							() =>
+								services.threadService.creation.createForumPost({
+									viewer,
+									user,
+									parentAuth,
+									body: {
+										name: request.name,
+										message: {
+											content: request.content,
+											allowed_mentions: {parse: [], replied_user: false},
+											attachments: request.attachments?.map((attachment) => ({
+												...attachment,
+												title: null,
+												description: null,
+												flags: 0,
+											})),
+										},
+									},
+									requestCache: cache,
+									auditLogReason: `Forum operation ${request.operation_id}`,
+									preparedThreadId: createChannelID(BigInt(plan.thread_id)),
+									deferOpen: request.defer_open || process.env.FLUXER_THREAD_POLICY_ENABLED === 'true',
+								}),
+							{channelId: plan.thread_id, messageId: plan.thread_id},
+						);
 						const state = await services.channelRepository.threads.getState(createChannelID(BigInt(plan.thread_id)));
 						return {
 							guild_id: request.guild_id,
@@ -394,6 +455,16 @@ export class IntegrationContentService {
 							createMessageID(BigInt(state.threadId)),
 						);
 						if (!original) throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Starter message is unavailable');
+						for (const attachment of request.attachments ?? []) {
+							if (
+								!('upload_filename' in attachment) &&
+								!original.attachments.some((existing) => existing.id.toString() === attachment.id)
+							)
+								throw new IntegrationError(
+									'RESOURCE_NOT_ALLOWED',
+									'Attachment reference is outside the target starter',
+								);
+						}
 						return {channel_id: state.parentId.toString(), message_version: original.version};
 					},
 					async (plan) => {
@@ -403,7 +474,25 @@ export class IntegrationContentService {
 						);
 						if (!current) throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Starter message is unavailable');
 						if (current.version !== plan.message_version) {
-							if (current.content !== request.content)
+							const prepared = request.attachments?.some((attachment) => 'upload_filename' in attachment)
+								? await new IntegrationAttachmentManifest().result(
+										request.operation_id,
+										request.thread_id,
+										request.thread_id,
+									)
+								: null;
+							let uploadIndex = 0;
+							const desiredIds = request.attachments?.map((attachment) =>
+								'upload_filename' in attachment
+									? prepared?.attachments[uploadIndex++]?.attachment_id.toString()
+									: attachment.id,
+							);
+							const attachmentsMatch =
+								desiredIds === undefined ||
+								(desiredIds.every((id) => id !== undefined) &&
+									JSON.stringify(desiredIds) ===
+										JSON.stringify(current.attachments.map((attachment) => attachment.id.toString())));
+							if ((request.content !== undefined && current.content !== request.content) || !attachmentsMatch)
 								throw new IntegrationError('MESSAGE_VERSION_CONFLICT', 'A newer body edit superseded this operation');
 							return {
 								guild_id: request.guild_id,
@@ -413,15 +502,32 @@ export class IntegrationContentService {
 								event_id: request.operation_id,
 							};
 						}
-						const message = await services.messageRequestService.editMessage({
-							userId: user.id,
-							viewer: {kind: 'user', userId: user.id, bot: false, capable: true},
-							channelId: createChannelID(BigInt(request.thread_id)),
-							messageId: createMessageID(BigInt(request.thread_id)),
-							data: {content: request.content, allowed_mentions: {parse: [], replied_user: false}},
-							requestCache: cache,
-							expectedVersion: plan.message_version,
-						});
+						const message = await withIntegrationAttachmentOperation(
+							request.operation_id,
+							() =>
+								services.messageRequestService.editMessage({
+									userId: user.id,
+									viewer: {kind: 'user', userId: user.id, bot: false, capable: true},
+									channelId: createChannelID(BigInt(request.thread_id)),
+									messageId: createMessageID(BigInt(request.thread_id)),
+									data: {
+										content: request.content ?? current.content ?? '',
+										allowed_mentions: {parse: [], replied_user: false},
+										...(request.attachments === undefined
+											? {}
+											: {
+													attachments: request.attachments.map((attachment) =>
+														'upload_filename' in attachment
+															? {...attachment, title: null, description: null, flags: 0}
+															: {id: BigInt(attachment.id), flags: 0},
+													),
+												}),
+									},
+									requestCache: cache,
+									expectedVersion: plan.message_version,
+								}),
+							{channelId: request.thread_id, messageId: request.thread_id},
+						);
 						return {
 							guild_id: request.guild_id,
 							channel_id: plan.channel_id,

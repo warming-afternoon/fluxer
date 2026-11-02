@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {isIP} from 'node:net';
+import {MAX_ATTACHMENTS_PER_MESSAGE} from '@fluxer/constants/src/LimitConstants';
+import {ClientUploadedAttachmentRequest} from '@fluxer/schema/src/domains/message/AttachmentSchemas';
 import {z} from 'zod';
 
 export const IdentityId = z
@@ -57,6 +59,14 @@ const ServiceOperation = Envelope.extend({
 	/** 只允许配置中的原生服务器 */
 	guild_id: IdentityId,
 });
+const ServiceUploadedAttachment = ClientUploadedAttachmentRequest.pick({
+	id: true,
+	filename: true,
+	file_size: true,
+	content_type: true,
+	upload_filename: true,
+}).strict();
+const ServiceAttachmentReference = z.object({id: IdentityId}).strict();
 export const IntegrationSchemas = {
 	'rpc.content.v1.thread.update_service': ServiceOperation.extend({
 		/** 操作只限允许论坛中的原生帖子 */
@@ -116,8 +126,13 @@ export const IntegrationSchemas = {
 		name: z.string().min(1).max(100),
 
 		/** 原生主帖正文，附件继续使用原生上传接口 */
-		content: z.string().min(1).max(4000),
-	}).strict(),
+		content: z.string().max(4000),
+
+		/** 用户在目标论坛完成的原生预上传描述，不接受任意 URL */
+		attachments: z.array(ServiceUploadedAttachment).max(MAX_ATTACHMENTS_PER_MESSAGE).optional(),
+	})
+		.strict()
+		.refine((value) => value.content.trim().length > 0 || (value.attachments?.length ?? 0) > 0),
 	'rpc.content.v1.thread.policy_service': ServiceOperation.extend({
 		/** 策略作用的原生帖子 */
 		thread_id: IdentityId,
@@ -151,8 +166,16 @@ export const IntegrationSchemas = {
 		thread_id: IdentityId,
 
 		/** 更新后的正文 */
-		content: z.string().max(4000),
-	}).strict(),
+		content: z.string().max(4000).optional(),
+
+		/** 顺序即原生附件顺序，既有附件仅能引用本主帖中的永久 ID */
+		attachments: z
+			.array(z.union([ServiceUploadedAttachment, ServiceAttachmentReference]))
+			.max(MAX_ATTACHMENTS_PER_MESSAGE)
+			.optional(),
+	})
+		.strict()
+		.refine((value) => value.content !== undefined || value.attachments !== undefined),
 	'rpc.content.v1.thread.read_service': ServiceOperation.extend({
 		/** 读取原生主帖与元数据 */
 		thread_id: IdentityId,

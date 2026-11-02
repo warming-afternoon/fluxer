@@ -80,7 +80,11 @@ export class IntegrationRpcServer {
 		try {
 			if (this.pending.size >= this.maxInflight)
 				throw new IntegrationError('BUSY', 'Integration concurrency limit reached', true);
-			const maxRequestBytes = message.subject === 'rpc.content.v1.thread.create_service' ? 65_536 : 16_384;
+			const maxRequestBytes = ['rpc.content.v1.thread.create_service', 'rpc.content.v1.starter.edit_service'].includes(
+				message.subject,
+			)
+				? 65_536
+				: 16_384;
 			if (message.data.length > maxRequestBytes) throw new IntegrationError('INVALID_REQUEST', 'Request too large');
 			let input: unknown;
 			try {

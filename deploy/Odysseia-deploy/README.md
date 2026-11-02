@@ -61,3 +61,12 @@ API、worker 和 integration 均需具备各自事件发布凭据、专用确认
 `nats/content-stream.json`、`nats/forum-consumer.json` 定义 `ODYSSEIA_CONTENT/forum-index`；`nats/auth-stream.json`、`nats/forum-auth-consumer.json` 定义 `ODYSSEIA_AUTH/forum-auth`。安装仓库依赖后，显式设置 `INTEGRATION_NATS_URL`、`INTEGRATION_ADMIN_PASSWORD` 并运行 `node deploy/Odysseia-deploy/provision-content.mjs` 预建两组流及 durable pull 消费者。业务账号不能建流、删流或创建任意消费者。
 
 内容事件覆盖原生帖子创建、正文、反应、归档/锁定和删除；事件携带独立快照版本及创建操作相关性。认证流同时承载会话、账户及管理绑定变化。Forum 必须幂等提交投影或缓存失效后 ACK，失败延迟重试；两个 durable 均使用 `max_deliver=-1`，不会在短暂数据库故障后耗尽十次重送而静默停投。内容流保留七天、4 GiB，认证流七天、1 GiB，满时拒绝新消息，生产者保留未确认日志。它们不是无限历史存档；持久资源跟踪和分页对账用于恢复源状态，发生保留窗口缺口时仍须执行消费者的缓存/索引重建流程。
+
+
+### 作品原生图片
+
+作品创建与首帖编辑使用原生预上传：浏览器携当前 Fluxer token 请求 `POST /channels/{forum_or_thread_id}/attachments`，按返回的 singlepart / multipart 计划上传，存储 PUT 不携登录 token；multipart 完成后提交原生 `upload_filename` 描述。新作品上传目标为 Forum 的 `/v2/works/upload-target`，编辑目标为实际主帖 thread。Forum 任务仅保存 `{id,filename,file_size,content_type,upload_filename}`，不保存 bearer 或预签名 URL。
+
+`thread.create_service.attachments` 只接受新预上传描述；`starter.edit_service.attachments` 可混合新描述和 `{id:"原生附件ID"}` 保留引用，顺序决定图片首图。省略 attachments 保留原附件，空数组删除附件；正文可省略，附件编辑使用原生当前正文，避免 PG 投影覆盖更新。合并账号仍审核实际 B 上传者和委托能力，不改变历史作者 C。
+
+附件子操作复用 `integration_operations` 保存不可变计划、扫描结果及永久 CDN 附件 ID，先持久结果再绑定上传，恢复不重扫重分配；临时对象保留给既有清理策略。启用 thread policy 时所有受信创建在完成持久化前保持初始化锁与归档；可重试中断恢复同一 prepared thread，终止 4xx 清理中间线程。默认主帖完成后仅释放自己的初始化来源，defer_open 子帖由 Forum 政策任务完成后释放。

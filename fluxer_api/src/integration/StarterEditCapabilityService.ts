@@ -37,7 +37,7 @@ export class StarterEditCapabilityService {
 		const original = await this.users.findUnique(message.authorId);
 		if (!original?.traits.has('discord_integration') || (original.flags & UserFlags.DISABLED) === 0n) return null;
 		if ((await this.identities.canonicalUserId(message.authorId)) !== actor) return null;
-		if (Object.keys(data).some((key) => key !== 'content' && key !== 'allowed_mentions'))
+		if (Object.keys(data).some((key) => key !== 'content' && key !== 'allowed_mentions' && key !== 'attachments'))
 			throw new MissingPermissionsError();
 		// 替代作者编辑不能借原作者名义新增通知，只保留可见正文修改。
 		data.allowed_mentions = {parse: [], replied_user: false};
@@ -50,6 +50,11 @@ export class StarterEditCapabilityService {
 			message_id: message.id.toString(),
 			before_content: message.content,
 			after_content: data.content,
+			before_attachments: message.attachments.map((attachment) => attachment.id.toString()),
+			after_attachments: data.attachments?.map((attachment) => ({
+				id: attachment.id.toString(),
+				...('upload_filename' in attachment ? {upload_filename: attachment.upload_filename} : {}),
+			})),
 			occurred_at: new Date().toISOString(),
 		});
 		await this.operations.allocate({

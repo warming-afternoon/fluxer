@@ -78,4 +78,17 @@ export class IntegrationOperationRepository {
 			INTEGRATION_QUERY_OPTIONS,
 		);
 	}
+
+	/** 并发恢复只接受首个已持久处理结果，避免附件编号在租约交接时被改写 */
+	async completeOnce(id: string, result: unknown): Promise<unknown> {
+		await getClient().execute(
+			'UPDATE integration_operations SET result = ? WHERE operation_id = ? IF result = null',
+			[JSON.stringify(result), id],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		const stored = await this.find(id);
+		if (!stored?.result)
+			throw new IntegrationError('STORAGE_UNAVAILABLE', 'Prepared operation result is unavailable', true);
+		return JSON.parse(stored.result);
+	}
 }

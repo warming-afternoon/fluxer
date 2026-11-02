@@ -39,6 +39,7 @@ describe('Integration RPC boundaries', () => {
 		const botSubject = send('rpc.auth.v1.external.exchange', '_INBOX.bot.stolen');
 		const wildcard = send('rpc.auth.v1.external.exchange', '_INBOX.forum.>');
 		const botRebind = send('rpc.identity.v1.rebind_service', '_INBOX.bot.stolen');
+		const botEligibility = send('rpc.identity.v1.login_eligibility', '_INBOX.bot.stolen');
 		const botContent = send('rpc.content.v1.thread.create_service', '_INBOX.bot.stolen');
 		await server.stop();
 		expect(dispatch).not.toHaveBeenCalled();
@@ -46,6 +47,7 @@ describe('Integration RPC boundaries', () => {
 		expect(botSubject).not.toHaveBeenCalled();
 		expect(wildcard).not.toHaveBeenCalled();
 		expect(botRebind).not.toHaveBeenCalled();
+		expect(botEligibility).not.toHaveBeenCalled();
 		expect(botContent).not.toHaveBeenCalled();
 	});
 

@@ -214,6 +214,10 @@ export const IntegrationSchemas = {
 		/** 本次批量查询的 Discord 主体 */
 		discord_user_ids: z.array(IdentityId).min(1).max(100),
 	}).strict(),
+	'rpc.identity.v1.login_eligibility': Envelope.extend({
+		/** 旧版 Forum 登录需核验的当前 Discord 主体，不签发任何原生会话 */
+		discord_user_id: IdentityId,
+	}).strict(),
 	'rpc.identity.v1.profiles': Envelope.extend({
 		/** 本次批量读取资料的原生用户 */
 		user_ids: z.array(IdentityId).min(1).max(100),

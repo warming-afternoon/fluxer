@@ -5,7 +5,7 @@ import type {ApiContext} from '@app/api/ApiContext';
 import * as AuthSession from '@app/api/auth/AuthSession';
 import {revokeAuthSessions} from '@app/api/auth/AuthSessionRevocation';
 import {generateAuthToken} from '@app/api/auth/AuthUtility';
-import {createUserID} from '@app/api/BrandedTypes';
+import {createUserID, type UserID} from '@app/api/BrandedTypes';
 import type {User} from '@app/api/models/User';
 import {AuthSessionRepository} from '@app/api/user/repositories/auth/AuthSessionRepository';
 import {isAccountClosed, isTemporarilyBanned} from '@app/api/user/UserHelpers';
@@ -32,13 +32,9 @@ export class IntegrationService {
 		this.accounts = new DiscordAccountService(context);
 	}
 
-	/** 权威读取会话和账户状态，拒绝禁用及待审批账户 */
-	async resolve(token: string) {
-		// 绕过会话缓存读取权威状态，撤销和账户禁用即时影响本次解析。
-		const hash = createHash('sha256').update(token).digest();
-		const session = await this.sessions.getAuthoritativeAuthSession(hash);
-		if (!session) throw new IntegrationError('INVALID_TOKEN', 'Session is invalid');
-		const user = await this.context.services.users.findUnique(session.userId);
+	/** 原生会话及旧版 Discord 登录资格共用同一权威账号状态判断。 */
+	private async availableUser(userId: UserID): Promise<User> {
+		const user = await this.context.services.users.findUnique(userId);
 		if (
 			!user ||
 			user.isBot ||
@@ -50,6 +46,16 @@ export class IntegrationService {
 		) {
 			throw new IntegrationError('ACCOUNT_UNAVAILABLE', 'Account is unavailable');
 		}
+		return user;
+	}
+
+	/** 权威读取会话和账户状态，拒绝禁用及待审批账户 */
+	async resolve(token: string) {
+		// 绕过会话缓存读取权威状态，撤销和账户禁用即时影响本次解析。
+		const hash = createHash('sha256').update(token).digest();
+		const session = await this.sessions.getAuthoritativeAuthSession(hash);
+		if (!session) throw new IntegrationError('INVALID_TOKEN', 'Session is invalid');
+		const user = await this.availableUser(session.userId);
 		if (user.traits.has('discord_integration')) await this.identities.findDiscordId(user.id);
 		return {user, session, hash: hash.toString('base64url')};
 	}
@@ -119,6 +125,57 @@ export class IntegrationService {
 					[...new Set(request.user_ids)].map((id) => createUserID(BigInt(id))),
 				);
 				return {profiles: users.filter((user) => !isAccountClosed(user)).map((user) => this.profile(user))};
+			}
+			case 'rpc.identity.v1.login_eligibility': {
+				const request = IntegrationSchemas[subject].parse(input);
+				const binding = await this.identities.find(request.discord_user_id);
+				if (!binding)
+					return {
+						discord_user_id: request.discord_user_id,
+						user_id: null,
+						identity_version: null,
+						current: false,
+						eligible: false,
+					};
+				if (binding.state !== 'ready')
+					throw new IntegrationError('IDENTITY_BUSY', 'Identity is not ready for login', true);
+				try {
+					const userId = await this.identities.canonicalUserId(binding.user_id);
+					const version = await this.identities.bindingVersion(userId);
+					if (!Number.isSafeInteger(version) || version < 1)
+						throw new IntegrationError('UNAVAILABLE', 'Identity version is unavailable', true);
+					const currentDiscord = await this.identities.findDiscordId(userId);
+					const current = currentDiscord === request.discord_user_id;
+					let eligible = false;
+					if (current) {
+						try {
+							await this.availableUser(userId);
+							eligible = true;
+						} catch (error) {
+							if (!(error instanceof IntegrationError && error.code === 'ACCOUNT_UNAVAILABLE')) throw error;
+						}
+					}
+					// 不能把换绑过程中拼接的旧主体与新版本当成一致准入结果。
+					if (
+						(await this.identities.findDiscordId(userId)) !== currentDiscord ||
+						(await this.identities.bindingVersion(userId)) !== version
+					)
+						throw new IntegrationError('IDENTITY_BUSY', 'Identity changed during login verification', true);
+					return {
+						discord_user_id: request.discord_user_id,
+						user_id: userId.toString(),
+						identity_version: version,
+						current,
+						eligible,
+					};
+				} catch (error) {
+					if (
+						error instanceof IntegrationError &&
+						['IDENTITY_BUSY', 'IDENTITY_CONFLICT', 'ACCOUNT_UNAVAILABLE'].includes(error.code)
+					)
+						throw new IntegrationError('IDENTITY_BUSY', 'Identity changed during login verification', true);
+					throw error;
+				}
 			}
 			case 'rpc.auth.v1.session.resolve': {
 				const request = IntegrationSchemas[subject].parse(input);

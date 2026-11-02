@@ -124,7 +124,7 @@ test('Bot 仅增加双向服务健康探测，不获得会话 RPC 权限', () =>
 	assert.match(bot, /"rpc\.forum\.v1\.service_info"/);
 	assert.match(bot, /"rpc\.integration\.v1\.service_info"/);
 	assert.match(bot, /subscribe: \{allow: \["_INBOX\.bot\.>"\]\}/);
-	assert.doesNotMatch(bot, /rpc\.auth\.|rpc\.content\.|rebind_service|_INBOX\.forum|\$JS\.API/);
+	assert.doesNotMatch(bot, /rpc\.auth\.|rpc\.content\.|rebind_service|login_eligibility|_INBOX\.forum|\$JS\.API/);
 	const forum = acl.slice(acl.indexOf('user: "forum-service"'), acl.indexOf('user: "discord-sync"'));
 	assert.match(forum, /"rpc\.forum\.v1\.service_info"/);
 	assert.match(forum, /allow_responses: \{max: 1, expires: "5s"\}/);
@@ -144,6 +144,7 @@ test('事件发布账号仅订阅专用确认收件箱，Forum 独占固定内�
 	}
 	const forum = acl.slice(acl.indexOf('user: "forum-service"'), acl.indexOf('user: "discord-sync"'));
 	for (const subject of [
+		'rpc.identity.v1.login_eligibility',
 		'rpc.identity.v1.rebind_service',
 		'rpc.content.v1.thread.create_service',
 		'rpc.content.v1.thread.move_service',

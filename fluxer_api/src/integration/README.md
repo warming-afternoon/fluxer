@@ -28,6 +28,7 @@
 | `rpc.integration.v1.service_info` | 无 | 检查 Cassandra 和缓存后返回 `{service,version,ready}` |
 | `rpc.identity.v1.ensure_discord` | `discord_user_id,profile,operation_id` | `{user_id,discord_user_id,created}` |
 | `rpc.identity.v1.lookup_discord` | `discord_user_ids`，1–100 项 | `{bindings:[{discord_user_id,user_id,version}]}` |
+| `rpc.identity.v1.login_eligibility` | `discord_user_id` | `{discord_user_id,user_id:string|null,identity_version:number|null,current:boolean,eligible:boolean}`；仅 Forum 可请求 |
 | `rpc.identity.v1.profiles` | `user_ids`，1–100 项 | `{profiles:[{user_id,username,display_name,avatar_url}]}` |
 | `rpc.auth.v1.external.exchange` | `exchange_id,discord_user_id,verified_at,profile,origin` | `{token,user_id}` |
 | `rpc.auth.v1.session.resolve` | `token` | `{user_id,discord_user_id,session_id_hash,username,display_name,avatar_url}` |
@@ -38,6 +39,10 @@
 `profile` 为 `{username,display_name:string|null,avatar_url:string|null}`；`origin` 为 `{ip,user_agent:string|null,client_os:string|null}`。`verified_at` 使用 ISO-8601，最多早于当前时间 120 秒或晚于当前时间 30 秒。新交换验证时间新鲜度；匹配的重试可在十分钟内获取原有结果。`request_id`、`exchange_id` 和 `operation_id` 仅接受字母、数字、下划线、连字符。一个 `exchange_id` 只能对应一份不可变请求，重试时仅 `request_id` 可以变化。
 
 ## 身份、创建和重试
+
+旧 Forum JWT 入口通过 `login_eligibility` 核验当前绑定和原生账号准入；历史归属查询 `lookup_discord`、资料查询 `profiles` 不能替代此授权判断。该能力不签发会话，也不需要或返回 Fluxer token。只有当前 Discord 登录身份且原生账号通过与 `session.resolve` 相同的可用性判断，才返回 `eligible:true`。已知缺失、历史身份或停用账号返回明确否定；绑定准备、重绑、版本变化和依赖故障保持不可用，不能作为准入成功。
+
+`identity_version` 仅表示绑定版本，不是账号安全状态版本。Forum 必须核对本地当前映射的账号和版本，并按账号失效事件的 epoch 防止缓存及在途结果复活。普通准入缓存采用从权威请求开始计算的 30 秒硬期限、不续期，已知否定最多 5 秒；敏感操作实时核验，依赖错误不写否定缓存。角色资格仍由 Forum 按当前 Discord 身份重新检查，不能把此回复当成管理员或深渊资格证明。旧 JWT 缺少原生会话标识时，不声称该能力提供逐原生会话撤销。
 
 Bot 预建与 Forum 外部登录共用 `ensureDiscordAccount`。每个 Discord 身份独立分区，初次正反向占用均采用条件写入。未完成占用保留以便崩溃恢复，先写历史再将绑定标记为完成。不能通过用户名或邮箱推断绑定。已完成绑定指向缺失原生账户时拒绝处理，不重新建号。
 

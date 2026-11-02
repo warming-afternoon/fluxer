@@ -1,0 +1,12 @@
+{
+	"durable_name": "forum-auth",
+	"name": "forum-auth",
+	"deliver_policy": "all",
+	"ack_policy": "explicit",
+	"replay_policy": "instant",
+	"max_ack_pending": 128,
+	"max_waiting": 32,
+	"max_batch": 100,
+	"ack_wait": 30000000000,
+	"max_deliver": -1
+}

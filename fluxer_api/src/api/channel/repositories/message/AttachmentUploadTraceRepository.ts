@@ -98,7 +98,7 @@ export class AttachmentUploadTraceRepository {
 		attachmentId: AttachmentID,
 	): Promise<AttachmentUploadTraceByAttachmentRow | null> {
 		const existing = await this.getByUploadKey(uploadKey);
-		if (!existing || existing.attachment_id != null) {
+		if (!existing || (existing.attachment_id != null && existing.attachment_id !== attachmentId)) {
 			return null;
 		}
 		const now = new Date();

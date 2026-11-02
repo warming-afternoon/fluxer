@@ -18,6 +18,7 @@ import type {MessageValidationService} from '@app/api/channel/services/message/M
 import type {MessageWriteLock} from '@app/api/channel/services/message/MessageWriteLock';
 import {isPersonalNotesChannelId} from '@app/api/channel/services/PersonalNotesChannelRepair';
 import {assertThreadInteractionAllowed} from '@app/api/channel/services/thread/ThreadInteractionGuards';
+import {ThreadPolicyService} from '@app/api/channel/services/thread/ThreadPolicyService';
 import type {ThreadViewer} from '@app/api/experiment/ChannelThreadsGate';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import {Logger} from '@app/api/Logger';
@@ -28,12 +29,14 @@ import {assertMayStartConversation, oneToOneDmRecipient} from '@app/api/user/New
 import type {UserRepository} from '@app/api/user/repositories/UserRepository';
 import {isDirectDeliverySuppressed} from '@app/api/user/UserHelpers';
 import {assertGuildMemberCanCommunicate} from '@app/api/utils/GuildCommunicationUtils';
+import {StarterEditCapabilityService} from '@app/integration/StarterEditCapabilityService';
 import {Permissions} from '@fluxer/constants/src/ChannelConstants';
 import {GuildOperations} from '@fluxer/constants/src/GuildConstants';
 import {UserFlags} from '@fluxer/constants/src/UserConstants';
 import {UnknownMessageError} from '@fluxer/errors/src/domains/channel/UnknownMessageError';
 import {FeatureTemporarilyDisabledError} from '@fluxer/errors/src/domains/core/FeatureTemporarilyDisabledError';
 import {MissingPermissionsError} from '@fluxer/errors/src/domains/core/MissingPermissionsError';
+import {FluxerError} from '@fluxer/errors/src/FluxerError';
 import type {AllowedMentionsRequest} from '@fluxer/schema/src/domains/message/SharedMessageSchemas';
 
 interface EditMessageResult {
@@ -66,6 +69,7 @@ export class MessageEditService {
 		messageId,
 		data,
 		requestCache,
+		expectedVersion,
 	}: {
 		userId: UserID;
 		viewer: ThreadViewer;
@@ -73,6 +77,8 @@ export class MessageEditService {
 		messageId: MessageID;
 		data: MessageUpdateRequest;
 		requestCache: RequestCache;
+		/** 内部幂等操作的原消息版本，公开 HTTP 不传入 */
+		expectedVersion?: number;
 	}): Promise<EditMessageResult> {
 		const authChannel = await this.deps.channelAuthService.getChannelAuthenticated({
 			userId,
@@ -103,10 +109,13 @@ export class MessageEditService {
 		}
 		const message = await this.deps.channelRepository.messages.getMessage(channelId, messageId);
 		if (!message) throw new UnknownMessageError();
+		const capability = new StarterEditCapabilityService(this.deps.userRepository);
+		const capabilityAuditId = await capability.authorize(userId, authChannel, message, data);
 		if (message.authorId === userId) {
 			assertGuildMemberCanCommunicate(member);
 		}
 		assertThreadInteractionAllowed(authChannel, 'edit', {ignoreTimeout: message.authorId !== userId});
+		if (authChannel.thread) await new ThreadPolicyService().assertAllowed(channelId, userId, 'edit');
 		if (data.message_snapshots !== undefined) {
 			throw new MissingPermissionsError();
 		}
@@ -145,7 +154,7 @@ export class MessageEditService {
 				canMentionEveryone,
 			});
 		}
-		if (message.authorId !== userId) {
+		if (message.authorId !== userId && !capabilityAuditId) {
 			const editedMessage = await this.deps.messageWriteLock.withFreshMessage(channelId, messageId, (fresh) => {
 				if (!fresh) throw new UnknownMessageError();
 				return this.deps.processingService.handleNonAuthorEdit({
@@ -179,6 +188,8 @@ export class MessageEditService {
 		const dmNsfwContext = guild ? undefined : await this.deps.persistenceService.resolveDmNsfwContext(channel, userId);
 		const updateResult = await this.deps.messageWriteLock.withFreshMessage(channelId, messageId, async (fresh) => {
 			if (!fresh) throw new UnknownMessageError();
+			if (expectedVersion !== undefined && fresh.version !== expectedVersion)
+				throw new FluxerError({status: 409, code: 'MESSAGE_VERSION_CONFLICT'});
 			return this.deps.crosspostPropagation.withPublishedEditBudget({fresh, actor: 'author'}, () =>
 				this.deps.persistenceService.updateMessage({
 					message: fresh,
@@ -233,6 +244,7 @@ export class MessageEditService {
 		if (channel.indexedAt != null) {
 			void this.deps.searchService.updateMessageIndex(updatedMessage);
 		}
+		if (capabilityAuditId) await capability.complete(capabilityAuditId, updatedMessage.id.toString());
 		return {message: updatedMessage, authChannel};
 	}
 

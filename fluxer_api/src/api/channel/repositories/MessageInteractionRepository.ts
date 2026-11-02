@@ -9,6 +9,10 @@ import type {ChannelPinRow, MessageReactionRow} from '@app/api/database/types/Me
 import type {Message} from '@app/api/models/Message';
 import {MessageReaction} from '@app/api/models/MessageReaction';
 import {ChannelPins, MessageReactions, Messages} from '@app/api/Tables';
+import {
+	finishIntegrationContentChange,
+	prepareIntegrationContentChange,
+} from '@app/integration/IntegrationContentHooks';
 import * as BucketUtils from '@fluxer/snowflake/src/SnowflakeBuckets';
 
 const createFetchChannelPinsQuery = (limit: number) =>
@@ -169,6 +173,7 @@ export class MessageInteractionRepository {
 		emojiId?: EmojiID,
 		emojiAnimated: boolean = false,
 	): Promise<MessageReaction> {
+		await prepareIntegrationContentChange(channelId);
 		const bucket = BucketUtils.makeBucket(messageId);
 		const normalizedEmojiId = emojiId ? emojiId : createEmojiID(0n);
 		const reactionData: MessageReactionRow = {
@@ -183,6 +188,7 @@ export class MessageInteractionRepository {
 		};
 		await upsertOne(MessageReactions.upsertAll(reactionData));
 		await this.setHasReaction(channelId, messageId, true);
+		await finishIntegrationContentChange(channelId);
 		return new MessageReaction(reactionData);
 	}
 
@@ -193,6 +199,7 @@ export class MessageInteractionRepository {
 		emojiName: string,
 		emojiId?: EmojiID,
 	): Promise<void> {
+		await prepareIntegrationContentChange(channelId);
 		const bucket = BucketUtils.makeBucket(messageId);
 		const normalizedEmojiId = emojiId ?? createEmojiID(0n);
 		await deleteOneOrMany(
@@ -207,9 +214,11 @@ export class MessageInteractionRepository {
 		);
 		const hasReactions = await this.messageHasAnyReactions(channelId, messageId);
 		await this.setHasReaction(channelId, messageId, hasReactions);
+		await finishIntegrationContentChange(channelId);
 	}
 
 	async removeAllReactions(channelId: ChannelID, messageId: MessageID): Promise<void> {
+		await prepareIntegrationContentChange(channelId);
 		const bucket = BucketUtils.makeBucket(messageId);
 		const deleteQuery = MessageReactions.deleteCql({
 			where: [
@@ -225,6 +234,7 @@ export class MessageInteractionRepository {
 		});
 		const hasReactions = await this.messageHasAnyReactions(channelId, messageId);
 		await this.setHasReaction(channelId, messageId, hasReactions);
+		await finishIntegrationContentChange(channelId);
 	}
 
 	async removeAllReactionsForEmoji(
@@ -233,6 +243,7 @@ export class MessageInteractionRepository {
 		emojiName: string,
 		emojiId?: EmojiID,
 	): Promise<void> {
+		await prepareIntegrationContentChange(channelId);
 		const bucket = BucketUtils.makeBucket(messageId);
 		const normalizedEmojiId = emojiId ?? createEmojiID(0n);
 		const deleteQuery = MessageReactions.deleteCql({
@@ -253,6 +264,7 @@ export class MessageInteractionRepository {
 		});
 		const hasReactions = await this.messageHasAnyReactions(channelId, messageId);
 		await this.setHasReaction(channelId, messageId, hasReactions);
+		await finishIntegrationContentChange(channelId);
 	}
 
 	async countReactionUsers(

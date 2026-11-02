@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type {GuildID, UserID} from '@app/api/BrandedTypes';
+import {createChannelID, type GuildID, type UserID} from '@app/api/BrandedTypes';
 import {
 	mapThreadMemberToRpcResponse,
 	mapThreadToResponse,
@@ -10,6 +10,7 @@ import type {GatewayDispatchEvent} from '@app/api/constants/Gateway';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import type {ThreadMember} from '@app/api/models/ThreadMember';
 import type {ThreadState} from '@app/api/models/ThreadState';
+import {finishIntegrationContentChange} from '@app/integration/IntegrationContentHooks';
 import {THREAD_MEMBER_COUNT_DISPLAY_CAP} from '@fluxer/constants/src/ThreadConstants';
 
 export interface ThreadDispatchEvent {
@@ -111,6 +112,11 @@ export async function dispatchThreadEvents(
 	events: Array<ThreadDispatchEvent>,
 ): Promise<void> {
 	if (events.length === 0) return;
+	for (const event of events) {
+		const data = event.data as {id?: string};
+		if (data.id && ['THREAD_CREATE', 'THREAD_UPDATE'].includes(event.event))
+			await finishIntegrationContentChange(createChannelID(BigInt(data.id)));
+	}
 	if (events.length === 1) {
 		await gatewayService.dispatchGuild({guildId, event: events[0]!.event, data: events[0]!.data});
 		return;

@@ -17,6 +17,7 @@ import {InMemoryCassandraQueryExecutor} from '@app/api/test/InMemoryCassandraQue
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
 import {ChannelFlags} from '@fluxer/constants/src/ThreadConstants';
 import {InvalidChannelTypeError} from '@fluxer/errors/src/domains/channel/InvalidChannelTypeError';
+import {UnknownChannelError} from '@fluxer/errors/src/domains/channel/UnknownChannelError';
 import {InputValidationError} from '@fluxer/errors/src/domains/core/InputValidationError';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
@@ -62,8 +63,10 @@ function channelRow(id: typeof source, type: number): ChannelRow {
 describe('跨论坛移动的持久索引与恢复', () => {
 	let repository: ChannelRepository;
 	let moves: ThreadMoveRepository;
+	let executor: InMemoryCassandraQueryExecutor;
 	beforeEach(async () => {
-		setCassandraQueryExecutorForTesting(new InMemoryCassandraQueryExecutor());
+		executor = new InMemoryCassandraQueryExecutor();
+		setCassandraQueryExecutorForTesting(executor);
 		repository = new ChannelRepository();
 		moves = new ThreadMoveRepository(repository);
 		await upsertOne(Channels.upsertAll(channelRow(source, ChannelTypes.GUILD_FORUM)));
@@ -103,6 +106,44 @@ describe('跨论坛移动的持久索引与恢复', () => {
 		);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]?.parent_id).toBe(target);
+	});
+
+	it('删除准备已经冻结的帖子不能再移动或重写父目录', async () => {
+		const state = (await repository.threads.getState(thread))!;
+		await repository.threads.beginDelete(thread, state.stateVersion, 'move-delete-ticket');
+		await expect(
+			moves.move({threadId: thread, sourceParentId: source, targetParentId: target, appliedTags: []}),
+		).rejects.toBeInstanceOf(UnknownChannelError);
+		expect((await repository.threads.getState(thread))?.parentId).toBe(source);
+		expect((await repository.channelData.findUnique(thread))?.parentId).toBe(source);
+		expect(await repository.threads.listParentThreads(target)).toEqual([]);
+	});
+
+	it('删除完成后迟到的移动索引不能重新暴露已删除帖子', async () => {
+		const execute = executor.executeBatch.bind(executor);
+		let injected = false;
+		vi.spyOn(executor, 'executeBatch').mockImplementation(async (queries, atomic) => {
+			if (
+				!injected &&
+				queries.some((query) => query.meta?.table.name === 'threads_by_parent' && query.meta?.action === 'upsert')
+			) {
+				injected = true;
+				const state = (await repository.threads.getState(thread))!;
+				await repository.threads.beginDelete(thread, state.stateVersion, 'during-move');
+				await repository.threads.markDeleteDispatched(thread, 'during-move');
+				await repository.threads.purgeThread(thread);
+			}
+			await execute(queries, atomic);
+		});
+		await expect(
+			moves.move({threadId: thread, sourceParentId: source, targetParentId: target, appliedTags: []}),
+		).rejects.toBeInstanceOf(UnknownChannelError);
+		expect(injected).toBe(true);
+		expect(await repository.threads.getState(thread)).toBeNull();
+		expect(await repository.channelData.findUnique(thread)).toBeNull();
+		expect(await repository.threads.listParentThreads(target)).toEqual([]);
+		expect(await repository.threads.listActiveThreads(guild)).toEqual([]);
+		expect(await repository.threads.listMembers(thread, {limit: 10})).toEqual([]);
 	});
 
 	it('归档帖子留在归档状态并从旧论坛归档列表消失', async () => {

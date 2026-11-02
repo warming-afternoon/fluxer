@@ -167,6 +167,8 @@ export class IdentityRebindService {
 		}
 		if (sourceId) {
 			await assertLease();
+			// 合并事件必须新于双方已发布版本，不能依赖节点墙钟比来源账户更新。
+			plan.version = Math.max(plan.version, (await this.identities.bindingVersion(sourceId)) + 1);
 			const source = await this.context.services.users.findUnique(sourceId);
 			const canonical = await this.identities.canonicalUserId(sourceId);
 			if (!source?.traits.has('discord_integration') || (canonical !== sourceId && canonical !== userId))

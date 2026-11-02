@@ -42,6 +42,7 @@ class MemoryBindings extends IntegrationIdentityRepository {
 	current = new Map<UserID, string>();
 	canonical = new Map<UserID, UserID>();
 	locks = new Map<UserID, string>();
+	versions = new Map<UserID, number>();
 	failSetOnce = false;
 	/** 模拟稳定的历史归属 */
 	override async canonicalUserId(id: UserID) {
@@ -50,6 +51,10 @@ class MemoryBindings extends IntegrationIdentityRepository {
 	/** 模拟唯一当前身份 */
 	override async findDiscordId(id: UserID) {
 		return this.current.get(id) ?? null;
+	}
+	/** 来源账户版本可高于当前节点墙钟 */
+	override async bindingVersion(id: UserID) {
+		return this.versions.get(id) ?? 1;
 	}
 	/** 恢复期间读取已占用账户的真实当前主体 */
 	override async currentDuringRebind(id: UserID) {
@@ -69,13 +74,15 @@ class MemoryBindings extends IntegrationIdentityRepository {
 		this.canonical.set(source, target);
 	}
 	/** 在来源停用之后注入崩溃 */
-	override async setCurrent(id: UserID, discord: string) {
+	override async setCurrent(id: UserID, discord: string, _operation: string, version: number) {
 		if (this.failSetOnce) {
 			this.failSetOnce = false;
 			throw new Error('interrupted');
 		}
 		this.current.set(id, discord);
-		return Date.now();
+		const next = Math.max(version, (this.versions.get(id) ?? 1) + 1);
+		this.versions.set(id, next);
+		return next;
 	}
 }
 
@@ -112,6 +119,8 @@ describe('administrative identity rebind', () => {
 		const identities = new MemoryBindings();
 		identities.current.set(bId, '111111111111111111');
 		identities.current.set(cId, '222222222222222222');
+		const sourceVersion = Date.now() + 86400000;
+		identities.versions.set(cId, sourceVersion);
 		identities.failSetOnce = true;
 		const operations = new MemoryOperations();
 		const accounts = new DiscordAccountService(context);
@@ -137,6 +146,7 @@ describe('administrative identity rebind', () => {
 			merged_user_id: c.userId,
 			discord_user_id: request.discord_user_id,
 		});
+		expect(result.version).toBe(sourceVersion + 1);
 		expect(await context.services.users.listAuthSessions(bId)).toHaveLength(0);
 		expect((await context.services.users.findUnique(bId))!.passwordHash).toBe(beforeB.passwordHash);
 		expect((await context.services.users.findUnique(cId))!.passwordHash).toBe(beforeC.passwordHash);

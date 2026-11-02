@@ -23,17 +23,20 @@ it.skipIf(!process.env.INTEGRATION_LIVE_TEST_CONNECTION)(
 			port: number;
 			forum_password: string;
 			fluxer_password: string;
+			server_user?: string;
+			client_user?: string;
+			server_inbox_prefix?: string;
 		};
 		const harness = await createAuthHarness();
 		const serverConnection = await connect({
 			servers: `nats://127.0.0.1:${metadata.port}`,
-			user: 'fluxer',
+			user: metadata.server_user ?? 'fluxer',
 			pass: metadata.fluxer_password,
-			inboxPrefix: '_INBOX.fluxer',
+			inboxPrefix: metadata.server_inbox_prefix ?? '_INBOX.fluxer',
 		});
 		const client = await connect({
 			servers: `nats://127.0.0.1:${metadata.port}`,
-			user: 'forum',
+			user: metadata.client_user ?? 'forum',
 			pass: metadata.forum_password,
 			inboxPrefix: '_INBOX.forum',
 		});

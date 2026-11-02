@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {createHash} from 'node:crypto';
+import {readSafeIntegerVersion} from '@app/api/database/CassandraVersion';
 import {INTEGRATION_QUERY_OPTIONS} from '@app/integration/IntegrationIdentityRepository';
 import {getClient} from '@pkgs/cassandra/src/Client';
 
@@ -30,7 +31,7 @@ export class IntegrationEventJournal {
 			[shard, `d:${resource}`],
 			INTEGRATION_QUERY_OPTIONS,
 		);
-		const highWater = BigInt(tracked.first()?.version?.toString() ?? '0');
+		const highWater = BigInt(readSafeIntegerVersion(tracked.first()?.version ?? 0, 0));
 		await getClient().execute(
 			'INSERT INTO integration_event_journal (shard, entry_key, version) VALUES (?, ?, ?) IF NOT EXISTS',
 			[shard, key, highWater],
@@ -43,12 +44,12 @@ export class IntegrationEventJournal {
 				INTEGRATION_QUERY_OPTIONS,
 			);
 			const previous = response.first();
-			const version = BigInt(previous?.version?.toString() ?? '0');
+			const version = BigInt(readSafeIntegerVersion(previous?.version ?? 0, 0));
 			if (previous?.fingerprint === fingerprint && version >= highWater) {
 				if (version > highWater)
 					await getClient().execute(
 						'UPDATE integration_event_journal SET version = ? WHERE shard = ? AND entry_key = ? IF version = ?',
-						[version, shard, `d:${resource}`, tracked.first()?.version ?? null],
+						[version, shard, `d:${resource}`, tracked.first()?.version == null ? null : highWater],
 						INTEGRATION_QUERY_OPTIONS,
 					);
 				return;
@@ -56,11 +57,12 @@ export class IntegrationEventJournal {
 			let next = highWater;
 			if (version > next) next = version;
 			next += 1n;
+			const publicVersion = readSafeIntegerVersion(next);
 			const eventId = `${resource}:${next}`;
 			const payload = JSON.stringify({
 				...data,
 				event_id: eventId,
-				state_version: Number(next),
+				state_version: publicVersion,
 				occurred_at: new Date().toISOString(),
 			});
 			const result = await getClient().execute(
@@ -117,9 +119,9 @@ export class IntegrationEventJournal {
 			INTEGRATION_QUERY_OPTIONS,
 		);
 		const current = response.first()?.version;
-		if (current == null || BigInt(current.toString()) < BigInt(version))
+		if (current == null || readSafeIntegerVersion(current, 0) < readSafeIntegerVersion(version))
 			throw new Error('Integration event version authority is missing or regressed');
-		return BigInt(current.toString()) > BigInt(version);
+		return readSafeIntegerVersion(current, 0) > readSafeIntegerVersion(version);
 	}
 
 	/** 业务写入前记录可重读资源，崩溃恢复不依赖已成功发送的网关事件 */

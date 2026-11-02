@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {ChannelID, UserID} from '@app/api/BrandedTypes';
+import {readSafeIntegerVersion} from '@app/api/database/CassandraVersion';
 import {getClient} from '@pkgs/cassandra/src/Client';
 import cassandra from 'cassandra-driver';
 
@@ -49,11 +50,13 @@ export class ThreadPolicyRepository {
 			[channelId, [0n, userId]],
 			OPTIONS,
 		);
-		return result.rows as unknown as Array<ThreadPolicy>;
+		const policies = result.rows as unknown as Array<ThreadPolicy>;
+		return policies.map((policy) => ({...policy, version: readSafeIntegerVersion(policy.version)}));
 	}
 
 	/** 按来源版本条件写入，旧任务不能撤销更新的限制 */
 	async set(channelId: ChannelID, userId: bigint, policy: ThreadPolicy): Promise<void> {
+		const version = readSafeIntegerVersion(policy.version);
 		for (let attempt = 0; attempt < 8; attempt++) {
 			const response = await getClient().execute(
 				'SELECT version, kind, active, expires_at FROM thread_external_policies WHERE thread_id = ? AND user_id = ? AND source = ?',
@@ -61,8 +64,8 @@ export class ThreadPolicyRepository {
 				OPTIONS,
 			);
 			const row = response.first();
-			const previous = row?.version == null ? undefined : Number(row.version);
-			if (previous === policy.version) {
+			const previous = row?.version == null ? undefined : readSafeIntegerVersion(row.version);
+			if (previous === version) {
 				if (
 					row?.kind !== policy.kind ||
 					row?.active !== policy.active ||
@@ -71,12 +74,12 @@ export class ThreadPolicyRepository {
 					throw new ThreadPolicyVersionConflictError('Same policy version has a different payload');
 				return;
 			}
-			if (previous !== undefined && previous > policy.version) return;
+			if (previous !== undefined && previous > version) return;
 			const result =
 				previous === undefined
 					? await getClient().execute(
 							'INSERT INTO thread_external_policies (thread_id, user_id, source, kind, active, version, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS',
-							[channelId, userId, policy.source, policy.kind, policy.active, policy.version, policy.expires_at],
+							[channelId, userId, policy.source, policy.kind, policy.active, BigInt(version), policy.expires_at],
 							OPTIONS,
 						)
 					: await getClient().execute(
@@ -84,12 +87,12 @@ export class ThreadPolicyRepository {
 							[
 								policy.kind,
 								policy.active,
-								policy.version,
+								BigInt(version),
 								policy.expires_at,
 								channelId,
 								userId,
 								policy.source,
-								previous,
+								BigInt(previous),
 							],
 							OPTIONS,
 						);

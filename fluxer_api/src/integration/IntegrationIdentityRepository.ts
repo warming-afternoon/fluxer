@@ -42,6 +42,99 @@ export const INTEGRATION_QUERY_OPTIONS = {
 };
 
 export class IntegrationIdentityRepository {
+	/** 沿仅向规范账户的历史映射解析稳定用户，拒绝循环和过长链 */
+	async canonicalUserId(userId: UserID): Promise<UserID> {
+		const visited = new Set<UserID>();
+		let current = userId;
+		for (let depth = 0; depth < 16; depth++) {
+			if (visited.has(current)) throw new IntegrationError('IDENTITY_CONFLICT', 'Identity merge cycle');
+			visited.add(current);
+			const response = await getClient().execute(
+				'SELECT canonical_user_id FROM integration_user_identities WHERE user_id = ?',
+				[current],
+				INTEGRATION_QUERY_OPTIONS,
+			);
+			const canonical = response.first()?.canonical_user_id as UserID | undefined;
+			if (!canonical || canonical === current) return current;
+			current = canonical;
+		}
+		throw new IntegrationError('IDENTITY_CONFLICT', 'Identity merge chain exceeds limit');
+	}
+
+	/** 独占账户绑定变更，同一操作可以恢复，其他操作必须等待 */
+	async lockRebind(userId: UserID, operationId: string): Promise<void> {
+		await getClient().execute(
+			'UPDATE integration_user_identities SET rebind_operation = ? WHERE user_id = ? IF rebind_operation = null',
+			[operationId, userId],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		const response = await getClient().execute(
+			'SELECT rebind_operation FROM integration_user_identities WHERE user_id = ?',
+			[userId],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		if (response.first()?.rebind_operation !== operationId)
+			throw new IntegrationError('IDENTITY_BUSY', 'Another identity operation is in progress', true);
+	}
+
+	/** 保留原始 Discord 归属，通过规范用户投影合并预建账户 */
+	async mergeUser(source: UserID, target: UserID, operationId: string): Promise<void> {
+		const result = await getClient().execute(
+			'UPDATE integration_user_identities SET canonical_user_id = ? WHERE user_id = ? IF rebind_operation = ?',
+			[target, source, operationId],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		if (!result.wasApplied()) throw new IntegrationError('IDENTITY_CONFLICT', 'Merge ownership mismatch');
+	}
+
+	/** 提交当前登录主体并写入历史，锁由完成步骤单独释放 */
+	async setCurrent(userId: UserID, discordId: string, operationId: string, version: number): Promise<number> {
+		const current = await getClient().execute(
+			'SELECT binding_version, binding_operation FROM integration_user_identities WHERE user_id = ?',
+			[userId],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		if (current.first()?.binding_operation === operationId) return Number(current.first()?.binding_version);
+		const nextVersion = Math.max(version, Number(current.first()?.binding_version ?? 1) + 1);
+		const result = await getClient().execute(
+			'UPDATE integration_user_identities SET discord_user_id = ?, binding_version = ?, binding_operation = ? WHERE user_id = ? IF rebind_operation = ?',
+			[discordId, nextVersion, operationId, userId, operationId],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		if (!result.wasApplied()) throw new IntegrationError('IDENTITY_CONFLICT', 'Binding ownership mismatch');
+		return nextVersion;
+	}
+
+	/** 在持锁恢复期间读取当前主体，拒绝旧计划覆盖已完成的后继管理操作 */
+	async currentDuringRebind(userId: UserID, operationId: string): Promise<string | null> {
+		const result = await getClient().execute(
+			'SELECT discord_user_id, rebind_operation FROM integration_user_identities WHERE user_id = ?',
+			[userId],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		if (result.first()?.rebind_operation !== operationId)
+			throw new IntegrationError('IDENTITY_CONFLICT', 'Binding ownership mismatch');
+		return result.first()?.discord_user_id ?? null;
+	}
+
+	/** 规范账户的单调绑定版本使历史身份投影也随管理换绑失效 */
+	async bindingVersion(userId: UserID): Promise<number> {
+		const result = await getClient().execute(
+			'SELECT binding_version FROM integration_user_identities WHERE user_id = ?',
+			[userId],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		return Number(result.first()?.binding_version ?? 1);
+	}
+
+	/** 仅由持锁操作释放账户变更门禁 */
+	async unlockRebind(userId: UserID, operationId: string): Promise<void> {
+		await getClient().execute(
+			'UPDATE integration_user_identities SET rebind_operation = null WHERE user_id = ? IF rebind_operation = ?',
+			[userId, operationId],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+	}
 	/** 在固定批次内读取多个身份分区，避免串行逐个查询 */
 	async findMany(discordIds: Array<string>): Promise<Array<DiscordBinding>> {
 		if (discordIds.length === 0) return [];
@@ -56,6 +149,22 @@ export class IntegrationIdentityRepository {
 
 	/** 验证新增表已安装且权威存储可访问 */
 	async checkHealth(): Promise<void> {
+		await getClient().execute(
+			'SELECT canonical_user_id, rebind_operation, binding_version, binding_operation FROM integration_user_identities WHERE user_id = ?',
+			[1n],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		await getClient().execute(
+			'SELECT resource_owner, payload, result FROM integration_operations WHERE operation_id = ?',
+			['__readiness__'],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		if (process.env.FLUXER_THREAD_POLICY_ENABLED === 'true')
+			await getClient().execute(
+				'SELECT source FROM thread_external_policies WHERE thread_id = ?',
+				[1n],
+				INTEGRATION_QUERY_OPTIONS,
+			);
 		await getClient().execute(
 			'SELECT discord_user_id FROM integration_discord_identities WHERE discord_user_id = ?',
 			['__readiness__'],
@@ -81,14 +190,17 @@ export class IntegrationIdentityRepository {
 	/** 读取并双向核对原生用户对应的 Discord 主体 */
 	async findDiscordId(userId: UserID): Promise<string | null> {
 		const result = await getClient().execute(
-			'SELECT discord_user_id FROM integration_user_identities WHERE user_id = ?',
+			'SELECT discord_user_id, rebind_operation, canonical_user_id FROM integration_user_identities WHERE user_id = ?',
 			[userId],
 			INTEGRATION_QUERY_OPTIONS,
 		);
 		const discordId = result.first()?.discord_user_id as string | undefined;
 		if (!discordId) return null;
+		if (result.first()?.rebind_operation)
+			throw new IntegrationError('IDENTITY_BUSY', 'Identity change is in progress', true);
+		if (result.first()?.canonical_user_id) throw new IntegrationError('ACCOUNT_UNAVAILABLE', 'Account was merged');
 		const binding = await this.find(discordId);
-		if (binding?.state !== 'ready' || binding.user_id !== userId)
+		if (binding?.state !== 'ready' || (await this.canonicalUserId(binding.user_id)) !== userId)
 			throw new IntegrationError('IDENTITY_CONFLICT', 'Identity ownership conflicts');
 		return discordId;
 	}

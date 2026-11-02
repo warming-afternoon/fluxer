@@ -30,6 +30,7 @@ import {
 	type ThreadView,
 } from '@app/api/channel/services/thread/ThreadMappers';
 import {withThreadParentFields} from '@app/api/channel/services/thread/ThreadParentSettings';
+import {ThreadPolicyService} from '@app/api/channel/services/thread/ThreadPolicyService';
 import type {ThreadServiceContext} from '@app/api/channel/services/thread/ThreadServiceContext';
 import {loadThreadView} from '@app/api/channel/services/thread/ThreadViews';
 import {enqueueThreadSearchSync} from '@app/api/channel/threads/ThreadJobs';
@@ -218,10 +219,13 @@ export class ThreadCreationService {
 		body: ForumPostInput;
 		requestCache: RequestCache;
 		auditLogReason: string | null;
+		/** 仅受信内部操作可使用持久化预分配的 ID，公开请求不接受此字段 */
+		preparedThreadId?: ChannelID;
 	}): Promise<StartForumThreadResponse> {
 		const {parentAuth, user, body} = params;
 		assertAccountNotLimited(user);
 		const {channel: parent, guild} = parentAuth;
+		await new ThreadPolicyService().assertAllowed(parent.id, user.id, 'create');
 		if (!guild || !parent.isThreadOnly()) throw new InvalidChannelTypeError();
 		if (body.type !== undefined && body.type !== ChannelTypes.PUBLIC_THREAD) throw new InvalidChannelTypeError();
 		const actor = await this.ctx.parentActor(parentAuth, user.id);
@@ -234,7 +238,7 @@ export class ThreadCreationService {
 			moderator: isThreadModerator(withImplicitThreadBits(actor.permissions), actor),
 		});
 		await this.ctx.validateForumStarter({user, parentAuth, data: body.message});
-		const threadId = createChannelID(await this.ctx.snowflakeService.generate());
+		const threadId = params.preparedThreadId ?? createChannelID(await this.ctx.snowflakeService.generate());
 		const {view, members} = await this.create({
 			parent,
 			creator: {kind: 'user', user, parentAuth},
@@ -254,14 +258,30 @@ export class ThreadCreationService {
 		]);
 		let message: MessageResponse;
 		try {
-			message = await this.ctx.sendForumStarter({
-				user,
+			const auth = await this.ctx.channelAuth.getChannelAuthenticated({
+				userId: user.id,
+				channelId: threadId,
 				viewer: params.viewer,
-				parentAuth,
-				threadId,
-				data: body.message,
-				requestCache: params.requestCache,
 			});
+			const existing = params.preparedThreadId
+				? await this.ctx.threadMessageResponses.getStarter({
+						viewer: params.viewer,
+						userId: user.id,
+						authChannel: auth,
+						messageId: channelIdToMessageId(threadId),
+						requestCache: params.requestCache,
+					})
+				: null;
+			message =
+				existing ??
+				(await this.ctx.sendForumStarter({
+					user,
+					viewer: params.viewer,
+					parentAuth,
+					threadId,
+					data: body.message,
+					requestCache: params.requestCache,
+				}));
 		} catch (error) {
 			await this.discardThread(view, members, parent);
 			await this.ctx.rateLimitService.resetLimit(slowmodeThreadKey(parent.id, user.id));
@@ -374,6 +394,7 @@ export class ThreadCreationService {
 	): Promise<AuthenticatedChannel> {
 		assertAccountNotLimited(user);
 		const {channel, guild} = parentAuth;
+		await new ThreadPolicyService().assertAllowed(channel.id, user.id, 'create');
 		if (!guild || !TEXT_THREAD_PARENT_CHANNEL_TYPES.has(channel.type)) throw new InvalidChannelTypeError();
 		assertThreadAllowed(canCreateThread(await this.ctx.parentActor(parentAuth, user.id), kind));
 		return parentAuth;
@@ -398,6 +419,15 @@ export class ThreadCreationService {
 		const guildId = parent.guildId!;
 		const ownerId = creator.kind === 'user' ? creator.user.id : creator.ownerId;
 		const {threads} = this.ctx.channelRepository;
+		const existing = await threads.getState(params.threadId);
+		if (existing) {
+			const channel = await this.ctx.channelRepository.channelData.findUnique(params.threadId);
+			if (!channel || channel.ownerId !== ownerId || existing.parentId !== parent.id || existing.type !== params.type)
+				throw new InvalidChannelTypeError();
+			const view = await loadThreadView(this.ctx.channelRepository, channel, existing, parent);
+			const members = creator.kind === 'user' ? await threads.getMembers(params.threadId, [ownerId]) : [];
+			return {view, members};
+		}
 		if ((await threads.countActiveThreads(guildId)) >= MAX_ACTIVE_THREADS_PER_GUILD) {
 			throw new MaxActiveThreadsError(MAX_ACTIVE_THREADS_PER_GUILD);
 		}

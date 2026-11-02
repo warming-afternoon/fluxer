@@ -3,6 +3,7 @@
 import {IntegrationRpcServer} from '@app/integration/IntegrationRpcServer';
 import type {IntegrationService} from '@app/integration/IntegrationService';
 import type {Msg, NatsConnection, SubscriptionOptions} from '@nats-io/transport-node';
+import {MissingPermissionsError} from '@fluxer/errors/src/domains/core/MissingPermissionsError';
 import {describe, expect, it, vi} from 'vitest';
 
 /** 建立仅模拟传输的请求分发环境 */
@@ -36,11 +37,24 @@ describe('Integration RPC boundaries', () => {
 		const wrongSubject = send('rpc.auth.v1.external.exchange', 'events.auth.v1.session_invalidated');
 		const botSubject = send('rpc.auth.v1.external.exchange', '_INBOX.bot.stolen');
 		const wildcard = send('rpc.auth.v1.external.exchange', '_INBOX.forum.>');
+		const botRebind = send('rpc.identity.v1.rebind_service', '_INBOX.bot.stolen');
+		const botContent = send('rpc.content.v1.thread.create_service', '_INBOX.bot.stolen');
 		await server.stop();
 		expect(dispatch).not.toHaveBeenCalled();
 		expect(wrongSubject).not.toHaveBeenCalled();
 		expect(botSubject).not.toHaveBeenCalled();
 		expect(wildcard).not.toHaveBeenCalled();
+		expect(botRebind).not.toHaveBeenCalled();
+		expect(botContent).not.toHaveBeenCalled();
+	});
+
+	it('returns native authorization failures as terminal errors instead of dependency outages', async () => {
+		const {server, send, dispatch} = fixture();
+		dispatch.mockRejectedValue(new MissingPermissionsError());
+		await server.start();
+		const response = send('rpc.content.v1.starter.edit_service', '_INBOX.forum.one');
+		await server.stop();
+		expect(JSON.parse(response.mock.calls[0]![0])).toMatchObject({ok: false, error: {code: 'MISSING_PERMISSIONS', retryable: false}});
 	});
 
 	it('rejects malformed and oversized requests before business work', async () => {

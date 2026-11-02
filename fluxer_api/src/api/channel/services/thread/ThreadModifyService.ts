@@ -102,12 +102,15 @@ export class ThreadModifyService {
 		userId,
 		data: input,
 		auditLogReason,
+		delegatedForumFields = false,
 	}: {
 		authChannel: AuthenticatedChannel;
 		userId: UserID;
 		data: ThreadUpdateData;
 		requestCache: RequestCache;
 		auditLogReason: string | null;
+		/** 独立受信 RPC 仅能委托标题与归档，公开 HTTP 从不传入 */
+		delegatedForumFields?: boolean;
 	}): Promise<Channel> {
 		const data = {
 			...input,
@@ -134,7 +137,10 @@ export class ThreadModifyService {
 			flags: data.flags,
 			applied_tags: data.applied_tags,
 		};
-		assertThreadAllowed(threadPatchRequirement(patch, state.flags, thread.actor));
+		if (delegatedForumFields && Object.keys(input).some((key) => key !== 'name' && key !== 'archived'))
+			throw new InvalidChannelTypeError();
+		if (!delegatedForumFields || (state.locked && patch.archived === false))
+			assertThreadAllowed(threadPatchRequirement(patch, state.flags, thread.actor));
 		const appliedTags =
 			data.applied_tags !== undefined
 				? await this.resolvePatchedTags(
@@ -142,7 +148,8 @@ export class ThreadModifyService {
 						data.applied_tags.map((id) => BigInt(id)),
 					)
 				: undefined;
-		if (requiresModerator(patch, thread)) thread.enforceMfa(ThreadPermissionFlags.MANAGE_THREADS);
+		if (!delegatedForumFields && requiresModerator(patch, thread))
+			thread.enforceMfa(ThreadPermissionFlags.MANAGE_THREADS);
 		const pinning =
 			data.flags !== undefined && (data.flags & ChannelFlags.PINNED) !== 0 && !state.isPinned && data.archived !== true;
 		if (pinning && !(await this.deps.channelRepository.threads.claimForumPin(parent.id, channel.id))) {

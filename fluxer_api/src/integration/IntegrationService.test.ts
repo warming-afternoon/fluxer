@@ -31,6 +31,11 @@ class MemoryIdentities extends IntegrationIdentityRepository {
 	failReverseOnce = false;
 	failCompleteOnce = false;
 
+	/** 无合并测试中的规范账户保持原 ID */
+	override async canonicalUserId(id: UserID): Promise<UserID> {
+		return id;
+	}
+
 	/** 模拟每主体条件占用 */
 	override async claim(
 		id: string,
@@ -91,6 +96,7 @@ describe('Integration native authority', () => {
 	beforeEach(async () => {
 		await harness.reset();
 		vi.restoreAllMocks();
+		vi.spyOn(IntegrationIdentityRepository.prototype, 'findDiscordId').mockResolvedValue('123456789012345678');
 	});
 	afterAll(async () => {
 		await harness?.shutdown();

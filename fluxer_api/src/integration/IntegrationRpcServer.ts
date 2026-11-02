@@ -3,6 +3,7 @@
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {IntegrationSchemas} from '@app/integration/IntegrationSchemas';
 import type {IntegrationService} from '@app/integration/IntegrationService';
+import {FluxerError} from '@fluxer/errors/src/FluxerError';
 import type {Msg, NatsConnection, Subscription} from '@nats-io/transport-node';
 import {ZodError} from 'zod';
 
@@ -69,7 +70,13 @@ export class IntegrationRpcServer {
 			!this.replyPrefixes.some((prefix) => reply.startsWith(prefix))
 		)
 			return;
-		if (message.subject.startsWith('rpc.auth.') && !reply.startsWith(this.forumReplyPrefix)) return;
+		if (
+			(message.subject.startsWith('rpc.auth.') ||
+				message.subject.startsWith('rpc.content.') ||
+				message.subject === 'rpc.identity.v1.rebind_service') &&
+			!reply.startsWith(this.forumReplyPrefix)
+		)
+			return;
 		try {
 			if (this.pending.size >= this.maxInflight)
 				throw new IntegrationError('BUSY', 'Integration concurrency limit reached', true);
@@ -87,9 +94,11 @@ export class IntegrationRpcServer {
 			const safe =
 				error instanceof IntegrationError
 					? error
-					: error instanceof ZodError
-						? new IntegrationError('INVALID_REQUEST', 'Request validation failed')
-						: new IntegrationError('UNAVAILABLE', 'Integration dependency unavailable', true);
+					: error instanceof FluxerError && error.status >= 400 && error.status < 500
+						? new IntegrationError(error.code, error.code, error.status === 429)
+						: error instanceof ZodError
+							? new IntegrationError('INVALID_REQUEST', 'Request validation failed')
+							: new IntegrationError('UNAVAILABLE', 'Integration dependency unavailable', true);
 			message.respond(
 				JSON.stringify({ok: false, error: {code: safe.code, message: safe.message, retryable: safe.retryable}}),
 			);

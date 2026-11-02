@@ -34,13 +34,13 @@ export class DiscordAccountService {
 				username.success ? username.data : `dc_${userId}`,
 			);
 		}
-		await this.identities.ensureReverse(binding);
 		// 完成的绑定只读取原生账户，不能重新建号或覆盖已经修改的资料。
 		if (binding.state === 'ready') {
-			const user = await this.context.services.users.findUnique(binding.user_id);
+			const user = await this.context.services.users.findUnique(await this.identities.canonicalUserId(binding.user_id));
 			if (!user) throw new IntegrationError('BOUND_ACCOUNT_MISSING', 'Bound native account is missing');
 			return {user, created: false, binding};
 		}
+		await this.identities.ensureReverse(binding);
 		const user = await this.native.initialize(binding);
 		await this.identities.complete(binding);
 		await publishIntegrationEvent('events.identity.v1.binding_changed', {

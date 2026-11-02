@@ -293,6 +293,8 @@ export class MessageRequestService {
 		messageId: MessageID;
 		data: MessageUpdateRequest;
 		requestCache: RequestCache;
+		/** 仅内部操作可携带乐观版本，防止重试覆盖后来的编辑 */
+		expectedVersion?: number;
 	}): Promise<MessageResponse> {
 		const {message, authChannel} = await this.channelService.messages.edit.editMessage({
 			viewer: params.viewer,
@@ -301,6 +303,7 @@ export class MessageRequestService {
 			messageId: params.messageId,
 			data: params.data,
 			requestCache: params.requestCache,
+			expectedVersion: params.expectedVersion,
 		});
 		const access = await this.channelService.messages.retrieval.getResponseAccessContext({
 			viewer: params.viewer,

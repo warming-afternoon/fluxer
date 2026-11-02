@@ -42,6 +42,7 @@ import type {MessageWriteLock} from '@app/api/channel/services/message/MessageWr
 import type {ThreadMessageActivity} from '@app/api/channel/services/message/ThreadMessageActivity';
 import {isPersonalNotesChannelId} from '@app/api/channel/services/PersonalNotesChannelRepair';
 import {assertThreadAllowed} from '@app/api/channel/services/thread/ThreadDenials';
+import {ThreadPolicyService} from '@app/api/channel/services/thread/ThreadPolicyService';
 import {enqueueThreadSearchSync} from '@app/api/channel/threads/ThreadJobs';
 import {SYSTEM_USER_ID} from '@app/api/constants/Core';
 import type {MessageAttachment, MessageReference} from '@app/api/database/types/MessageTypes';
@@ -665,6 +666,7 @@ export class MessageSendService {
 		const slowmodeKey = needsSlowmodeCheck && !slowmodeBypass ? `slowmode:${channelId}:${user.id}` : null;
 		ensureTextChannel(channel);
 		this.assertThreadSendAllowed(authChannel);
+		if (authChannel.thread) await new ThreadPolicyService().assertAllowed(channelId, user.id, 'send');
 		const isForwardMessage = this.ensureMessageRequestIsValid({user, data, guildFeatures: guild?.features ?? null});
 		this.deps.embedAttachmentResolver.validateAttachmentReferences({
 			embeds: data.embeds,

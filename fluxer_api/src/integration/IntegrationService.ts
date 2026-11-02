@@ -11,6 +11,8 @@ import {AuthSessionRepository} from '@app/api/user/repositories/auth/AuthSession
 import {isAccountClosed, isTemporarilyBanned} from '@app/api/user/UserHelpers';
 import {DiscordAccountService} from '@app/integration/DiscordAccountService';
 import {issueDiscordPasswordProof} from '@app/integration/DiscordPasswordProof';
+import {IdentityRebindService} from '@app/integration/IdentityRebindService';
+import {IntegrationContentService} from '@app/integration/IntegrationContentService';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import type {IntegrationExchangeRepository} from '@app/integration/IntegrationExchangeRepository';
 import {IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
@@ -48,6 +50,7 @@ export class IntegrationService {
 		) {
 			throw new IntegrationError('ACCOUNT_UNAVAILABLE', 'Account is unavailable');
 		}
+		if (user.traits.has('discord_integration')) await this.identities.findDiscordId(user.id);
 		return {user, session, hash: hash.toString('base64url')};
 	}
 
@@ -74,7 +77,10 @@ export class IntegrationService {
 
 	/** 分发严格校验过的有界 RPC，敏感字段永不返回日志 */
 	async dispatch(subject: string, input: unknown): Promise<unknown> {
+		if (subject.startsWith('rpc.content.')) return new IntegrationContentService(this.context).dispatch(subject, input);
 		switch (subject) {
+			case 'rpc.identity.v1.rebind_service':
+				return new IdentityRebindService(this.context).rebind(IntegrationSchemas[subject].parse(input));
 			case 'rpc.integration.v1.service_info': {
 				IntegrationSchemas[subject].parse(input);
 				await this.identities.checkHealth();
@@ -93,13 +99,18 @@ export class IntegrationService {
 			case 'rpc.identity.v1.lookup_discord': {
 				const request = IntegrationSchemas[subject].parse(input);
 				const records = await this.identities.findMany([...new Set(request.discord_user_ids)]);
-				const bindings = records
-					.filter((binding) => binding.state === 'ready')
-					.map((binding) => ({
-						discord_user_id: binding.discord_user_id,
-						user_id: binding.user_id.toString(),
-						version: binding.version,
-					}));
+				const bindings = await Promise.all(
+					records
+						.filter((binding) => binding.state === 'ready')
+						.map(async (binding) => {
+							const canonical = await this.identities.canonicalUserId(binding.user_id);
+							return {
+								discord_user_id: binding.discord_user_id,
+								user_id: canonical.toString(),
+								version: await this.identities.bindingVersion(canonical),
+							};
+						}),
+				);
 				return {bindings};
 			}
 			case 'rpc.identity.v1.profiles': {
@@ -133,7 +144,7 @@ export class IntegrationService {
 				const verifiedAt = this.verifyFresh(request.verified_at);
 				const {user, hash} = await this.resolve(request.token);
 				const binding = await this.identities.find(request.discord_user_id);
-				if (binding?.state !== 'ready' || binding.user_id !== user.id)
+				if (binding?.state !== 'ready' || (await this.identities.findDiscordId(user.id)) !== request.discord_user_id)
 					throw new IntegrationError('IDENTITY_CONFLICT', 'Password proof does not match current account');
 				if (user.passwordHash !== null || !user.traits.has('discord_integration'))
 					throw new IntegrationError('PROOF_NOT_AVAILABLE', 'Initial password proof unavailable');
@@ -164,6 +175,8 @@ export class IntegrationService {
 					throw new IntegrationError('EXCHANGE_EXPIRED', 'Exchange result expired');
 				const user = await this.context.services.users.findUnique(record.user_id);
 				if (!user) throw new IntegrationError('BOUND_ACCOUNT_MISSING', 'Bound native account is missing');
+				if ((await this.identities.findDiscordId(user.id)) !== request.discord_user_id)
+					throw new IntegrationError('IDENTITY_NOT_CURRENT', 'Historical Discord identity cannot sign in');
 				if (record.state === 'allocated') {
 					this.verifyFresh(request.verified_at);
 					const token = await generateAuthToken(this.context);

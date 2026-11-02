@@ -19,11 +19,16 @@ const nc = await connect({
 });
 try {
 	const manager = await jetstreamManager(nc, {checkAPI: false});
-	const stream = JSON.parse(await fs.readFile(new URL('./nats/content-stream.json', import.meta.url), 'utf8'));
-	const consumer = JSON.parse(await fs.readFile(new URL('./nats/forum-consumer.json', import.meta.url), 'utf8'));
-	await manager.streams.add(stream);
-	await manager.consumers.add(stream.name, consumer);
-	console.log('ODYSSEIA_CONTENT / forum-index ready; no content producer or consumer has been started.');
+	for (const [streamFile, consumerFile] of [
+		['content-stream.json', 'forum-consumer.json'],
+		['auth-stream.json', 'forum-auth-consumer.json'],
+	]) {
+		const stream = JSON.parse(await fs.readFile(new URL(`./nats/${streamFile}`, import.meta.url), 'utf8'));
+		const consumer = JSON.parse(await fs.readFile(new URL(`./nats/${consumerFile}`, import.meta.url), 'utf8'));
+		await manager.streams.add(stream);
+		await manager.consumers.add(stream.name, consumer);
+		console.log(`${stream.name} / ${consumer.durable_name} ready.`);
+	}
 } finally {
 	await nc.drain();
 }

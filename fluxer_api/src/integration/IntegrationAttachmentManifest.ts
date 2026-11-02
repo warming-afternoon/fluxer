@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {createHash} from 'node:crypto';
-import {type ChannelID, createAttachmentID, type MessageID, type UserID} from '@app/api/BrandedTypes';
+import {
+	type AttachmentID,
+	type ChannelID,
+	createAttachmentID,
+	type MessageID,
+	type UserID,
+} from '@app/api/BrandedTypes';
+import {Config} from '@app/api/Config';
 import type {AttachmentToProcess} from '@app/api/channel/AttachmentDTOs';
+import {makeAttachmentCdnKey} from '@app/api/channel/services/message/MessageHelpers';
 import type {MessageAttachment} from '@app/api/database/types/MessageTypes';
+import type {IStorageService} from '@app/api/infrastructure/IStorageService';
 import {
 	currentIntegrationAttachmentOperation,
 	currentIntegrationAttachmentScope,
@@ -25,6 +34,9 @@ export interface AttachmentManifestCheckpoint {
 
 	/** 已持久处理结果，空值表示尚未完成原生扫描和复制 */
 	result: AttachmentManifestResult | null;
+
+	/** 复制前持久的永久附件编号，进程中断仍使用同一 CDN 目标 */
+	attachmentIds: Array<AttachmentID>;
 }
 
 export class IntegrationAttachmentManifest {
@@ -32,26 +44,50 @@ export class IntegrationAttachmentManifest {
 	constructor(private readonly operations = new IntegrationOperationRepository()) {}
 
 	/** 原生管线在接触上传对象前固定输入和所有者，重试只恢复同一不可变计划 */
-	async begin(input: {
-		messageId: MessageID;
-		channelId: ChannelID;
-		uploadChannelId: ChannelID;
-		actorId: UserID;
-		attachments: Array<AttachmentToProcess>;
-	}): Promise<AttachmentManifestCheckpoint | null> {
+	async begin(
+		input: {
+			messageId: MessageID;
+			channelId: ChannelID;
+			uploadChannelId: ChannelID;
+			actorId: UserID;
+			attachments: Array<AttachmentToProcess>;
+		},
+		allocateId: () => Promise<bigint>,
+	): Promise<AttachmentManifestCheckpoint | null> {
 		const operationId = currentIntegrationAttachmentOperation();
 		if (!operationId) return null;
 		const id = `${operationId}:attachments:${input.channelId}:${input.messageId}`;
 		const payload = JSON.stringify(input, (_key, value) => (typeof value === 'bigint' ? value.toString() : value));
 		const fingerprint = createHash('sha256').update(payload).digest('hex');
+		const previous = await this.operations.find(id);
+		const attachmentIds = previous ? [] : await Promise.all(input.attachments.map(() => allocateId()));
 		const record = await this.operations.allocate({
 			operation_id: id,
 			actor_id: input.actorId,
 			fingerprint,
-			payload,
+			payload: previous?.payload ?? JSON.stringify({...JSON.parse(payload), attachmentIds: attachmentIds.map(String)}),
 			result: null,
 		});
-		return {id, result: record.result ? this.decode(record.result) : null};
+		const plan = JSON.parse(record.payload) as {attachmentIds?: Array<string>};
+		if (plan.attachmentIds?.length !== input.attachments.length)
+			throw new IntegrationError('OPERATION_CONFLICT', 'Invalid prepared attachment identifiers');
+		return {
+			id,
+			result: record.result ? this.decode(record.result) : null,
+			attachmentIds: plan.attachmentIds.map((value) => createAttachmentID(BigInt(value))),
+		};
+	}
+
+	/** 永久失败按复制前持久计划清理，包含尚未来得及写入完成结果的对象 */
+	async discard(operationId: string, channelId: ChannelID, messageId: string, storage: IStorageService): Promise<void> {
+		const record = await this.operations.find(`${operationId}:attachments:${channelId}:${messageId}`);
+		if (!record) return;
+		const plan = JSON.parse(record.payload) as {attachmentIds: Array<string>; attachments: Array<AttachmentToProcess>};
+		for (const [index, id] of plan.attachmentIds.entries())
+			await storage.deleteObject(
+				Config.s3.buckets.cdn,
+				makeAttachmentCdnKey(channelId, createAttachmentID(BigInt(id)), plan.attachments[index]!.filename),
+			);
 	}
 
 	/** CDN 复制完成后、绑定上传和删除临时对象前保存原生结果，关闭不可重传窗口 */

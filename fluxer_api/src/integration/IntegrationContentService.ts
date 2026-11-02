@@ -3,9 +3,7 @@
 import {createHash} from 'node:crypto';
 import type {ApiContext} from '@app/api/ApiContext';
 import {createChannelID, createGuildID, createMessageID, createUserID} from '@app/api/BrandedTypes';
-import {Config} from '@app/api/Config';
 import {ChannelRepository} from '@app/api/channel/ChannelRepository';
-import {makeAttachmentCdnKey} from '@app/api/channel/services/message/MessageHelpers';
 import {ThreadMoveService} from '@app/api/channel/services/thread/ThreadMoveService';
 import {ThreadPolicyProjectionService} from '@app/api/channel/services/thread/ThreadPolicyProjectionService';
 import {
@@ -137,16 +135,12 @@ export class IntegrationContentService {
 				if (subject === 'rpc.content.v1.thread.create_service') {
 					const threadId = (preparedPlan as {thread_id?: string} | null)?.thread_id;
 					if (threadId) {
-						const manifest = await new IntegrationAttachmentManifest(this.operations).result(
+						await new IntegrationAttachmentManifest(this.operations).discard(
 							request.operation_id,
+							createChannelID(BigInt(threadId)),
 							threadId,
-							threadId,
+							getStorageService(),
 						);
-						for (const attachment of manifest?.attachments ?? [])
-							await getStorageService().deleteObject(
-								Config.s3.buckets.cdn,
-								makeAttachmentCdnKey(createChannelID(BigInt(threadId)), attachment.attachment_id, attachment.filename),
-							);
 					}
 				}
 				await this.operations.complete(request.operation_id, {

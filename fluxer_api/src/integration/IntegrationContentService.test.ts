@@ -584,7 +584,12 @@ describe('restricted content RPC native business paths', () => {
 		vi.spyOn(IntegrationOperationRepository.prototype, 'find').mockImplementation(
 			async (id) => operations.records.get(id) ?? null,
 		);
+		let interruptManifestSave = false;
 		vi.spyOn(IntegrationOperationRepository.prototype, 'completeOnce').mockImplementation(async (id, result) => {
+			if (interruptManifestSave) {
+				interruptManifestSave = false;
+				throw new Error('manifest save interrupted');
+			}
 			const record = operations.records.get(id)!;
 			if (!record.result) record.result = JSON.stringify(result);
 			return JSON.parse(record.result);
@@ -674,7 +679,7 @@ describe('restricted content RPC native business paths', () => {
 			body: bytes,
 			contentType: 'image/png',
 		});
-		await service.dispatch('rpc.content.v1.starter.edit_service', {
+		const orderedEdit = {
 			version: 1,
 			request_id: 'request_attachment_order',
 			operation_id: 'operation_attachment_order',
@@ -682,7 +687,14 @@ describe('restricted content RPC native business paths', () => {
 			guild_id: guild.id,
 			thread_id: recovered.thread_id,
 			attachments: [extra, {id: starter.attachments[0]!.id}],
-		});
+		};
+		interruptManifestSave = true;
+		await expect(service.dispatch('rpc.content.v1.starter.edit_service', orderedEdit)).rejects.toThrow(
+			'manifest save interrupted',
+		);
+		const firstDestination = copy.mock.calls.at(-1)![0].destinationKey;
+		await service.dispatch('rpc.content.v1.starter.edit_service', orderedEdit);
+		expect(copy.mock.calls.at(-1)![0].destinationKey).toBe(firstDestination);
 		const reordered = await threadsRequest<{attachments: Array<{filename: string}>}>(harness, owner.token)
 			.get(`/channels/${recovered.thread_id}/messages/${recovered.thread_id}`)
 			.execute();

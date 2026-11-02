@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import fs from 'node:fs';
-import {type ChannelID, createAttachmentID, type UserID} from '@app/api/BrandedTypes';
+import {type AttachmentID, type ChannelID, createAttachmentID, type UserID} from '@app/api/BrandedTypes';
 import {Config} from '@app/api/Config';
 import type {AttachmentToProcess} from '@app/api/channel/AttachmentDTOs';
 import type {AttachmentUploadTraceRepository} from '@app/api/channel/repositories/message/AttachmentUploadTraceRepository';
@@ -37,6 +37,8 @@ const ATTACHMENT_PROCESSING_CONCURRENCY = 2;
 const METADATA_PROBE_DEGRADED_CONTEXT = 'message_attachment';
 
 interface ProcessAttachmentParams {
+	/** 内部操作在任何 CDN 副作用之前持久分配的编号 */
+	preparedAttachmentId?: AttachmentID;
 	message: Message;
 	attachment: AttachmentToProcess;
 	index: number;
@@ -89,13 +91,16 @@ export class AttachmentProcessingService {
 	}> {
 		validateAttachmentIds(params.attachments.map((a) => ({id: BigInt(a.id)})));
 		const manifests = new IntegrationAttachmentManifest();
-		const checkpoint = await manifests.begin({
-			messageId: params.message.id,
-			channelId: params.message.channelId,
-			uploadChannelId: params.uploadChannelId ?? params.message.channelId,
-			actorId: params.uploadUserId,
-			attachments: params.attachments,
-		});
+		const checkpoint = await manifests.begin(
+			{
+				messageId: params.message.id,
+				channelId: params.message.channelId,
+				uploadChannelId: params.uploadChannelId ?? params.message.channelId,
+				actorId: params.uploadUserId,
+				attachments: params.attachments,
+			},
+			() => this.snowflakeService.generate(),
+		);
 		if (checkpoint?.result) {
 			if (!checkpoint.result.hasVirusDetected) await this.bindPreparedUploads(params, checkpoint.result.attachments);
 			return checkpoint.result;
@@ -110,6 +115,7 @@ export class AttachmentProcessingService {
 				ATTACHMENT_PROCESSING_CONCURRENCY,
 				async (attachment, index) => {
 					const result = await this.processAttachment({
+						preparedAttachmentId: checkpoint?.attachmentIds[index],
 						message: params.message,
 						attachment,
 						index,
@@ -272,7 +278,7 @@ export class AttachmentProcessingService {
 		if (!uploadedFile) {
 			throw InputValidationError.fromCode(`attachments.${index}.upload_filename`, ValidationErrorCodes.FILE_NOT_FOUND);
 		}
-		const attachmentId = createAttachmentID(await this.snowflakeService.generate());
+		const attachmentId = params.preparedAttachmentId ?? createAttachmentID(await this.snowflakeService.generate());
 		const cdnKey = makeAttachmentCdnKey(message.channelId, attachmentId, attachment.filename);
 		let contentType = pendingUpload.content_type ?? getContentTypeFromFilename(attachment.filename);
 		let size = BigInt(uploadedFile.contentLength);

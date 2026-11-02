@@ -153,6 +153,17 @@ insert_thread(Tab, Thread) ->
 -spec store_thread(tab(), thread_id(), map()) -> new | known.
 store_thread(Tab, ThreadId, Thread) ->
     Known = ets:member(Tab, {t, ThreadId}),
+    %% 移动时清除旧父目录，同时保留当前主线的成员计数与存储路径。
+    case get_thread(Tab, ThreadId) of
+        Previous when is_map(Previous) ->
+            OldParent = snowflake_id:parse_optional(maps:get(<<"parent_id">>, Previous, undefined)),
+            NewParent = snowflake_id:parse_optional(maps:get(<<"parent_id">>, Thread, undefined)),
+            case is_integer(OldParent) andalso OldParent =/= NewParent of
+                true -> ets:delete(Tab, {p, OldParent, ThreadId});
+                false -> ok
+            end;
+        _ -> ok
+    end,
     true = ets:insert(Tab, {{t, ThreadId}, Thread}),
     case snowflake_id:parse_optional(maps:get(<<"parent_id">>, Thread, undefined)) of
         ParentId when is_integer(ParentId) ->

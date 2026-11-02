@@ -12,10 +12,13 @@ import {GlobalNameType, UsernameType} from '@fluxer/schema/src/primitives/UserVa
 export class DiscordAccountService {
 	/** 使用稳定事件标识恢复首次绑定提交后未完成的发布 */
 	private async publishBinding(binding: DiscordBinding, userId: UserID): Promise<void> {
+		// 历史别名与跨账户合并只能由管理事件变更，普通登录不能重新选定当前身份。
+		if (userId !== binding.user_id || (await this.identities.findDiscordId(userId)) !== binding.discord_user_id) return;
 		const version = await this.identities.bindingVersion(userId);
 		await publishIntegrationEvent(
 			'events.identity.v1.binding_changed',
 			{
+				kind: 'binding_changed',
 				discord_user_id: binding.discord_user_id,
 				user_id: userId.toString(),
 				version,

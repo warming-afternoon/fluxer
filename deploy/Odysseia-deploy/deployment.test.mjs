@@ -154,7 +154,8 @@ test('事件发布账号仅订阅专用确认收件箱，Forum 独占固定内�
 	])
 		assert.ok(forum.includes(`"${subject}"`));
 	assert.ok(forum.includes('$JS.API.CONSUMER.MSG.NEXT.ODYSSEIA_AUTH.forum-auth'));
-	assert.doesNotMatch(forum, /rpc\.content\.>|\$JS\.API\.STREAM/);
+	assert.ok(forum.includes('$JS.API.STREAM.INFO.ODYSSEIA_AUTH'));
+	assert.doesNotMatch(forum, /rpc\.content\.>|\$JS\.API\.STREAM\.(?:CREATE|UPDATE|DELETE|\*)/);
 	for (const [service, prefix] of [
 		['api', '_INBOX.fluxer-api'],
 		['worker', '_INBOX.fluxer-worker'],
@@ -196,6 +197,7 @@ test('持久认证及内容流有界、满时拒绝且仅使用固定 durable', 
 		assert.ok(stream.max_bytes > 0 && stream.max_age > 0);
 		assert.equal(consumer.durable_name, durable);
 		assert.equal(consumer.ack_policy, 'explicit');
+		assert.equal(consumer.max_deliver, -1);
 		assert.ok(consumer.max_batch <= 100);
 	}
 	const auth = JSON.parse(fs.readFileSync(path.join(directory, 'nats/auth-stream.json'), 'utf8'));

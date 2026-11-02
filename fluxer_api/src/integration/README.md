@@ -21,7 +21,7 @@
 
 ## RPC 合约
 
-请求统一为 `{version:1,request_id:<16..128位ASCII标识>,...字段}`。响应为 `{ok:true,data:...}` 或 `{ok:false,error:{code,message,retryable}}`。请求最多 16 KiB。身份 ID 使用十进制字符串；会话哈希为 SHA-256 的 base64url 编码；仅接受 `flx_` 原生会话令牌。
+请求统一为 `{version:1,request_id:<16..128位ASCII标识>,...字段}`。响应为 `{ok:true,data:...}` 或 `{ok:false,error:{code,message,retryable}}`。普通请求最多 16 KiB；带有有界初始处罚快照的 `thread.create_service` 单独限制为 64 KiB，不增加鉴权 RPC 上限。身份 ID 使用十进制字符串；会话哈希为 SHA-256 的 base64url 编码；仅接受 `flx_` 原生会话令牌。
 
 | Subject | 额外请求字段 | 返回 data |
 | --- | --- | --- |
@@ -55,7 +55,7 @@ Bot 预建与 Forum 外部登录共用 `ensureDiscordAccount`。每个 Discord �
 
 | Subject | 额外字段 | 行为 |
 | --- | --- | --- |
-| `rpc.content.v1.thread.create_service` | `channel_id,name,content,parent_thread_id?` | 先保存预分配 thread ID，再调用原生建帖；同操作中断重试恢复同 ID 和首消息。创建 Fluxer 主源的子帖时传 `parent_thread_id` 执行通用处罚；Discord 主源不传 |
+| `rpc.content.v1.thread.create_service` | `channel_id,name,content,parent_thread_id?,initial_policies?,defer_open?` | 先保存预分配 thread ID，再调用原生建帖；同操作中断重试恢复同 ID 和首消息。创建 Fluxer 主源的子帖时传 `parent_thread_id` 执行通用处罚；Discord 主源不传 |
 | `rpc.content.v1.thread.move_service` | `thread_id,target_channel_id` | 同服务器允许论坛间移动，保存原 source 并保持 thread/message ID；中断保留占用，只允许原操作修复 |
 | `rpc.content.v1.thread.update_service` | `thread_id,name?,archived?` | 仅委托标题及归档，不授予原生权限或变更成员；原生锁定时不能借此绕过解除归档权限 |
 | `rpc.content.v1.starter.edit_service` | `thread_id,content` | 执行原生消息校验与权限；B 可凭规范合并关系修改 C 主帖正文，保留原作者并审计真实 B，不获任意消息编辑能力 |
@@ -63,6 +63,10 @@ Bot 预建与 Forum 外部登录共用 `ensureDiscordAccount`。每个 Discord �
 | `rpc.content.v1.thread.policy_service` | `thread_id,source,policy_version,kind,active,target_user_id?,expires_at?` | 独立来源的用户发言处罚或外部锁 |
 
 创建返回 `{guild_id,channel_id,thread_id,message_id,state_version,event_id}`；首消息 ID 与 thread ID 相同。移动另返回 `source_channel_id,target_channel_id`。`event_id` 在 RPC 结果中为操作 ID，仅用于关联操作；实际异步内容事件版本由事件发布层维护，不能把 `ThreadState.stateVersion` 当作正文或反应变化的全局版本。读取返回 `{guild_id,channel_id,thread_id,state_version,archived,locked,message}`。
+
+`initial_policies` 最多一百项，每项为 `{source,policy_version,target_user_id,active,expires_at?}`，仅表示用户发言处罚，不接受任意策略类型。受信 Forum 在作品级串行事务中给创建任务保存完整快照；Fluxer 用已持久化的预分配 ID，在原生频道、首帖和网关事件出现前落全部初始处罚，再检查创建人能否创建。中断重试沿用同一 ID 与版本，旧快照不会覆盖更新的处罚。Discord 主来源作品的处罚仅作用于 Forum 和 Fluxer 子卡帖，不能操作 Discord 主帖。后续新增处罚与创建完成之间的并发差异仍由 Forum 的可靠任务和版本对账补齐。
+
+子帖使用 `defer_open:true`：创建前保存独立 `forum_initializing` 来源，初始版本为零；首次网关创建事件前投影为真实锁定/归档，只有该内部创建流程能忽略这一来源写首帖，其他锁、用户处罚和原生权限仍检查。RPC 返回 `deferred_open:true`，不会自行开放。Forum 持久排入当前完整处罚任务，只有前置任务全部完成才用正 `policy_version` 撤销 `forum_initializing`；失败保持关闭。零版本初始化重试不能覆盖较新的解除记录，完成 RPC 重放也不重新锁帖。这样创建意图之后新增的处罚也必须在新子帖开放前对齐。
 
 `kind:"deny_send"` 必须有 `target_user_id`，只禁止该 thread 下发言及新建子帖，不额外禁止正文编辑、读取、收藏、反应或标签；锁定与归档仍按各自规则禁止正文编辑。`kind:"lock"` 不填写目标用户，以 `user_id=0` 保存 thread 级外部来源。服务读取全部持久有效来源，把实际原生 `locked/archived` 投影为“原生基态或外部锁”，同步活动/归档索引、自动归档队列、搜索及网关。原生基态分别保存在 `native_locked/native_archived`；外部生效时原生管理员设置的锁/归档也保留为新基态，不能用原生 unarchive 绕过外部限制。解除一个外部来源不会清除另一个来源或原生基态。首期锁是显式解除，不接受非空 `expires_at`；用户发言处罚仍支持期限。
 
@@ -86,13 +90,15 @@ API、worker 和 integration 进程启动时恢复日志。每秒推进一个分
 - `events.auth.v1.user_invalidated`：`{event_id,occurred_at,user_id}`
 - `events.identity.v1.binding_changed`：`{event_id,occurred_at,discord_user_id,user_id,version}`
 
+管理绑定事件另含 `kind:"managed_merge"|"binding_changed",operation_id,actor_user_id,previous_discord_user_id,merged_user_id?`。消费方只有在明确管理合并上下文匹配时才迁移历史归属。普通预建或登录不会把历史别名重新选为当前身份，也不会发送缺少管理上下文的跨用户改绑事件。
+
 事件与错误响应不包含令牌、密码或证明。`INVALID_TOKEN` 和 `ACCOUNT_UNAVAILABLE` 表示鉴权失败；`UNAVAILABLE`、`STORAGE_UNAVAILABLE`、`BUSY`、`EXCHANGE_UNCERTAIN` 表示可重试的依赖/处理失败，不能作为鉴权成功。`PROOF_NOT_AVAILABLE` 表示正常登录可以继续，但不满足首次密码设置条件。
 
 ## 首次密码与验证
 
 证明绑定用途、用户和当前会话，两分钟后过期，由 `POST /users/@me/discord-password` 原子消费。原生接口核对权威会话及新鲜账户状态，保留已启用的 MFA/sudo 校验，校验新密码并轮换原生会话。普通 SSO 账户不能获得这一能力。正常外部登录不额外增加第二次 MFA。
 
-运行 `vitest run src/integration` 执行本地测试。可选真实 NATS 测试仅在设置 `INTEGRATION_LIVE_TEST_CONNECTION` 后启用；该变量指向包含 `port`、`forum_password`、`fluxer_password` 的隔离代理测试元数据 JSON。此测试使用真实消息传输和 ACL，原生仓储使用内存测试实现。离线 API 测试替换生产就绪探测，不启动 Cassandra/NATS。尚需在目标环境验证真实 Cassandra 的条件写入及完整容器启动。
+运行 `vitest run src/integration` 执行本地测试。可选真实 NATS 测试仅在设置 `INTEGRATION_LIVE_TEST_CONNECTION` 后启用；旧测试元数据包含 `port`、`forum_password`、`fluxer_password`。部署 ACL 测试另需 `isolated_test:true`、`passwords:{FORUM,BOT,SERVICE,API,WORKER,ADMIN}`、`server_user:"fluxer-integration"`、`client_user:"forum-service"`、`server_inbox_prefix:"_INBOX.integration"`，连接仅使用 `127.0.0.1`，以临时随机凭据启动独立 broker 并加载部署配置。该测试会 PURGE 两条专用测试流，只能在显式确认隔离的临时代理执行。测试使用真实消息传输和 ACL，原生仓储仍使用内存实现。离线 API 测试替换生产就绪探测，不启动 Cassandra/NATS；真实 Cassandra 条件写入及完整容器启动仍需目标环境验证。
 
 
 创建相关事件在 integration_operations 结果持久成功且原生 thread/message ID 匹配之前不发布可见快照。pending 仅保留源端跟踪；终止失败清理暂态待发和跟踪，同时保留失败哨兵防止目录对账误建作品。回滚后同 prepared ID 重试成功只投影最终权威内容，无 correlation 的原生创建不受此门槛限制。快照包含当前原生 applied tags 的 id/name/emoji；native_locked/native_archived 与 external_locked 分开，消费者不能把有效外部锁回写成原生限制。CAS 冲突必须重新读源内容，d: 资源记录保留独立版本高水位以防 s: 版本行重建降版。

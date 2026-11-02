@@ -251,6 +251,46 @@ export class IntegrationContentService {
 						});
 						if (parentAuth.channel.guildId?.toString() !== request.guild_id)
 							throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Forum belongs to another guild');
+						if (request.initial_policies?.length) {
+							if (process.env.FLUXER_THREAD_POLICY_ENABLED !== 'true')
+								throw new IntegrationError('UNAVAILABLE', 'Initial thread policies are not enabled', true);
+							for (const policy of request.initial_policies) {
+								try {
+									await new ThreadPolicyRepository().set(
+										createChannelID(BigInt(plan.thread_id)),
+										BigInt(policy.target_user_id),
+										{
+											source: policy.source,
+											kind: 'deny_send',
+											active: policy.active,
+											version: policy.policy_version,
+											expires_at: policy.expires_at ? new Date(policy.expires_at) : null,
+										},
+									);
+								} catch (error) {
+									if (error instanceof ThreadPolicyVersionConflictError)
+										throw new IntegrationError('OPERATION_CONFLICT', error.message);
+									throw error;
+								}
+							}
+							await new ThreadPolicyService().assertAllowed(
+								createChannelID(BigInt(plan.thread_id)),
+								user.id,
+								'create',
+								{initializingStarter: true},
+							);
+						}
+						if (request.defer_open) {
+							if (process.env.FLUXER_THREAD_POLICY_ENABLED !== 'true')
+								throw new IntegrationError('UNAVAILABLE', 'Initialization policies are not enabled', true);
+							await new ThreadPolicyRepository().set(createChannelID(BigInt(plan.thread_id)), 0n, {
+								source: 'forum_initializing',
+								kind: 'lock',
+								active: true,
+								version: 0,
+								expires_at: null,
+							});
+						}
 						await prepareIntegrationContentChange(createChannelID(BigInt(plan.thread_id)), {
 							guild_id: request.guild_id,
 							channel_id: request.channel_id,
@@ -268,6 +308,7 @@ export class IntegrationContentService {
 							requestCache: cache,
 							auditLogReason: `Forum operation ${request.operation_id}`,
 							preparedThreadId: createChannelID(BigInt(plan.thread_id)),
+							deferOpen: request.defer_open,
 						});
 						const state = await services.channelRepository.threads.getState(createChannelID(BigInt(plan.thread_id)));
 						return {
@@ -275,6 +316,7 @@ export class IntegrationContentService {
 							channel_id: request.channel_id,
 							thread_id: plan.thread_id,
 							message_id: plan.thread_id,
+							deferred_open: request.defer_open === true,
 							state_version: state!.stateVersion,
 							event_id: request.operation_id,
 						};

@@ -78,6 +78,34 @@ export const IntegrationSchemas = {
 		target_channel_id: IdentityId,
 	}).strict(),
 	'rpc.content.v1.thread.create_service': ServiceOperation.extend({
+		/** 新子帖初始化期间保持独立外部锁，调用方完成处罚对账后显式释放 */
+		defer_open: z.boolean().optional(),
+
+		/** 受信调用方在新帖子开放前继承的完整发言处罚快照 */
+		initial_policies: z
+			.array(
+				z
+					.object({
+						/** 独立来源，不能覆盖原生锁 */
+						source: z.string().regex(/^forum_[a-zA-Z0-9_-]{1,64}$/),
+
+						/** 来源内单调版本 */
+						policy_version: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+
+						/** 处罚目标原生用户 */
+						target_user_id: IdentityId,
+
+						/** 是否生效，撤销也保留版本 */
+						active: z.boolean(),
+
+						/** 用户处罚可有期限，空值表示永久 */
+						expires_at: VerifiedAt.nullable().optional(),
+					})
+					.strict(),
+			)
+			.max(100)
+			.optional(),
+
 		/** 创建子帖时的逻辑父讨论区，用于执行通用用户发言处罚 */
 		parent_thread_id: IdentityId.optional(),
 

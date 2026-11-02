@@ -30,6 +30,7 @@ import {
 	type ThreadView,
 } from '@app/api/channel/services/thread/ThreadMappers';
 import {withThreadParentFields} from '@app/api/channel/services/thread/ThreadParentSettings';
+import {ThreadPolicyRepository} from '@app/api/channel/services/thread/ThreadPolicyRepository';
 import {ThreadPolicyService} from '@app/api/channel/services/thread/ThreadPolicyService';
 import type {ThreadServiceContext} from '@app/api/channel/services/thread/ThreadServiceContext';
 import {loadThreadView} from '@app/api/channel/services/thread/ThreadViews';
@@ -221,6 +222,8 @@ export class ThreadCreationService {
 		auditLogReason: string | null;
 		/** 仅受信内部操作可使用持久化预分配的 ID，公开请求不接受此字段 */
 		preparedThreadId?: ChannelID;
+		/** 受信创建在首次网关事件前组合初始化外部来源 */
+		deferOpen?: boolean;
 	}): Promise<StartForumThreadResponse> {
 		const {parentAuth, user, body} = params;
 		assertAccountNotLimited(user);
@@ -239,7 +242,7 @@ export class ThreadCreationService {
 		});
 		await this.ctx.validateForumStarter({user, parentAuth, data: body.message});
 		const threadId = params.preparedThreadId ?? createChannelID(await this.ctx.snowflakeService.generate());
-		const {view, members} = await this.create({
+		let {view, members} = await this.create({
 			parent,
 			creator: {kind: 'user', user, parentAuth},
 			threadId,
@@ -253,6 +256,13 @@ export class ThreadCreationService {
 			hasStarter: true,
 			appliedTags,
 		});
+		if (params.deferOpen) {
+			const active = await new ThreadPolicyRepository().hasActiveLock(threadId);
+			const transition = await this.ctx.channelRepository.threads.projectExternalLock(threadId, active);
+			if (!transition) throw new InvalidChannelTypeError();
+			view = {...view, state: transition.state};
+			await this.ctx.archiveQueue.schedule(transition.state, view.channel.lastMessageId);
+		}
 		await dispatchThreadEvents(this.ctx.gatewayService, view.state.guildId, [
 			threadCreateEvent(view, {members, newlyCreated: true}),
 		]);

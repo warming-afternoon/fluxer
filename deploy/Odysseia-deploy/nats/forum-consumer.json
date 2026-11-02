@@ -3,7 +3,7 @@
 	"deliver_policy": "all",
 	"ack_policy": "explicit",
 	"ack_wait": 30000000000,
-	"max_deliver": 10,
+	"max_deliver": -1,
 	"filter_subject": "events.content.v1.>",
 	"replay_policy": "instant",
 	"max_ack_pending": 100,

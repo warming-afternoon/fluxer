@@ -2,8 +2,8 @@
 
 import {IntegrationRpcServer} from '@app/integration/IntegrationRpcServer';
 import type {IntegrationService} from '@app/integration/IntegrationService';
-import type {Msg, NatsConnection, SubscriptionOptions} from '@nats-io/transport-node';
 import {MissingPermissionsError} from '@fluxer/errors/src/domains/core/MissingPermissionsError';
+import type {Msg, NatsConnection, SubscriptionOptions} from '@nats-io/transport-node';
 import {describe, expect, it, vi} from 'vitest';
 
 /** 建立仅模拟传输的请求分发环境 */
@@ -54,7 +54,10 @@ describe('Integration RPC boundaries', () => {
 		await server.start();
 		const response = send('rpc.content.v1.starter.edit_service', '_INBOX.forum.one');
 		await server.stop();
-		expect(JSON.parse(response.mock.calls[0]![0])).toMatchObject({ok: false, error: {code: 'MISSING_PERMISSIONS', retryable: false}});
+		expect(JSON.parse(response.mock.calls[0]![0])).toMatchObject({
+			ok: false,
+			error: {code: 'MISSING_PERMISSIONS', retryable: false},
+		});
 	});
 
 	it('rejects malformed and oversized requests before business work', async () => {
@@ -69,6 +72,20 @@ describe('Integration RPC boundaries', () => {
 			error: {code: 'INVALID_REQUEST', retryable: false},
 		});
 		expect(JSON.parse(oversized.mock.calls[0]![0])).toMatchObject({ok: false, error: {code: 'INVALID_REQUEST'}});
+	});
+
+	it('bounds create policy snapshots separately without increasing authentication request limits', async () => {
+		const {server, send, dispatch} = fixture(10);
+		await server.start();
+		const payload = JSON.stringify({snapshot: 'x'.repeat(20_000)});
+		const accepted = send('rpc.content.v1.thread.create_service', '_INBOX.forum.create', payload);
+		const denied = send('rpc.auth.v1.session.resolve', '_INBOX.forum.auth', payload);
+		const oversized = send('rpc.content.v1.thread.create_service', '_INBOX.forum.huge', 'x'.repeat(65_537));
+		await server.stop();
+		expect(dispatch).toHaveBeenCalledOnce();
+		expect(accepted).toHaveBeenCalled();
+		expect(JSON.parse(denied.mock.calls[0]![0])).toMatchObject({error: {code: 'INVALID_REQUEST'}});
+		expect(JSON.parse(oversized.mock.calls[0]![0])).toMatchObject({error: {code: 'INVALID_REQUEST'}});
 	});
 
 	it('bounds concurrency, uses queue groups, and drains accepted work before closing', async () => {

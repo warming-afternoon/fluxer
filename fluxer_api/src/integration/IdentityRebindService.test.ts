@@ -146,7 +146,14 @@ describe('administrative identity rebind', () => {
 		await expect(service.rebind(request)).resolves.toEqual(result);
 		expect(published).toHaveBeenCalledWith(
 			'events.identity.v1.binding_changed',
-			expect.objectContaining({discord_user_id: request.discord_user_id, user_id: b.userId, merged_user_id: c.userId}),
+			expect.objectContaining({
+				kind: 'managed_merge',
+				operation_id: request.operation_id,
+				actor_user_id: admin.userId,
+				discord_user_id: request.discord_user_id,
+				user_id: b.userId,
+				merged_user_id: c.userId,
+			}),
 			{eventId: `${request.operation_id}:binding`},
 		);
 		for (const id of [b.userId, c.userId])

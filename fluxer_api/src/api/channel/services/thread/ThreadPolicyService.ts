@@ -9,12 +9,18 @@ export class ThreadPolicyService {
 	constructor(private readonly repository = new ThreadPolicyRepository()) {}
 
 	/** 处罚仅禁止发言和新建子帖，锁额外禁止正文编辑 */
-	async assertAllowed(channelId: ChannelID, userId: UserID, action: 'send' | 'create' | 'edit'): Promise<void> {
+	async assertAllowed(
+		channelId: ChannelID,
+		userId: UserID,
+		action: 'send' | 'create' | 'edit',
+		{initializingStarter = false}: {initializingStarter?: boolean} = {},
+	): Promise<void> {
 		if (process.env.FLUXER_THREAD_POLICY_ENABLED !== 'true') return;
 		const policies = await this.repository.list(channelId, userId);
 		const now = Date.now();
 		for (const policy of policies) {
 			if (!policy.active || (policy.expires_at && policy.expires_at.getTime() <= now)) continue;
+			if (initializingStarter && policy.source === 'forum_initializing' && policy.kind === 'lock') continue;
 			if (policy.kind === 'lock' || action !== 'edit') throw new MissingPermissionsError();
 		}
 	}

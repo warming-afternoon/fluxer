@@ -377,4 +377,157 @@ describe('restricted content RPC native business paths', () => {
 			.execute();
 		expect(await repository.threads.listActiveThreads(createGuildID(BigInt(guild.id)))).toHaveLength(1);
 	});
+
+	it('persists inherited user penalties before the native channel exists and refuses a muted creator before publishing a thread', async () => {
+		const {owner, members, guild} = await setupTestGuildWithMembers(harness, 1);
+		const target = members[0]!;
+		await ensureSessionStarted(harness, owner.token);
+		await ensureSessionStarted(harness, target.token);
+		const forum = await threadsRequest<{id: string}>(harness, owner.token)
+			.post(`/guilds/${guild.id}/channels`)
+			.body({name: 'inherited', type: ChannelTypes.GUILD_FORUM})
+			.execute();
+		vi.stubEnv('INTEGRATION_GUILD_ID', guild.id);
+		vi.stubEnv(
+			'INTEGRATION_FORUM_CHANNEL_IDS',
+			[forum.id, '111111111111111111', '222222222222222222', '333333333333333333'].join(','),
+		);
+		vi.stubEnv('FLUXER_THREAD_POLICY_ENABLED', 'true');
+		const stored: Array<{channel: bigint; user: bigint; policy: ThreadPolicy}> = [];
+		vi.spyOn(ThreadPolicyRepository.prototype, 'set').mockImplementation(async (channel, user, policy) => {
+			expect(await new ChannelRepository().channelData.findUnique(channel)).toBeNull();
+			stored.push({channel, user, policy});
+		});
+		vi.spyOn(ThreadPolicyRepository.prototype, 'list').mockImplementation(async (channel, user) =>
+			stored
+				.filter((item) => item.channel === channel && (item.user === user || item.user === 0n))
+				.map((item) => item.policy),
+		);
+		const operations = new MemoryOperations();
+		const service = new IntegrationContentService(createApiContext(), operations);
+		const request = {
+			version: 1,
+			request_id: 'request_inherited_policy',
+			operation_id: 'operation_inherited_policy',
+			actor_user_id: owner.userId,
+			guild_id: guild.id,
+			channel_id: forum.id,
+			name: 'inherited policy post',
+			content: 'body',
+			initial_policies: [
+				{source: 'forum_work_mute', policy_version: 1, target_user_id: target.userId, active: true, expires_at: null},
+			],
+		};
+		const created = (await service.dispatch('rpc.content.v1.thread.create_service', request)) as {thread_id: string};
+		await threadsRequest(harness, target.token)
+			.post(`/channels/${created.thread_id}/messages`)
+			.body({content: 'blocked'})
+			.expect(403)
+			.execute();
+		await expect(
+			service.dispatch('rpc.content.v1.thread.create_service', {
+				...request,
+				operation_id: 'operation_muted_creator',
+				initial_policies: [{...request.initial_policies[0], target_user_id: owner.userId}],
+			}),
+		).rejects.toMatchObject({code: 'MISSING_PERMISSIONS'});
+		const failedPlan = JSON.parse(operations.records.get('operation_muted_creator')!.payload).operation_plan;
+		expect(
+			await new ChannelRepository().channelData.findUnique(createChannelID(BigInt(failedPlan.thread_id))),
+		).toBeNull();
+		expect(operations.resources.size).toBe(0);
+	});
+
+	it('keeps a nonmoderator child closed through initialization, permits only its internal starter, and never reopens or relocks on RPC replay', async () => {
+		const {owner, members, guild} = await setupTestGuildWithMembers(harness, 1);
+		const creator = members[0]!;
+		await ensureSessionStarted(harness, creator.token);
+		const forum = await threadsRequest<{id: string}>(harness, owner.token)
+			.post(`/guilds/${guild.id}/channels`)
+			.body({name: 'deferred', type: ChannelTypes.GUILD_FORUM})
+			.execute();
+		vi.stubEnv('INTEGRATION_GUILD_ID', guild.id);
+		vi.stubEnv(
+			'INTEGRATION_FORUM_CHANNEL_IDS',
+			[forum.id, '111111111111111111', '222222222222222222', '333333333333333333'].join(','),
+		);
+		vi.stubEnv('FLUXER_THREAD_POLICY_ENABLED', 'true');
+		const policies = new Map<string, ThreadPolicy>();
+		const policyChannels = new Map<string, bigint>();
+		vi.spyOn(ThreadPolicyRepository.prototype, 'set').mockImplementation(async (channel, _user, policy) => {
+			if ((policies.get(policy.source)?.version ?? -1) < policy.version) {
+				policies.set(policy.source, policy);
+				policyChannels.set(policy.source, channel);
+			}
+		});
+		vi.spyOn(ThreadPolicyRepository.prototype, 'list').mockImplementation(async (channel) =>
+			[...policies.values()].filter((policy) => policyChannels.get(policy.source) === channel),
+		);
+		vi.spyOn(ThreadPolicyRepository.prototype, 'hasActiveLock').mockImplementation(async (channel) =>
+			[...policies.values()].some(
+				(policy) => policyChannels.get(policy.source) === channel && policy.active && policy.kind === 'lock',
+			),
+		);
+		const service = new IntegrationContentService(createApiContext(), new MemoryOperations());
+		const request = {
+			version: 1,
+			request_id: 'request_deferred_create',
+			operation_id: 'operation_deferred_create',
+			actor_user_id: creator.userId,
+			guild_id: guild.id,
+			channel_id: forum.id,
+			name: 'closed until synchronized',
+			content: 'complete starter body',
+			defer_open: true,
+		};
+		const created = (await service.dispatch('rpc.content.v1.thread.create_service', request)) as {
+			thread_id: string;
+			deferred_open: boolean;
+		};
+		expect(created.deferred_open).toBe(true);
+		const repository = new ChannelRepository();
+		expect(await repository.threads.getState(createChannelID(BigInt(created.thread_id)))).toMatchObject({
+			locked: true,
+			archived: true,
+			externalLocked: true,
+			nativeLocked: false,
+			nativeArchived: false,
+		});
+		expect(
+			(
+				await repository.messages.getMessage(
+					createChannelID(BigInt(created.thread_id)),
+					BigInt(created.thread_id) as never,
+				)
+			)?.content,
+		).toBe(request.content);
+		const blocked = await threadsRequest(harness, creator.token)
+			.post(`/channels/${created.thread_id}/messages`)
+			.body({content: 'not open yet'})
+			.expect(400)
+			.execute();
+		expect(blocked).toMatchObject({code: 'THREAD_LOCKED'});
+		await service.dispatch('rpc.content.v1.thread.policy_service', {
+			version: 1,
+			request_id: 'request_release_initial',
+			operation_id: 'operation_release_initial',
+			actor_user_id: creator.userId,
+			guild_id: guild.id,
+			thread_id: created.thread_id,
+			kind: 'lock',
+			source: 'forum_initializing',
+			policy_version: 1,
+			active: false,
+		});
+		await threadsRequest(harness, creator.token)
+			.post(`/channels/${created.thread_id}/messages`)
+			.body({content: 'now open'})
+			.execute();
+		await service.dispatch('rpc.content.v1.thread.create_service', request);
+		expect(await repository.threads.getState(createChannelID(BigInt(created.thread_id)))).toMatchObject({
+			locked: false,
+			archived: false,
+			externalLocked: false,
+		});
+	});
 });

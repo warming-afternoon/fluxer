@@ -45,6 +45,9 @@ export class IdentityRebindService {
 		await publishIntegrationEvent(
 			'events.identity.v1.binding_changed',
 			{
+				kind: plan.merged_user_id ? 'managed_merge' : 'binding_changed',
+				operation_id: operationId,
+				actor_user_id: plan.actor_user_id,
 				discord_user_id: plan.discord_user_id,
 				previous_discord_user_id: plan.previous_discord_user_id,
 				user_id: plan.user_id,

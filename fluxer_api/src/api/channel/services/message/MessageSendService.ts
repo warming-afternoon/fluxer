@@ -277,9 +277,12 @@ export class MessageSendService {
 		return {canEmbedLinks, canMentionEveryone, canAttachFiles};
 	}
 
-	private assertThreadSendAllowed(authChannel: AuthenticatedChannel): void {
+	private assertThreadSendAllowed(authChannel: AuthenticatedChannel, forumStarter = false): void {
 		if (authChannel.thread) {
-			assertThreadAllowed(threadWriteBlock('send', authChannel.thread.actor));
+			const {state, actor} = authChannel.thread;
+			const initializing = forumStarter && state.externalLocked && !state.nativeLocked && !state.nativeArchived;
+			const effective = initializing ? {...actor, thread: {...actor.thread, locked: false, archived: false}} : actor;
+			assertThreadAllowed(threadWriteBlock('send', effective));
 		}
 	}
 
@@ -665,8 +668,9 @@ export class MessageSendService {
 		const slowmodeBypass = needsSlowmodeCheck ? await hasPermission(Permissions.BYPASS_SLOWMODE) : false;
 		const slowmodeKey = needsSlowmodeCheck && !slowmodeBypass ? `slowmode:${channelId}:${user.id}` : null;
 		ensureTextChannel(channel);
-		this.assertThreadSendAllowed(authChannel);
-		if (authChannel.thread) await new ThreadPolicyService().assertAllowed(channelId, user.id, 'send');
+		this.assertThreadSendAllowed(authChannel, !!forumStarter);
+		if (authChannel.thread)
+			await new ThreadPolicyService().assertAllowed(channelId, user.id, 'send', {initializingStarter: !!forumStarter});
 		const isForwardMessage = this.ensureMessageRequestIsValid({user, data, guildFeatures: guild?.features ?? null});
 		this.deps.embedAttachmentResolver.validateAttachmentReferences({
 			embeds: data.embeds,

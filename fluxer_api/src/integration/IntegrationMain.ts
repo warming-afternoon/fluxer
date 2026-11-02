@@ -22,7 +22,7 @@ import {
 import {initializeSearch, shutdownSearch} from '@app/api/SearchFactory';
 import {JetStreamWorkerQueue} from '@app/api/worker/JetStreamWorkerQueue';
 import {WorkerService} from '@app/api/worker/WorkerService';
-import {shutdownIntegrationEvents} from '@app/integration/IntegrationEvents';
+import {shutdownIntegrationEvents, startIntegrationEvents} from '@app/integration/IntegrationEvents';
 import {IntegrationExchangeRepository} from '@app/integration/IntegrationExchangeRepository';
 import {IntegrationHealthServer} from '@app/integration/IntegrationHealthServer';
 import {IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
@@ -90,6 +90,7 @@ export async function startIntegrationMain(): Promise<() => Promise<void>> {
 		const limits = getLimitConfigService();
 		cleanups.push(() => limits.shutdown(), shutdownVoiceResources, shutdownIntegrationEvents);
 		await limits.initialize();
+		startIntegrationEvents();
 		limits.setAsGlobalInstance();
 		cleanups.push(shutdownSearch);
 		await initializeSearch(getCacheService());

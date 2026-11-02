@@ -9,6 +9,10 @@ import {fetchOne} from '@app/api/database/CassandraQueryExecution';
 import type {AttachmentLookupRow, MessageRow} from '@app/api/database/types/MessageTypes';
 import type {Message} from '@app/api/models/Message';
 import {AttachmentLookup} from '@app/api/Tables';
+import {
+	finishIntegrationContentChange,
+	prepareIntegrationContentChange,
+} from '@app/integration/IntegrationContentHooks';
 
 export interface UpsertMessageOptions {
 	isInsert?: boolean;
@@ -51,6 +55,7 @@ export class MessageRepository {
 	}
 
 	async upsertMessage(data: MessageRow, oldData?: MessageRow | null, opts?: UpsertMessageOptions): Promise<Message> {
+		await prepareIntegrationContentChange(data.channel_id);
 		const message = await this.dataRepo.upsertMessage(data, oldData);
 		if (!oldData && !opts?.skipParentLastMessageId) {
 			await this.channelDataRepo.updateLastMessageId(
@@ -59,6 +64,7 @@ export class MessageRepository {
 				opts?.isInsert ? {isInsert: true} : undefined,
 			);
 		}
+		await finishIntegrationContentChange(data.channel_id);
 		return message;
 	}
 
@@ -68,15 +74,25 @@ export class MessageRepository {
 		authorId: UserID,
 		pinnedTimestamp?: Date,
 	): Promise<void> {
-		return this.deletionRepo.deleteMessage(channelId, messageId, authorId, pinnedTimestamp);
+		await prepareIntegrationContentChange(channelId, undefined, messageId.toString() === channelId.toString());
+		await this.deletionRepo.deleteMessage(channelId, messageId, authorId, pinnedTimestamp);
+		await finishIntegrationContentChange(channelId);
 	}
 
 	async bulkDeleteMessages(channelId: ChannelID, messageIds: Array<MessageID>): Promise<void> {
-		return this.deletionRepo.bulkDeleteMessages(channelId, messageIds);
+		await prepareIntegrationContentChange(
+			channelId,
+			undefined,
+			messageIds.some((id) => id.toString() === channelId.toString()),
+		);
+		await this.deletionRepo.bulkDeleteMessages(channelId, messageIds);
+		await finishIntegrationContentChange(channelId);
 	}
 
 	async deleteAllChannelMessages(channelId: ChannelID): Promise<void> {
-		return this.deletionRepo.deleteAllChannelMessages(channelId);
+		await prepareIntegrationContentChange(channelId, undefined, true);
+		await this.deletionRepo.deleteAllChannelMessages(channelId);
+		await finishIntegrationContentChange(channelId);
 	}
 
 	async listMessagesByAuthor(
@@ -93,7 +109,9 @@ export class MessageRepository {
 	}
 
 	async anonymizeMessage(channelId: ChannelID, messageId: MessageID, newAuthorId: UserID): Promise<void> {
-		return this.authorRepo.anonymizeMessage(channelId, messageId, newAuthorId);
+		await prepareIntegrationContentChange(channelId);
+		await this.authorRepo.anonymizeMessage(channelId, messageId, newAuthorId);
+		await finishIntegrationContentChange(channelId);
 	}
 
 	async lookupAttachmentByChannelAndFilename(
@@ -110,6 +128,8 @@ export class MessageRepository {
 	}
 
 	async updateEmbeds(message: Message): Promise<void> {
-		return this.dataRepo.updateEmbeds(message);
+		await prepareIntegrationContentChange(message.channelId);
+		await this.dataRepo.updateEmbeds(message);
+		await finishIntegrationContentChange(message.channelId);
 	}
 }

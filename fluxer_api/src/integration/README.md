@@ -93,3 +93,6 @@ API、worker 和 integration 进程启动时恢复日志。每秒推进一个分
 证明绑定用途、用户和当前会话，两分钟后过期，由 `POST /users/@me/discord-password` 原子消费。原生接口核对权威会话及新鲜账户状态，保留已启用的 MFA/sudo 校验，校验新密码并轮换原生会话。普通 SSO 账户不能获得这一能力。正常外部登录不额外增加第二次 MFA。
 
 运行 `vitest run src/integration` 执行本地测试。可选真实 NATS 测试仅在设置 `INTEGRATION_LIVE_TEST_CONNECTION` 后启用；该变量指向包含 `port`、`forum_password`、`fluxer_password` 的隔离代理测试元数据 JSON。此测试使用真实消息传输和 ACL，原生仓储使用内存测试实现。离线 API 测试替换生产就绪探测，不启动 Cassandra/NATS。尚需在目标环境验证真实 Cassandra 的条件写入及完整容器启动。
+
+
+创建相关事件在 integration_operations 结果持久成功且原生 thread/message ID 匹配之前不发布可见快照。pending 仅保留源端跟踪；终止失败清理暂态待发和跟踪，同时保留失败哨兵防止目录对账误建作品。回滚后同 prepared ID 重试成功只投影最终权威内容，无 correlation 的原生创建不受此门槛限制。快照包含当前原生 applied tags 的 id/name/emoji；native_locked/native_archived 与 external_locked 分开，消费者不能把有效外部锁回写成原生限制。CAS 冲突必须重新读源内容，d: 资源记录保留独立版本高水位以防 s: 版本行重建降版。

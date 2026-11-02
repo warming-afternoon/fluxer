@@ -2,6 +2,7 @@
 
 import {createHash, randomUUID} from 'node:crypto';
 import {Logger} from '@app/api/Logger';
+import {IntegrationCreationEventGate} from '@app/integration/IntegrationCreationEventGate';
 import {IntegrationEventJournal, type JournalEvent} from '@app/integration/IntegrationEventJournal';
 import {INTEGRATION_QUERY_OPTIONS} from '@app/integration/IntegrationIdentityRepository';
 import {IntegrationReconciliation} from '@app/integration/IntegrationReconciliation';
@@ -21,6 +22,33 @@ const trackedCursors = new Map<number, string>();
 /** 只有远端持久确认才移除待发事件，会话撤销必须先观察到权威失效 */
 async function deliver(event: JournalEvent): Promise<void> {
 	const data = JSON.parse(event.payload) as Record<string, unknown>;
+	if (event.subject.startsWith('events.content.v1.') && typeof data.creation_operation_id === 'string') {
+		const status = await new IntegrationCreationEventGate().status(data.creation_operation_id, String(data.thread_id));
+		if (status === 'pending') return;
+		if (status === 'failed') {
+			await new IntegrationEventJournal().failCreation(`thread:${data.thread_id}`, data.creation_operation_id);
+			return;
+		}
+		// 升级前已排队的暂态快照不能在创建提交后被当作最终结果发布。
+		if (data.creation_completed !== true) {
+			const journal = new IntegrationEventJournal();
+			const resource = await journal.resource(`thread:${data.thread_id}`);
+			if (!resource) throw new Error('Creation snapshot is missing its durable resource context');
+			const {projectIntegrationContent} = await import('@app/integration/IntegrationContentEvents');
+			await projectIntegrationContent(
+				resource as unknown as import('@app/integration/IntegrationContentEvents').ContentResource,
+			);
+			await journal.acknowledge(event);
+			return;
+		}
+	}
+	if (event.subject.startsWith('events.content.v1.') && Number.isSafeInteger(data.state_version)) {
+		const journal = new IntegrationEventJournal();
+		if (await journal.superseded(event, `thread:${data.thread_id}`, Number(data.state_version))) {
+			await journal.acknowledge(event);
+			return;
+		}
+	}
 	if (event.subject === 'events.auth.v1.session_invalidated') {
 		const state = await getClient().execute(
 			'SELECT user_id, created_at FROM auth_sessions WHERE session_id_hash = ?',
@@ -52,15 +80,19 @@ export async function recoverIntegrationEventsPage(): Promise<void> {
 	shard = (shard + 1) % 16;
 	const journal = new IntegrationEventJournal();
 	const pending = await journal.pending(current, pendingCursors.get(current));
+	let completedKey = pendingCursors.get(current) ?? 'p:';
+	let interrupted = false;
 	for (const event of pending) {
 		try {
 			await deliver(event);
+			completedKey = event.key;
 		} catch (error) {
 			Logger.warn({err: error, subject: event.subject}, 'Durable integration event remains pending');
+			interrupted = true;
 			break;
 		}
 	}
-	pendingCursors.set(current, pending.length === 100 ? pending[pending.length - 1]!.key : 'p:');
+	pendingCursors.set(current, interrupted || pending.length === 100 ? completedKey : 'p:');
 	const tracked = await journal.tracked(current, trackedCursors.get(current));
 	const {projectIntegrationContent} = await import('@app/integration/IntegrationContentEvents');
 	for (const entry of tracked) {
@@ -100,12 +132,13 @@ export async function publishIntegrationEvent(
 	data: Record<string, string | number>,
 	options: {defer?: boolean; eventId?: string} = {},
 ): Promise<void> {
-	if (!process.env.INTEGRATION_NATS_URL || stopped) return;
+	if (!process.env.INTEGRATION_NATS_URL) return;
 	const stable = data.session_id_hash || data.authority_version !== undefined;
 	const eventId =
 		options.eventId ??
 		(stable ? createHash('sha256').update(JSON.stringify({subject, data})).digest('hex') : randomUUID());
 	await new IntegrationEventJournal().enqueue(subject, data, eventId);
+	if (stopped) return;
 	startIntegrationEvents();
 	if (!options.defer) {
 		try {

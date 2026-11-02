@@ -25,21 +25,35 @@ export class IntegrationEventJournal {
 		const shard = digest[0]! % 16;
 		const key = `s:${resource}`;
 		const fingerprint = createHash('sha256').update(JSON.stringify({subject, data})).digest('hex');
-		await getClient().execute(
-			'INSERT INTO integration_event_journal (shard, entry_key, version) VALUES (?, ?, ?) IF NOT EXISTS',
-			[shard, key, 0n],
+		const tracked = await getClient().execute(
+			'SELECT version FROM integration_event_journal WHERE shard = ? AND entry_key = ?',
+			[shard, `d:${resource}`],
 			INTEGRATION_QUERY_OPTIONS,
 		);
-		for (let attempt = 0; attempt < 20; attempt++) {
+		const highWater = BigInt(tracked.first()?.version?.toString() ?? '0');
+		await getClient().execute(
+			'INSERT INTO integration_event_journal (shard, entry_key, version) VALUES (?, ?, ?) IF NOT EXISTS',
+			[shard, key, highWater],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		{
 			const response = await getClient().execute(
 				'SELECT version, fingerprint FROM integration_event_journal WHERE shard = ? AND entry_key = ?',
 				[shard, key],
 				INTEGRATION_QUERY_OPTIONS,
 			);
 			const previous = response.first();
-			if (previous?.fingerprint === fingerprint) return;
 			const version = BigInt(previous?.version?.toString() ?? '0');
-			const next = version + 1n;
+			if (previous?.fingerprint === fingerprint && version >= highWater) {
+				if (version > highWater)
+					await getClient().execute(
+						'UPDATE integration_event_journal SET version = ? WHERE shard = ? AND entry_key = ? IF version = ?',
+						[version, shard, `d:${resource}`, tracked.first()?.version ?? null],
+						INTEGRATION_QUERY_OPTIONS,
+					);
+				return;
+			}
+			const next = (version > highWater ? version : highWater) + 1n;
 			const eventId = `${resource}:${next}`;
 			const payload = JSON.stringify({
 				...data,
@@ -48,13 +62,14 @@ export class IntegrationEventJournal {
 				occurred_at: new Date().toISOString(),
 			});
 			const result = await getClient().execute(
-				'BEGIN BATCH UPDATE integration_event_journal SET version = ?, fingerprint = ? WHERE shard = ? AND entry_key = ? IF version = ?; INSERT INTO integration_event_journal (shard, entry_key, subject, payload) VALUES (?, ?, ?, ?); APPLY BATCH',
-				[next, fingerprint, shard, key, version, shard, `p:${eventId}`, subject, payload],
+				'BEGIN BATCH UPDATE integration_event_journal SET version = ?, fingerprint = ? WHERE shard = ? AND entry_key = ? IF version = ?; INSERT INTO integration_event_journal (shard, entry_key, subject, payload) VALUES (?, ?, ?, ?); UPDATE integration_event_journal SET version = ? WHERE shard = ? AND entry_key = ?; APPLY BATCH',
+				[next, fingerprint, shard, key, version, shard, `p:${eventId}`, subject, payload, next, shard, `d:${resource}`],
 				INTEGRATION_QUERY_OPTIONS,
 			);
 			if (result.first()?.['[applied]'] === true) return;
+			// CAS 冲突后必须重新读取原生快照，不能给旧正文分配更大的事件版本。
+			throw new Error('Integration snapshot CAS conflict; reread authoritative content');
 		}
-		throw new Error('Integration snapshot changed too frequently; reconciliation will retry');
 	}
 
 	/** 在返回调用方前持久化认证事件，失败不能静默退化为尽力发布 */
@@ -92,9 +107,24 @@ export class IntegrationEventJournal {
 		);
 	}
 
+	/** 完整快照允许合并旧待发版本，版本记录缺失则保留待发而不是降级发送 */
+	async superseded(event: JournalEvent, resource: string, version: number): Promise<boolean> {
+		const response = await getClient().execute(
+			'SELECT version FROM integration_event_journal WHERE shard = ? AND entry_key = ?',
+			[event.shard, `s:${resource}`],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		const current = response.first()?.version;
+		if (current == null || BigInt(current.toString()) < BigInt(version))
+			throw new Error('Integration event version authority is missing or regressed');
+		return BigInt(current.toString()) > BigInt(version);
+	}
+
 	/** 业务写入前记录可重读资源，崩溃恢复不依赖已成功发送的网关事件 */
 	async track(resource: string, data: Record<string, unknown>): Promise<void> {
 		const shard = createHash('sha256').update(resource).digest()[0]! % 16;
+		// 终止失败的创建不再进入持续跟踪，目录对账也不能把遗留线程当独立创建。
+		if ((await this.resource(resource))?.creation_failed === true) return;
 		for (let attempt = 0; attempt < 20; attempt++) {
 			const response = await getClient().execute(
 				'SELECT payload FROM integration_event_journal WHERE shard = ? AND entry_key = ?',
@@ -142,6 +172,35 @@ export class IntegrationEventJournal {
 			INTEGRATION_QUERY_OPTIONS,
 		);
 		const payload = result.first()?.payload;
-		return typeof payload === 'string' ? JSON.parse(payload) : null;
+		if (typeof payload === 'string') return JSON.parse(payload);
+		const state = await getClient().execute(
+			'SELECT payload FROM integration_event_journal WHERE shard = ? AND entry_key = ?',
+			[shard, `s:${resource}`],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		const marker = state.first()?.payload;
+		return typeof marker === 'string' ? JSON.parse(marker) : null;
+	}
+
+	/** 终止创建先保留失败哨兵，再清除暂态待发与跟踪，独立版本记录始终保留 */
+	async failCreation(resource: string, operationId: string): Promise<void> {
+		const shard = createHash('sha256').update(resource).digest()[0]! % 16;
+		const intent = await this.resource(resource);
+		if (intent?.creation_operation_id !== operationId) throw new Error('Creation cleanup correlation mismatch');
+		await getClient().execute(
+			'UPDATE integration_event_journal SET payload = ? WHERE shard = ? AND entry_key = ?',
+			[JSON.stringify({creation_operation_id: operationId, creation_failed: true}), shard, `s:${resource}`],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		await getClient().execute(
+			'DELETE FROM integration_event_journal WHERE shard = ? AND entry_key >= ? AND entry_key < ?',
+			[shard, `p:${resource}:`, `p:${resource};`],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		await getClient().execute(
+			'DELETE FROM integration_event_journal WHERE shard = ? AND entry_key = ?',
+			[shard, `d:${resource}`],
+			INTEGRATION_QUERY_OPTIONS,
+		);
 	}
 }

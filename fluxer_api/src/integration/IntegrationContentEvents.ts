@@ -5,6 +5,7 @@ import {type ChannelID, channelIdToMessageId, createChannelID} from '@app/api/Br
 import {ChannelRepository} from '@app/api/channel/ChannelRepository';
 import {Logger} from '@app/api/Logger';
 import {getCacheService} from '@app/api/middleware/ServiceSingletons';
+import {IntegrationCreationEventGate} from '@app/integration/IntegrationCreationEventGate';
 import {IntegrationEventJournal} from '@app/integration/IntegrationEventJournal';
 
 export interface ContentResource {
@@ -63,8 +64,17 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 	try {
 		const repository = new ChannelRepository();
 		const intent = await new IntegrationEventJournal().resource(`thread:${resource.thread_id}`);
+		if (intent?.creation_failed === true) return;
 		const deletingIntent = !!resource.deleting || intent?.deleting === true;
 		const creationOperationId = resource.creation_operation_id ?? intent?.creation_operation_id ?? null;
+		if (typeof creationOperationId === 'string') {
+			const status = await new IntegrationCreationEventGate().status(creationOperationId, resource.thread_id);
+			if (status === 'pending') return;
+			if (status === 'failed') {
+				await new IntegrationEventJournal().failCreation(`thread:${resource.thread_id}`, creationOperationId);
+				return;
+			}
+		}
 		const threadId = createChannelID(BigInt(resource.thread_id));
 		const state = await repository.threads.getState(threadId);
 		if (!state && !deletingIntent) return;
@@ -92,6 +102,8 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 			});
 		}
 		const stats = state ? await repository.threads.getStats(threadId) : null;
+		const parentConfig = state ? await repository.threads.getParentConfig(state.guildId, state.parentId) : null;
+		const appliedIds = new Set((state?.appliedTags ?? []).map((id) => id.toString()));
 		const snapshot = {
 			title: channel?.name ?? '',
 			body: starter?.content ?? '',
@@ -106,6 +118,18 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 			reply_count: Math.max(0, (stats?.messageCount ?? 0) - (state?.hasStarter ? 1 : 0)),
 			archived: state?.archived ?? false,
 			locked: state?.locked ?? false,
+			native_locked: state?.nativeLocked ?? state?.locked ?? false,
+			native_archived: state?.nativeArchived ?? state?.archived ?? false,
+			external_locked: state?.externalLocked ?? false,
+			tags: (parentConfig?.availableTags ?? [])
+				.filter((tag) => appliedIds.has(tag.id.toString()))
+				.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+				.map((tag) => ({
+					id: tag.id.toString(),
+					name: tag.name,
+					moderated: tag.moderated,
+					emoji: {id: tag.emojiId?.toString() ?? null, name: tag.emojiName},
+				})),
 		};
 		if (!(await cache.extendLock(lockKey, lease, 60))) throw new Error('Integration projection lease expired');
 		await new IntegrationEventJournal().snapshot(
@@ -117,6 +141,7 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 				channel_id: state?.parentId.toString() ?? resource.channel_id,
 				thread_id: resource.thread_id,
 				creation_operation_id: creationOperationId,
+				...(creationOperationId ? {creation_completed: true} : {}),
 				snapshot,
 			},
 		);

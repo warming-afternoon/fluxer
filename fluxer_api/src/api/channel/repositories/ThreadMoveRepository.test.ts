@@ -201,6 +201,132 @@ describe('跨论坛移动的持久索引与恢复', () => {
 		expect(rows[0]?.parent_id).toBe(target);
 	});
 
+	it.each(['leave', 'rejoin', 'rejoin-source'] as const)('迟到旧加入反向目录按当前成员收敛：%s', async (mode) => {
+		const joining = createUserID(1900000000000000099n);
+		const getMembers = repository.threads.getMembers.bind(repository.threads);
+		vi.spyOn(repository.threads, 'getMembers').mockImplementationOnce(async (id, users) => {
+			const result = await getMembers(id, users);
+			await moves.move({threadId: thread, sourceParentId: source, targetParentId: target, appliedTags: []});
+			return result;
+		});
+		const execute = executor.executeBatch.bind(executor);
+		let injected = false;
+		let newJoin: Date | undefined;
+		vi.spyOn(executor, 'executeBatch').mockImplementation(async (queries, atomic) => {
+			if (
+				!injected &&
+				queries.some(
+					(query) =>
+						query.meta?.table.name === 'thread_members_by_user' &&
+						query.meta.action === 'upsert' &&
+						(query.params as {user_id?: bigint}).user_id === joining &&
+						(query.params as {parent_id?: bigint}).parent_id === source,
+				)
+			) {
+				injected = true;
+				await repository.threads.removeMembers(thread, [joining]);
+				if (mode !== 'leave') {
+					if (mode === 'rejoin-source')
+						await moves.move({threadId: thread, sourceParentId: target, targetParentId: source, appliedTags: []});
+					await new Promise((resolve) => setTimeout(resolve, 5));
+					await repository.threads.addMembers(thread, [{userId: joining, flags: 0}]);
+					newJoin = (await repository.threads.getMember(thread, joining))!.joinTimestamp;
+				}
+			}
+			await execute(queries, atomic);
+		});
+		await repository.threads.addMembers(thread, [{userId: joining, flags: 0}]);
+		expect(injected).toBe(true);
+		const member = await repository.threads.getMember(thread, joining);
+		const reverse = await fetchMany(
+			ThreadMembersByUser.select({where: ThreadMembersByUser.where.eq('user_id')}).bind({user_id: joining}),
+		);
+		if (mode === 'leave') {
+			expect(member).toBeNull();
+			expect(reverse).toEqual([]);
+		} else {
+			expect(member?.joinTimestamp).toEqual(newJoin);
+			expect(member?.parentId).toBe(mode === 'rejoin-source' ? source : target);
+			expect(reverse.map((row) => row.parent_id)).toEqual([member!.parentId]);
+		}
+	});
+
+	it('清理旧位置期间移回原论坛，重读后补回合法的当前目录', async () => {
+		const joining = createUserID(1900000000000000098n);
+		const getMembers = repository.threads.getMembers.bind(repository.threads);
+		vi.spyOn(repository.threads, 'getMembers').mockImplementationOnce(async (id, users) => {
+			const result = await getMembers(id, users);
+			await moves.move({threadId: thread, sourceParentId: source, targetParentId: target, appliedTags: []});
+			return result;
+		});
+		const execute = executor.executeBatch.bind(executor);
+		let injected = false;
+		vi.spyOn(executor, 'executeBatch').mockImplementation(async (queries, atomic) => {
+			if (
+				!injected &&
+				queries.some(
+					(query) =>
+						query.meta?.table.name === 'thread_members_by_user' &&
+						query.meta.action === 'delete' &&
+						(query.params as {user_id?: bigint}).user_id === joining &&
+						(query.params as {parent_id?: bigint}).parent_id === source,
+				)
+			) {
+				injected = true;
+				await moves.move({threadId: thread, sourceParentId: target, targetParentId: source, appliedTags: []});
+			}
+			await execute(queries, atomic);
+		});
+		await repository.threads.addMembers(thread, [{userId: joining, flags: 0}]);
+		expect(injected).toBe(true);
+		expect((await repository.threads.getMember(thread, joining))?.parentId).toBe(source);
+		const reverse = await fetchMany(
+			ThreadMembersByUser.select({where: ThreadMembersByUser.where.eq('user_id')}).bind({user_id: joining}),
+		);
+		expect(reverse.map((row) => row.parent_id)).toEqual([source]);
+	});
+
+	it('删除期间迟到的目标反向目录按全部已观察位置清理', async () => {
+		const joining = createUserID(1900000000000000097n);
+		const getMembers = repository.threads.getMembers.bind(repository.threads);
+		vi.spyOn(repository.threads, 'getMembers').mockImplementationOnce(async (id, users) => {
+			const result = await getMembers(id, users);
+			await moves.move({threadId: thread, sourceParentId: source, targetParentId: target, appliedTags: []});
+			return result;
+		});
+		const execute = executor.executeBatch.bind(executor);
+		let injected = false;
+		vi.spyOn(executor, 'executeBatch').mockImplementation(async (queries, atomic) => {
+			if (
+				!injected &&
+				queries.some(
+					(query) =>
+						query.meta?.table.name === 'thread_members_by_user' &&
+						query.meta.action === 'upsert' &&
+						(query.params as {user_id?: bigint}).user_id === joining &&
+						(query.params as {parent_id?: bigint}).parent_id === target,
+				)
+			) {
+				injected = true;
+				const state = (await repository.threads.getState(thread))!;
+				await repository.threads.beginDelete(thread, state.stateVersion, 'late-target-repair-delete');
+				await repository.threads.markDeleteDispatched(thread, 'late-target-repair-delete');
+				await repository.threads.purgeThread(thread);
+			}
+			await execute(queries, atomic);
+		});
+		await expect(repository.threads.addMembers(thread, [{userId: joining, flags: 0}])).rejects.toBeInstanceOf(
+			UnknownChannelError,
+		);
+		expect(injected).toBe(true);
+		expect(await repository.threads.getState(thread)).toBeNull();
+		expect(await repository.threads.getMember(thread, joining)).toBeNull();
+		const reverse = await fetchMany(
+			ThreadMembersByUser.select({where: ThreadMembersByUser.where.eq('user_id')}).bind({user_id: joining}),
+		);
+		expect(reverse).toEqual([]);
+	});
+
 	it('外部锁投影真实归档状态，解除后恢复原先活动状态', async () => {
 		const locked = await repository.threads.projectExternalLock(thread, true);
 		expect(locked?.state.locked).toBe(true);

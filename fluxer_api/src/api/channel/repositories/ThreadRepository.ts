@@ -830,49 +830,92 @@ export class ThreadRepository {
 		rows: Array<ThreadMemberRow>,
 		fallback: ThreadState,
 	): Promise<ThreadState> {
-		let state = fallback;
+		const knownParents = new Map(rows.map((row) => [row.user_id, new Set([row.parent_id])]));
+		const knownTypes = new Set([fallback.type]);
+		const discardDeleted = async () => {
+			// 原成员行仍只按原 join 代际清理；侧目录须覆盖本次已观察和写入的位置。
+			await this.discardFrozenRemoval(
+				threadId,
+				rows.map((row) => new ThreadMember(row)),
+			);
+			const cleanup = new BatchBuilder();
+			for (const row of rows) {
+				for (const parentId of knownParents.get(row.user_id)!) {
+					for (const type of [ChannelTypes.PUBLIC_THREAD, ChannelTypes.PRIVATE_THREAD]) {
+						cleanup.addPrepared(
+							ThreadMembersByUser.deleteByPk(
+								this.memberByUserRow(
+									{thread_id: threadId, guild_id: row.guild_id, parent_id: parentId, type},
+									row.user_id,
+								),
+							),
+						);
+					}
+				}
+			}
+			await cleanup.executeChunked(100, false);
+		};
 		for (let attempt = 0; attempt < STATE_CAS_ATTEMPTS; attempt++) {
-			const currentState = await this.getState(threadId);
-			if (!currentState || currentState.deleteDispatched) {
-				await this.discardFrozenRemoval(
-					threadId,
-					rows.map((row) => new ThreadMember(row)),
-				);
+			const state = await this.getState(threadId);
+			if (!state || state.deleteDispatched) {
+				await discardDeleted();
 				throw new UnknownChannelError();
 			}
-			state = currentState;
-			if (rows.every((row) => row.parent_id === state.parentId)) return state;
+			knownTypes.add(state.type);
+			let settled = true;
 			for (const row of rows) {
-				if (row.parent_id === state.parentId) continue;
-				const current = await this.getMember(threadId, row.user_id);
-				if (!current) continue;
-				const applied = await executeConditional(
-					ThreadMembers.conditionalPatchByPk(
-						{thread_id: threadId, user_id: row.user_id},
-						{parent_id: Db.set(state.parentId)},
-						{parent_id: current.parentId, join_timestamp: row.join_timestamp},
-					),
-				);
-				if (!applied) continue;
+				const parents = knownParents.get(row.user_id)!;
+				parents.add(state.parentId);
+				let current = await this.getMember(threadId, row.user_id);
+				if (current && sameTime(current.joinTimestamp, row.join_timestamp) && current.parentId !== state.parentId) {
+					// 只修复原加入代际，不能用旧快照改写退帖后重新加入的成员事实。
+					await executeConditional(
+						ThreadMembers.conditionalPatchByPk(
+							{thread_id: threadId, user_id: row.user_id},
+							{parent_id: Db.set(state.parentId)},
+							{parent_id: current.parentId, join_timestamp: row.join_timestamp},
+						),
+					);
+					current = await this.getMember(threadId, row.user_id);
+				}
+				if (current) parents.add(current.parentId);
 				const batch = new BatchBuilder();
-				batch.addPrepared(
-					ThreadMembersByUser.deleteByPk(
-						this.memberByUserRow({...state.toRow(), parent_id: row.parent_id}, row.user_id),
-					),
-				);
-				batch.addPrepared(ThreadMembersByUser.upsertAll(this.memberByUserRow(state.toRow(), row.user_id)));
+				for (const parentId of parents) {
+					for (const type of knownTypes) {
+						if (current && current.parentId === parentId && isPrivateType(type) === state.isPrivate) continue;
+						batch.addPrepared(
+							ThreadMembersByUser.deleteByPk(
+								this.memberByUserRow({...state.toRow(), parent_id: parentId, type}, row.user_id),
+							),
+						);
+					}
+				}
+				if (current) {
+					batch.addPrepared(
+						ThreadMembersByUser.upsertAll(
+							this.memberByUserRow({...state.toRow(), parent_id: current.parentId}, row.user_id),
+						),
+					);
+				}
 				await batch.execute(false);
-				row.parent_id = state.parentId;
+				// 侧写可能与退重加入或移回原论坛交错，重读后再决定是否已收敛。
+				const after = await this.getMember(threadId, row.user_id);
+				if (after) parents.add(after.parentId);
+				if (
+					(current === null) !== (after === null) ||
+					(current &&
+						after &&
+						(!sameTime(current.joinTimestamp, after.joinTimestamp) || current.parentId !== after.parentId)) ||
+					(after && after.parentId !== state.parentId)
+				)
+					settled = false;
 			}
 			const latest = await this.getState(threadId);
 			if (!latest || latest.deleteDispatched) {
-				await this.discardFrozenRemoval(
-					threadId,
-					rows.map((row) => new ThreadMember(row)),
-				);
+				await discardDeleted();
 				throw new UnknownChannelError();
 			}
-			if (latest.parentId === state.parentId) return latest;
+			if (settled && latest.parentId === state.parentId && latest.type === state.type) return latest;
 		}
 		throw new ServiceUnavailableError();
 	}

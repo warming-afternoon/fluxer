@@ -58,7 +58,7 @@ import {VisionarySlotInitializer} from '@app/api/stripe/VisionarySlotInitializer
 import {VoiceDataInitializer} from '@app/api/voice/VoiceDataInitializer';
 import {JetStreamWorkerQueue} from '@app/api/worker/JetStreamWorkerQueue';
 import {WorkerService} from '@app/api/worker/WorkerService';
-import {shutdownIntegrationEvents} from '@app/integration/IntegrationEvents';
+import {shutdownIntegrationEvents, startIntegrationEvents} from '@app/integration/IntegrationEvents';
 import {registerMetricsSection} from '@fluxer/hono/src/middleware/Metrics';
 import type {LoggerInterface} from '@fluxer/logger/src/LoggerInterface';
 import {getClient, initCassandra, shutdownCassandra} from '@pkgs/cassandra/src/Client';
@@ -298,6 +298,7 @@ export function createInitializer(
 			profileSubstringBlocklistCache.setRefreshSubscriber(kvClient);
 			await initializeRefreshCache(profileSubstringBlocklistCache, 'Profile substring blocklist cache', logger);
 			await initializeServiceSingletons(dependencies);
+			startIntegrationEvents();
 			logger.info('Service singletons initialized');
 			await getCustomBadgeCatalog().initialize();
 			logger.info('Custom badge catalog initialized');

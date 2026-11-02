@@ -27,7 +27,10 @@ export async function emitAccountChangedIfRelevant(
 ): Promise<void> {
 	if (!previous || !isRelevantChange(previous, updated)) return;
 	const userId = updated.user_id.toString();
-	await publishIntegrationEvent('events.auth.v1.user_invalidated', {user_id: userId});
+	await publishIntegrationEvent('events.auth.v1.user_invalidated', {
+		user_id: userId,
+		authority_version: updated.version,
+	});
 	const data = {
 		user_id: userId,
 		source: source ?? currentAccountChangeSource(),

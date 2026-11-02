@@ -1,0 +1,12 @@
+{
+	"name": "ODYSSEIA_AUTH",
+	"subjects": ["events.auth.v1.>", "events.identity.v1.binding_changed"],
+	"retention": "limits",
+	"storage": "file",
+	"num_replicas": 1,
+	"max_age": 604800000000000,
+	"max_bytes": 1073741824,
+	"max_msg_size": 262144,
+	"discard": "new",
+	"duplicate_window": 120000000000
+}

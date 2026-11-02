@@ -258,6 +258,16 @@ export class AuthSessionRepository {
 				}),
 			);
 		}
+		// 权威删除之前先保存撤销意图，恢复发布时会重新验证该会话已不存在。
+		await Promise.all(
+			revoked.map((hash) =>
+				publishIntegrationEvent(
+					'events.auth.v1.session_invalidated',
+					{user_id: userId.toString(), session_id_hash: hash.toString('base64url')},
+					{defer: true},
+				),
+			),
+		);
 		await executeSessionGroups(groups);
 		await Promise.all(
 			revoked.map((hash) =>
@@ -299,6 +309,15 @@ export class AuthSessionRepository {
 				deletedAt,
 			});
 		});
+		await Promise.all(
+			sessionIdHashes.map((hash) =>
+				publishIntegrationEvent(
+					'events.auth.v1.session_invalidated',
+					{user_id: userId.toString(), session_id_hash: hash.toString('base64url')},
+					{defer: true},
+				),
+			),
+		);
 		await executeSessionGroups(groups);
 		await publishIntegrationEvent('events.auth.v1.user_invalidated', {user_id: userId.toString()});
 		await forgetAuthSessionActivity(sessionIdHashes);

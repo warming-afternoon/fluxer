@@ -9329,7 +9329,19 @@
 				{"name": "deleting", "type": "boolean"},
 				{"name": "delete_ticket", "type": "text"},
 				{"name": "delete_prepared_state_version", "type": "int"},
-				{"name": "delete_dispatched", "type": "boolean"}
+				{"name": "delete_dispatched", "type": "boolean"},
+				{
+					"name": "native_locked",
+					"type": "boolean"
+				},
+				{
+					"name": "native_archived",
+					"type": "boolean"
+				},
+				{
+					"name": "external_locked",
+					"type": "boolean"
+				}
 			],
 			"primary_key": "((thread_id))",
 			"options": ""

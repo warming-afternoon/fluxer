@@ -13,8 +13,8 @@
 | `forum-service` | 会话解析、Discord 登录交换和短期证明、当前会话撤销、批量身份/资料查询、失效事件、自己的服务信息回复、预建内容消费者拉取 |
 | `discord-sync` | 创建/查询 Discord 绑定、查询资料、探测 Forum 和 integration 服务信息；不能调用任何会话签发接口 |
 | `fluxer-integration` | 接收明确列出的 RPC，发布失效/绑定事件，限次限时回复 |
-| `fluxer-api` | API 发布会话失效事件；不能订阅或调用身份 RPC |
-| `fluxer-worker` | worker 使用独立凭据发布会话失效事件；不能订阅或调用身份 RPC |
+| `fluxer-api` | API 发布内容/会话失效事件，仅订阅自己的持久发布确认收件箱；不能调用身份 RPC |
+| `fluxer-worker` | worker 使用独立凭据发布内容/会话失效事件，仅订阅自己的发布确认收件箱；不能调用身份 RPC |
 | `integration-admin` | 管理指定内容流及消费者；仅离线预建时使用 |
 
 服务注册是凭据、subject 合约、队列订阅和健康接口的组合，没有额外注册中心。Forum 使用一个服务账号。外部服务不直接写 Fluxer 或 Forum 数据库。
@@ -27,8 +27,10 @@ Bot 可向 `rpc.forum.v1.service_info` 与 `rpc.integration.v1.service_info` 发
 
 1. 复制 `.env.example` 为 `.env`。填写所有 `CHANGE_ME`、域名、原生密钥、VAPID 和 S3 配置。六个 NATS 密码必须各不相同，包含独立的 `INTEGRATION_WORKER_PASSWORD`，并使用随机长密码；`INTEGRATION_EXCHANGE_KEY` 为独立随机 32 字节的十六进制编码。不要复用 Bot token。为本次社区构建填入不可变 `FLUXER_PRODUCT_BUILD_TAG` 和实际 `FLUXER_SOURCE_SHA`。
 2. `COMPOSE_PROFILES=bundled-cassandra` 使用本机单节点 Cassandra，默认上限 4 GiB；这是单节点部署，不提供数据库高可用。使用已有集群时清空该 profile，并配置 `FLUXER_CASSANDRA_*`，自行管理认证、复制、备份和容量。容器内地址不能使用宿主机 localhost。
-3. 在正确 Cassandra keyspace 中应用原生 Fluxer schema，再应用 `fluxer_api/src/integration/schema.cql`。原生仓库提供 `pnpm dev:cassandra:apply` 工具，先核对其目标配置。集成 schema 不创建 keyspace、不导入用户。缺表时 integration readiness 失败；不能靠重启代替迁移。
+3. 在正确 Cassandra keyspace 中应用最新原生 Fluxer schema，再应用 `fluxer_api/src/integration/schema.cql`。原生仓库提供 `pnpm dev:cassandra:apply` 工具，先核对其目标配置；已有原生库也可逐条执行一次 `fluxer_api/src/integration/upgrade-v3-thread-policy.cql`，补齐 `thread_state` 的原生锁/归档基态及外部投影三列。已安装第一版集成身份表时，还须逐条执行一次 `fluxer_api/src/integration/upgrade-v2.cql`，再应用 `schema.cql` 创建新增表。使用最新目标 schema 全新建库后不要重复执行 ALTER 升级文件。集成 schema 不创建 keyspace、不导入用户。缺表或缺列时 integration readiness 失败；不能靠重启代替迁移。
 4. 配置 WireGuard：`wireguard/` 是两端配置示例。为两台服务器生成各自密钥，将 endpoint/公钥替换为实际值。broker 仅绑定 `${INTEGRATION_WG_IP}:4223`，不公开 8222 监控端口。Forum 连接 `nats://10.77.0.1:4223`，使用 `forum-service`。只允许指定 WireGuard peer 访问；不要将此明文 NATS 端口映射到公网。选择公网传输时必须另行配置 NATS TLS 和服务端证书验证，不能直接沿用此监听方案。
+
+   内容操作还须配置 `INTEGRATION_GUILD_ID` 和逗号分隔的四个 `INTEGRATION_FORUM_CHANNEL_IDS`，与 Forum 的普通、普通 NSFW、深渊、深渊 NSFW 四分类一致。未配置或数量不为四时内容 RPC 失败关闭。`FLUXER_THREAD_POLICY_ENABLED=true` 同时传入 API、worker、integration；安装策略 schema 后再启用。受信 Forum 管理组使用 `rpc.identity.v1.rebind_service` 显式发起换绑，普通登录不自动合并账号。完整内容合约见 `fluxer_api/src/integration/README.md`。
 5. 使用 `docker compose --env-file .env config --quiet` 校验，再执行 `docker compose --env-file .env build` 和经过审查的启动命令。本地社区 API、worker、integration、gateway、push 必须使用本分叉构建，不替换成缺少新增入口的上游 API 镜像。
 6. 配置 Forum `FORUM_AUTH_MODE=fluxer` 之前完成用户迁移。具体顺序见 Forum 的 `docs/fluxer-online-migration.md`：准备分支、预建正式用户、导入权威映射、在线回填和审计，最后停掉全部旧写入者（含 Bot/worker）、补齐差异、执行 runtime 迁移、切换功能代码。新表没有实体外键。身份不齐或审计非零时不切换；不执行破坏性回滚。
 
@@ -48,14 +50,23 @@ Discord 登录经过成员资格和一次性 state 校验后，网页仅收到 6
 
 Forum 仅缓存会话 token 的 SHA256 键及最小身份结果。正缓存从解析开始最多一小时，命中不续期；明确无效的负缓存 5 秒。RPC、Redis 或 NATS 不可用返回 503，不伪装成未登录，也不继续使用断线前缓存。失效事件与并发缓存写入通过 Redis 代次检查防止旧结果回填；重连更换缓存代次。
 
-API、worker 和 integration 均需具备其各自事件发布凭据。身份停用/会话撤销必须通过原生服务入口；手工修改数据库不会触发事件。事件发布采用尽力交付，没有持久化 outbox：如果只有发布者连接故障而 Forum 连接正常，Forum 不一定切换缓存代次，未收到事件的既有正缓存可能持续到原先最长一小时的 TTL；不能保证立即撤销。新的 RPC 解析会读取权威会话/账户状态并拒绝失效会话。监控 integration `/_ready`（8091，仅容器内）和 Forum RPC 服务信息，并监控原生进程的事件发布失败日志；区分鉴权无效与基础设施故障。不要记录 token、OAuth code、NATS 密码或 RPC 原始请求。
+API、worker 和 integration 均需具备各自事件发布凭据、专用确认收件箱，以及相同的服务器/四论坛范围。原生写前持久化资源跟踪或失效意图，提交后保存快照与待发事件；只有 JetStream PubAck 才删除待发记录。发布者失连时保留 Cassandra 日志，重启或重连后恢复。跨进程失效仍有传输延迟，敏感操作重新读取权威状态，不能用持久事件替代授权。消费端检测流保留窗口缺口或重建时应清空会话正缓存并重新核验。监控 integration `/_ready`（8091，仅容器内）、Forum RPC 服务信息及事件积压日志；区分鉴权无效与基础设施故障。不要记录 token、OAuth code、NATS 密码或 RPC 原始请求。
 
 ## 本地部署回归验证
 
 安装工作区依赖后运行 `node --test deploy/Odysseia-deploy/deployment.test.mjs`。测试使用已安装的 YAML 解析器展开合并键，检查 Cassandra 后端、依赖图、构建文件路径、凭据隔离、健康端点，以及多 API 资源保留和预算边界。此测试不启动 Docker、WSL、数据库或生产服务，也不替代目标 Linux 主机的 `docker compose config`、镜像构建和实际启动验证。
 
-## 内容事件预留
+## 持久事件流
 
-`nats/content-stream.json` 和 `nats/forum-consumer.json` 定义预建 JetStream 流及 durable pull 消费者。安装仓库依赖后，显式设置 `INTEGRATION_NATS_URL`、`INTEGRATION_ADMIN_PASSWORD` 并运行 `node deploy/Odysseia-deploy/provision-content.mjs`。业务账号不能建流、删流或创建任意消费者。
+`nats/content-stream.json`、`nats/forum-consumer.json` 定义 `ODYSSEIA_CONTENT/forum-index`；`nats/auth-stream.json`、`nats/forum-auth-consumer.json` 定义 `ODYSSEIA_AUTH/forum-auth`。安装仓库依赖后，显式设置 `INTEGRATION_NATS_URL`、`INTEGRATION_ADMIN_PASSWORD` 并运行 `node deploy/Odysseia-deploy/provision-content.mjs` 预建两组流及 durable pull 消费者。业务账号不能建流、删流或创建任意消费者。
 
-本阶段不接入实际帖子生产/搜索索引回填，也不启动会丢弃事件的空消费者。未来事件至少包含 event_id、版本、来源、资源 ID、变更版本和时间；消费者在幂等落库后 ACK，失败重试和死信处理需随实际功能实现。当前流保留 7 天、4 GiB，达到容量拒绝新消息，生产者必须检查发布确认；这不是无限历史存档。
+内容事件覆盖原生帖子创建、正文、反应、归档/锁定和删除；事件携带独立快照版本及创建操作相关性。认证流同时承载会话、账户及管理绑定变化。Forum 必须幂等提交投影或缓存失效后 ACK，失败延迟重试；两个 durable 均使用 `max_deliver=-1`，不会在短暂数据库故障后耗尽十次重送而静默停投。内容流保留七天、4 GiB，认证流七天、1 GiB，满时拒绝新消息，生产者保留未确认日志。它们不是无限历史存档；持久资源跟踪和分页对账用于恢复源状态，发生保留窗口缺口时仍须执行消费者的缓存/索引重建流程。
+
+
+### 作品原生图片
+
+作品创建与首帖编辑使用原生预上传：浏览器携当前 Fluxer token 请求 `POST /channels/{forum_or_thread_id}/attachments`，按返回的 singlepart / multipart 计划上传，存储 PUT 不携登录 token；multipart 完成后提交原生 `upload_filename` 描述。新作品上传目标为 Forum 的 `/v2/works/upload-target`，编辑目标为实际主帖 thread。Forum 任务仅保存 `{id,filename,file_size,content_type,upload_filename}`，不保存 bearer 或预签名 URL。
+
+`thread.create_service.attachments` 只接受新预上传描述；`starter.edit_service.attachments` 可混合新描述和 `{id:"原生附件ID"}` 保留引用，顺序决定图片首图。省略 attachments 保留原附件，空数组删除附件；正文可省略，附件编辑使用原生当前正文，避免 PG 投影覆盖更新。合并账号仍审核实际 B 上传者和委托能力，不改变历史作者 C。
+
+附件子操作复用 `integration_operations` 保存不可变计划、扫描结果及永久 CDN 附件 ID，先持久结果再绑定上传，恢复不重扫重分配；临时对象保留给既有清理策略。启用 thread policy 时所有受信创建在完成持久化前保持初始化锁与归档；可重试中断恢复同一 prepared thread，终止 4xx 清理中间线程。默认主帖完成后仅释放自己的初始化来源，defer_open 子帖由 Forum 政策任务完成后释放。

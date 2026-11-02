@@ -5,6 +5,7 @@ import {SYSTEM_USER_ID} from '@app/api/constants/Core';
 import type {GatewayDispatchEvent} from '@app/api/constants/Gateway';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import type {Channel} from '@app/api/models/Channel';
+import {finishIntegrationContentChange} from '@app/integration/IntegrationContentHooks';
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
 import {THREAD_CHANNEL_TYPES} from '@fluxer/constants/src/ThreadConstants';
 
@@ -52,6 +53,8 @@ export async function dispatchChannelEvent({
 		});
 	}
 	if (channel.guildId) {
+		if (THREAD_CHANNEL_TYPES.has(channel.type) && event.startsWith('MESSAGE_'))
+			await finishIntegrationContentChange(channel.id);
 		return gatewayService.dispatchGuild({guildId: channel.guildId, event, data: withThreadContext(channel, data)});
 	}
 	await Promise.all(

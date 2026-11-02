@@ -3,6 +3,7 @@
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {IntegrationSchemas} from '@app/integration/IntegrationSchemas';
 import type {IntegrationService} from '@app/integration/IntegrationService';
+import {FluxerError} from '@fluxer/errors/src/FluxerError';
 import type {Msg, NatsConnection, Subscription} from '@nats-io/transport-node';
 import {ZodError} from 'zod';
 
@@ -69,11 +70,22 @@ export class IntegrationRpcServer {
 			!this.replyPrefixes.some((prefix) => reply.startsWith(prefix))
 		)
 			return;
-		if (message.subject.startsWith('rpc.auth.') && !reply.startsWith(this.forumReplyPrefix)) return;
+		if (
+			(message.subject.startsWith('rpc.auth.') ||
+				message.subject.startsWith('rpc.content.') ||
+				message.subject === 'rpc.identity.v1.rebind_service') &&
+			!reply.startsWith(this.forumReplyPrefix)
+		)
+			return;
 		try {
 			if (this.pending.size >= this.maxInflight)
 				throw new IntegrationError('BUSY', 'Integration concurrency limit reached', true);
-			if (message.data.length > 16_384) throw new IntegrationError('INVALID_REQUEST', 'Request too large');
+			const maxRequestBytes = ['rpc.content.v1.thread.create_service', 'rpc.content.v1.starter.edit_service'].includes(
+				message.subject,
+			)
+				? 65_536
+				: 16_384;
+			if (message.data.length > maxRequestBytes) throw new IntegrationError('INVALID_REQUEST', 'Request too large');
 			let input: unknown;
 			try {
 				input = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(message.data));
@@ -84,12 +96,16 @@ export class IntegrationRpcServer {
 			message.respond(JSON.stringify({ok: true, data}));
 		} catch (error) {
 			// 对未知异常只返回固定依赖错误，避免泄露内部状态和敏感字段。
-			const safe =
-				error instanceof IntegrationError
-					? error
-					: error instanceof ZodError
-						? new IntegrationError('INVALID_REQUEST', 'Request validation failed')
-						: new IntegrationError('UNAVAILABLE', 'Integration dependency unavailable', true);
+			let safe: IntegrationError;
+			if (error instanceof IntegrationError) {
+				safe = error;
+			} else if (error instanceof FluxerError && error.status >= 400 && error.status < 500) {
+				safe = new IntegrationError(error.code, error.code, error.status === 429);
+			} else if (error instanceof ZodError) {
+				safe = new IntegrationError('INVALID_REQUEST', 'Request validation failed');
+			} else {
+				safe = new IntegrationError('UNAVAILABLE', 'Integration dependency unavailable', true);
+			}
 			message.respond(
 				JSON.stringify({ok: false, error: {code: safe.code, message: safe.message, retryable: safe.retryable}}),
 			);

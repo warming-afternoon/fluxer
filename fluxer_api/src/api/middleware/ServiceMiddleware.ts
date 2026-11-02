@@ -208,7 +208,8 @@ function getLiveKitWebhookService(): LiveKitWebhookService | null {
 	return _liveKitWebhookService;
 }
 
-class RequestServices implements RequestScopedServices {
+/** 为 HTTP 与受信内部 RPC 延迟构建同一组原生业务服务 */
+export class RequestServices implements RequestScopedServices {
 	private cachedOperatorPassServices: OperatorPassServices | undefined;
 	private cachedGuildVisitService: GuildVisitService | undefined;
 	private cachedGateway: IGatewayService | undefined;

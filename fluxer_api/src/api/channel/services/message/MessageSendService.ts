@@ -42,6 +42,7 @@ import type {MessageWriteLock} from '@app/api/channel/services/message/MessageWr
 import type {ThreadMessageActivity} from '@app/api/channel/services/message/ThreadMessageActivity';
 import {isPersonalNotesChannelId} from '@app/api/channel/services/PersonalNotesChannelRepair';
 import {assertThreadAllowed} from '@app/api/channel/services/thread/ThreadDenials';
+import {ThreadPolicyService} from '@app/api/channel/services/thread/ThreadPolicyService';
 import {enqueueThreadSearchSync} from '@app/api/channel/threads/ThreadJobs';
 import {SYSTEM_USER_ID} from '@app/api/constants/Core';
 import type {MessageAttachment, MessageReference} from '@app/api/database/types/MessageTypes';
@@ -66,6 +67,7 @@ import {isContentHidden, isDirectDeliverySuppressed} from '@app/api/user/UserHel
 import {startEarly} from '@app/api/utils/ConcurrencyUtils';
 import {assertGuildMemberCanCommunicate} from '@app/api/utils/GuildCommunicationUtils';
 import {checkGuildVerificationWithResponse} from '@app/api/utils/GuildVerificationUtils';
+import {IntegrationAttachmentManifest} from '@app/integration/IntegrationAttachmentManifest';
 import {
 	ChannelTypes,
 	MessageReferenceTypes,
@@ -250,9 +252,12 @@ export class MessageSendService {
 		return {canEmbedLinks, canMentionEveryone, canAttachFiles};
 	}
 
-	private assertThreadSendAllowed(authChannel: AuthenticatedChannel): void {
+	private assertThreadSendAllowed(authChannel: AuthenticatedChannel, forumStarter = false): void {
 		if (authChannel.thread) {
-			assertThreadAllowed(threadWriteBlock('send', authChannel.thread.actor));
+			const {state, actor} = authChannel.thread;
+			const initializing = forumStarter && state.externalLocked && !state.nativeLocked && !state.nativeArchived;
+			const effective = initializing ? {...actor, thread: {...actor.thread, locked: false, archived: false}} : actor;
+			assertThreadAllowed(threadWriteBlock('send', effective));
 		}
 	}
 
@@ -342,6 +347,7 @@ export class MessageSendService {
 						{
 							index,
 							filename: attachment.filename,
+							uploadFilename: attachment.upload_filename,
 							pendingUploadTask: startEarly(
 								this.deps.attachmentUploadTraceRepository.getPendingUpload({
 									uploadKey: attachment.upload_filename,
@@ -359,7 +365,16 @@ export class MessageSendService {
 		const uploadedAttachmentSizes: Array<{
 			size: number | bigint;
 		}> = [];
-		for (const {index, filename, pendingUploadTask, metadataTask} of uploads) {
+		for (const {index, filename, uploadFilename, pendingUploadTask, metadataTask} of uploads) {
+			const preparedSize = await new IntegrationAttachmentManifest().preparedUploadSize(
+				uploadFilename,
+				user.id,
+				channelId,
+			);
+			if (preparedSize !== null) {
+				uploadedAttachmentSizes.push({size: preparedSize});
+				continue;
+			}
 			const pendingUpload = await pendingUploadTask;
 			if (!pendingUpload) {
 				throw InputValidationError.fromCode(
@@ -657,7 +672,9 @@ export class MessageSendService {
 		const slowmodeBypass = needsSlowmodeCheck ? await hasPermission(Permissions.BYPASS_SLOWMODE) : false;
 		const slowmodeKey = needsSlowmodeCheck && !slowmodeBypass ? `slowmode:${channelId}:${user.id}` : null;
 		ensureTextChannel(channel);
-		this.assertThreadSendAllowed(authChannel);
+		this.assertThreadSendAllowed(authChannel, !!forumStarter);
+		if (authChannel.thread)
+			await new ThreadPolicyService().assertAllowed(channelId, user.id, 'send', {initializingStarter: !!forumStarter});
 		const isForwardMessage = this.ensureMessageRequestIsValid({user, data, guildFeatures: guild?.features ?? null});
 		this.deps.embedAttachmentResolver.validateAttachmentReferences({
 			embeds: data.embeds,

@@ -124,10 +124,84 @@ test('Bot 仅增加双向服务健康探测，不获得会话 RPC 权限', () =>
 	assert.match(bot, /"rpc\.forum\.v1\.service_info"/);
 	assert.match(bot, /"rpc\.integration\.v1\.service_info"/);
 	assert.match(bot, /subscribe: \{allow: \["_INBOX\.bot\.>"\]\}/);
-	assert.doesNotMatch(bot, /rpc\.auth\.|_INBOX\.forum|\$JS\.API/);
+	assert.doesNotMatch(bot, /rpc\.auth\.|rpc\.content\.|rebind_service|_INBOX\.forum|\$JS\.API/);
 	const forum = acl.slice(acl.indexOf('user: "forum-service"'), acl.indexOf('user: "discord-sync"'));
 	assert.match(forum, /"rpc\.forum\.v1\.service_info"/);
 	assert.match(forum, /allow_responses: \{max: 1, expires: "5s"\}/);
+});
+
+test('事件发布账号仅订阅专用确认收件箱，Forum 独占固定内容操作与 durable 拉取', () => {
+	const acl = fs.readFileSync(path.join(directory, 'nats/integration.conf'), 'utf8');
+	const entries = [
+		['fluxer-api', 'fluxer-worker', '_INBOX.fluxer-api.>'],
+		['fluxer-worker', 'integration-admin', '_INBOX.fluxer-worker.>'],
+	];
+	for (const [user, next, inbox] of entries) {
+		const block = acl.slice(acl.indexOf(`user: "${user}"`), acl.indexOf(`user: "${next}"`));
+		assert.ok(block.includes(`subscribe: {allow: ["${inbox}"]}`));
+		assert.ok(block.includes('"events.content.v1.>"'));
+		assert.doesNotMatch(block, /rpc\.(?:auth|content|identity)\./);
+	}
+	const forum = acl.slice(acl.indexOf('user: "forum-service"'), acl.indexOf('user: "discord-sync"'));
+	for (const subject of [
+		'rpc.identity.v1.rebind_service',
+		'rpc.content.v1.thread.create_service',
+		'rpc.content.v1.thread.move_service',
+		'rpc.content.v1.thread.policy_service',
+		'rpc.content.v1.starter.edit_service',
+		'rpc.content.v1.thread.read_service',
+		'rpc.content.v1.thread.update_service',
+	])
+		assert.ok(forum.includes(`"${subject}"`));
+	assert.ok(forum.includes('$JS.API.CONSUMER.MSG.NEXT.ODYSSEIA_AUTH.forum-auth'));
+	assert.ok(forum.includes('$JS.API.STREAM.INFO.ODYSSEIA_AUTH'));
+	assert.doesNotMatch(forum, /rpc\.content\.>|\$JS\.API\.STREAM\.(?:CREATE|UPDATE|DELETE|\*)/);
+	for (const [service, prefix] of [
+		['api', '_INBOX.fluxer-api'],
+		['worker', '_INBOX.fluxer-worker'],
+		['fluxer-integration', '_INBOX.integration'],
+	]) {
+		assert.equal(compose.services[service].environment.INTEGRATION_EVENT_INBOX_PREFIX, prefix);
+		assert.ok(compose.services[service].environment.FLUXER_THREAD_POLICY_ENABLED);
+		assert.equal(
+			compose.services[service].environment.INTEGRATION_GUILD_ID,
+			compose.services['fluxer-integration'].environment.INTEGRATION_GUILD_ID,
+		);
+		assert.equal(
+			compose.services[service].environment.INTEGRATION_FORUM_CHANNEL_IDS,
+			compose.services['fluxer-integration'].environment.INTEGRATION_FORUM_CHANNEL_IDS,
+		);
+	}
+});
+
+test('外部锁基态三列同时进入原生目标 schema 和既有库迁移', () => {
+	const target = JSON.parse(fs.readFileSync(path.join(root, 'tools/dev/cassandra_target_schema.json'), 'utf8'));
+	const table = target.tables.find((entry) => entry.name === 'thread_state');
+	const migration = fs.readFileSync(path.join(root, 'fluxer_api/src/integration/upgrade-v3-thread-policy.cql'), 'utf8');
+	for (const name of ['native_locked', 'native_archived', 'external_locked']) {
+		assert.ok(table.columns.some((column) => column.name === name && column.type === 'boolean'));
+		assert.ok(migration.includes(`ALTER TABLE thread_state ADD ${name} boolean;`));
+	}
+});
+
+test('持久认证及内容流有界、满时拒绝且仅使用固定 durable', () => {
+	for (const [streamFile, consumerFile, name, durable] of [
+		['content-stream.json', 'forum-consumer.json', 'ODYSSEIA_CONTENT', 'forum-index'],
+		['auth-stream.json', 'forum-auth-consumer.json', 'ODYSSEIA_AUTH', 'forum-auth'],
+	]) {
+		const stream = JSON.parse(fs.readFileSync(path.join(directory, 'nats', streamFile), 'utf8'));
+		const consumer = JSON.parse(fs.readFileSync(path.join(directory, 'nats', consumerFile), 'utf8'));
+		assert.equal(stream.name, name);
+		assert.equal(stream.storage, 'file');
+		assert.equal(stream.discard, 'new');
+		assert.ok(stream.max_bytes > 0 && stream.max_age > 0);
+		assert.equal(consumer.durable_name, durable);
+		assert.equal(consumer.ack_policy, 'explicit');
+		assert.equal(consumer.max_deliver, -1);
+		assert.ok(consumer.max_batch <= 100);
+	}
+	const auth = JSON.parse(fs.readFileSync(path.join(directory, 'nats/auth-stream.json'), 'utf8'));
+	assert.deepEqual(auth.subjects, ['events.auth.v1.>', 'events.identity.v1.binding_changed']);
 });
 
 test('首次部署及生成器默认均为单 API，多实例仅由显式参数启用', () => {

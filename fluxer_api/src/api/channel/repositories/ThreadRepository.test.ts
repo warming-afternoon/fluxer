@@ -216,6 +216,9 @@ function describeThreadRepository(backend: string, makeExecutor: () => Promise<C
 				type: ChannelTypes.PUBLIC_THREAD,
 				archived: false,
 				locked: false,
+				native_locked: null,
+				native_archived: null,
+				external_locked: false,
 				invitable: null,
 				auto_archive_duration: 4320,
 				archive_timestamp: new Date(),
@@ -226,6 +229,10 @@ function describeThreadRepository(backend: string, makeExecutor: () => Promise<C
 				member_ids_preview: null,
 				has_starter: false,
 				state_version: 1,
+				deleting: false,
+				delete_ticket: null,
+				delete_prepared_state_version: null,
+				delete_dispatched: false,
 			};
 			expect(await executeConditional(ThreadState.insertIfNotExists(dangling))).toBe(true);
 			await expect(repositories.threads.create(createParams(threadId))).rejects.toBeInstanceOf(
@@ -255,6 +262,9 @@ function describeThreadRepository(backend: string, makeExecutor: () => Promise<C
 						type: ChannelTypes.PRIVATE_THREAD,
 						archived: false,
 						locked: false,
+						native_locked: null,
+						native_archived: null,
+						external_locked: false,
 						invitable: true,
 						auto_archive_duration: 4320,
 						archive_timestamp: createdAt,
@@ -265,6 +275,10 @@ function describeThreadRepository(backend: string, makeExecutor: () => Promise<C
 						member_ids_preview: [crashed],
 						has_starter: false,
 						state_version: 1,
+						deleting: false,
+						delete_ticket: null,
+						delete_prepared_state_version: null,
+						delete_dispatched: false,
 					}),
 				),
 			).toBe(true);
@@ -705,13 +719,14 @@ function describeThreadRepository(backend: string, makeExecutor: () => Promise<C
 			).toEqual([]);
 		});
 
-		it('purges every thread row with threads_by_parent last', async () => {
+		it('purges side indexes before the final channel and frozen state rows', async () => {
 			const threadId = freshThreadId();
 			await repositories.threads.create(createParams(threadId, {members: [{userId: OWNER_ID, flags: 1}]}));
 			await repositories.threads.updateState(threadId, () => ({archived: true}));
 			executor.statements.length = 0;
 			await repositories.threads.purgeThread(threadId);
-			expect(executor.statements.at(-1)).toBe('delete:threads_by_parent');
+			expect(executor.statements.slice(-2)).toEqual(['delete:channels', 'delete:thread_state']);
+			expect(executor.statements.indexOf('delete:threads_by_parent')).toBeLessThan(executor.statements.length - 2);
 			expect(await repositories.threads.getState(threadId)).toBeNull();
 			expect(await repositories.channelData.findUnique(threadId)).toBeNull();
 			expect(await repositories.threads.listMembers(threadId, {limit: 10})).toEqual([]);

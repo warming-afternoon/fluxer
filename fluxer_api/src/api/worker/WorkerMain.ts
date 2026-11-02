@@ -70,7 +70,7 @@ import {createWorkerProcessErrorHandler} from '@app/api/worker/WorkerProcessErro
 import {WorkerRunner} from '@app/api/worker/WorkerRunner';
 import {WorkerService} from '@app/api/worker/WorkerService';
 import {workerTasks} from '@app/api/worker/WorkerTaskRegistry';
-import {shutdownIntegrationEvents} from '@app/integration/IntegrationEvents';
+import {shutdownIntegrationEvents, startIntegrationEvents} from '@app/integration/IntegrationEvents';
 import {createRegisteredMetricsHandler} from '@fluxer/hono/src/middleware/Metrics';
 import {createServer, setupGracefulShutdown} from '@fluxer/hono/src/Server';
 import type {ServerType} from '@hono/node-server';
@@ -500,6 +500,7 @@ export async function startWorkerMain(): Promise<void> {
 		}
 		dependencies = await initializeWorkerDependencies(snowflakeService);
 		setWorkerDependencies(dependencies);
+		startIntegrationEvents();
 		await startContentBlocklistCaches({kvClient: dependencies.kvClient, storageService: dependencies.storageService});
 		Logger.info('Content blocklist caches initialised for worker backend');
 		setActivityProcessChannel('worker');

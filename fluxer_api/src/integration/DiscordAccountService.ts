@@ -1,15 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {ApiContext} from '@app/api/ApiContext';
-import {createUserID} from '@app/api/BrandedTypes';
+import {createUserID, type UserID} from '@app/api/BrandedTypes';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {publishIntegrationEvent} from '@app/integration/IntegrationEvents';
-import {IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
+import {type DiscordBinding, IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
 import type {DiscordProfile} from '@app/integration/IntegrationSchemas';
 import {NativeAccountRepository} from '@app/integration/NativeAccountRepository';
 import {GlobalNameType, UsernameType} from '@fluxer/schema/src/primitives/UserValidators';
 
 export class DiscordAccountService {
+	/** 使用稳定事件标识恢复首次绑定提交后未完成的发布 */
+	private async publishBinding(binding: DiscordBinding, userId: UserID): Promise<void> {
+		// 历史别名与跨账户合并只能由管理事件变更，普通登录不能重新选定当前身份。
+		if (userId !== binding.user_id || (await this.identities.findDiscordId(userId)) !== binding.discord_user_id) return;
+		const version = await this.identities.bindingVersion(userId);
+		await publishIntegrationEvent(
+			'events.identity.v1.binding_changed',
+			{
+				kind: 'binding_changed',
+				discord_user_id: binding.discord_user_id,
+				user_id: userId.toString(),
+				version,
+			},
+			{eventId: `${binding.operation_id}:binding:${userId}:${version}`},
+		);
+	}
 	/** 注入可替换仓储以验证并发和恢复路径 */
 	constructor(
 		private readonly context: ApiContext,
@@ -34,20 +50,17 @@ export class DiscordAccountService {
 				username.success ? username.data : `dc_${userId}`,
 			);
 		}
-		await this.identities.ensureReverse(binding);
 		// 完成的绑定只读取原生账户，不能重新建号或覆盖已经修改的资料。
 		if (binding.state === 'ready') {
-			const user = await this.context.services.users.findUnique(binding.user_id);
+			const user = await this.context.services.users.findUnique(await this.identities.canonicalUserId(binding.user_id));
 			if (!user) throw new IntegrationError('BOUND_ACCOUNT_MISSING', 'Bound native account is missing');
+			await this.publishBinding(binding, user.id);
 			return {user, created: false, binding};
 		}
+		await this.identities.ensureReverse(binding);
 		const user = await this.native.initialize(binding);
 		await this.identities.complete(binding);
-		await publishIntegrationEvent('events.identity.v1.binding_changed', {
-			discord_user_id: discordId,
-			user_id: user.id.toString(),
-			version: binding.version,
-		});
+		await this.publishBinding(binding, user.id);
 		return {user, created: binding.operation_id === operationId, binding};
 	}
 }

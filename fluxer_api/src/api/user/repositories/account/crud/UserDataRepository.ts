@@ -13,6 +13,7 @@ import {User} from '@app/api/models/User';
 import {Users} from '@app/api/Tables';
 import {shiftGiftExtensionPastPremiumUntil} from '@app/api/user/GiftExtensionShift';
 import {isPendingDeletionBlocked} from '@app/api/user/services/PendingDeletionCoordinator';
+import {prepareIntegrationUserChange} from '@app/integration/IntegrationAuthEvents';
 import {APIErrorCodes} from '@fluxer/constants/src/ApiErrorCodes';
 import {DELETED_USER_ID, UserFlags} from '@fluxer/constants/src/UserConstants';
 import {ConflictError} from '@fluxer/errors/src/domains/core/ConflictError';
@@ -121,6 +122,7 @@ export class UserDataRepository {
 	}> {
 		const userId = data.user_id;
 		assertWritableUserId(userId);
+		await prepareIntegrationUserChange(userId);
 		const result = await executeVersionedUpdate<UserRow, 'user_id'>(
 			async () => {
 				return fetchOne<UserRow>(FETCH_USER_BY_ID_CQL, {user_id: userId});
@@ -148,6 +150,7 @@ export class UserDataRepository {
 		updatedData: UserRow;
 	}> {
 		assertWritableUserId(userId);
+		await prepareIntegrationUserChange(userId);
 		assertOrdinaryUserPatch(patch);
 		const result = await executeVersionedUpdate<UserRow, 'user_id'>(
 			async () => {
@@ -180,6 +183,7 @@ export class UserDataRepository {
 		updatedData: UserRow;
 	}> {
 		assertWritableUserId(user.id);
+		await prepareIntegrationUserChange(user.id);
 		if (patch.deletion_started_at) throw new Error('The deletion start marker is immutable');
 		if (transition === 'schedule' && user.deletionStartedAt) {
 			throw new ConflictError({code: APIErrorCodes.CONFLICT, message: 'Account deletion has already started'});
@@ -214,6 +218,7 @@ export class UserDataRepository {
 
 	async compareAndSetFlags(user: User, flags: bigint): Promise<{previousData: UserRow; updatedData: UserRow} | null> {
 		assertWritableUserId(user.id);
+		await prepareIntegrationUserChange(user.id);
 		const previousData = user.toRow();
 		const version = nextVersion(user.version);
 		const expected = previousData.flags ?? 0n;
@@ -267,6 +272,7 @@ export class UserDataRepository {
 
 	async startDeletion(userId: UserID, pendingDeletionAt: Date): Promise<User | null> {
 		assertWritableUserId(userId);
+		await prepareIntegrationUserChange(userId);
 		const scheduledAt = pendingDeletionAt.getTime();
 		if (!Number.isFinite(scheduledAt)) throw new Error('Account deletion requires a valid captured schedule');
 		const user = await this.findUnique(userId);
@@ -300,6 +306,7 @@ export class UserDataRepository {
 	}> {
 		const {userId, lastActiveAt, lastActiveIp} = params;
 		assertWritableUserId(userId);
+		await prepareIntegrationUserChange(userId);
 		const previousData = (await this.getActivityTracking(userId)) ?? {last_active_at: null, last_active_ip: null};
 		await upsertOne(
 			Users.patchByPk(
@@ -338,6 +345,7 @@ export class UserDataRepository {
 		finalVersion: number | null;
 	}> {
 		assertWritableUserId(userId);
+		await prepareIntegrationUserChange(userId);
 		const result = await executeVersionedUpdate<UserRow, 'user_id'>(
 			async () => {
 				return fetchOne<UserRow>(FETCH_USER_BY_ID_CQL, {user_id: userId});

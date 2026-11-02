@@ -31,6 +31,16 @@ class MemoryIdentities extends IntegrationIdentityRepository {
 	failReverseOnce = false;
 	failCompleteOnce = false;
 
+	/** 无合并测试中的规范账户保持原 ID */
+	override async canonicalUserId(id: UserID): Promise<UserID> {
+		return id;
+	}
+
+	/** 初始绑定版本未发生管理换绑 */
+	override async bindingVersion(): Promise<number> {
+		return 1;
+	}
+
 	/** 模拟每主体条件占用 */
 	override async claim(
 		id: string,
@@ -91,6 +101,7 @@ describe('Integration native authority', () => {
 	beforeEach(async () => {
 		await harness.reset();
 		vi.restoreAllMocks();
+		vi.spyOn(IntegrationIdentityRepository.prototype, 'findDiscordId').mockResolvedValue('123456789012345678');
 	});
 	afterAll(async () => {
 		await harness?.shutdown();
@@ -184,7 +195,9 @@ describe('Integration native authority', () => {
 		await expect(
 			context.services.users.deleteAuthSessions(createUserID(BigInt(account.userId)), [hash]),
 		).rejects.toThrow('storage failure');
-		expect(publish).not.toHaveBeenCalled();
+		// 存储失败只允许保存延迟撤销意图，发送端仍需核对权威会话已不存在。
+		expect(publish.mock.calls.length).toBeGreaterThan(0);
+		expect(publish.mock.calls.every((call) => call[2]?.defer === true)).toBe(true);
 		await context.services.users.deleteAuthSessions(createUserID(BigInt(account.userId)), [hash]);
 		expect(publish).toHaveBeenCalledWith('events.auth.v1.session_invalidated', {
 			user_id: account.userId,
@@ -304,5 +317,35 @@ describe('Integration native authority', () => {
 				user_ids: Array(101).fill('1234'),
 			}).success,
 		).toBe(false);
+	});
+
+	it('rejects an old Discord identity even when an exchange was prepared before administrative rebind', async () => {
+		const account = await createTestAccount(harness);
+		const context = createApiContext();
+		const exchanges = new IntegrationExchangeRepository(Buffer.alloc(32, 1));
+		const request = IntegrationSchemas['rpc.auth.v1.external.exchange'].parse({
+			version: 1,
+			request_id: operation,
+			exchange_id: operation,
+			discord_user_id: '987654321098765432',
+			verified_at: new Date().toISOString(),
+			profile,
+			origin: {ip: '127.0.0.1', user_agent: null, client_os: null},
+		});
+		vi.spyOn(exchanges, 'find').mockResolvedValue({
+			fingerprint: createHash('sha256')
+				.update(JSON.stringify({...request, request_id: undefined}))
+				.digest('hex'),
+			user_id: createUserID(BigInt(account.userId)),
+			encrypted_token: 'prepared',
+			state: 'allocated',
+			expires_at: new Date(Date.now() + 600_000),
+		});
+		const create = vi.spyOn(AuthSession, 'createAuthSession');
+		const service = new IntegrationService(context, exchanges);
+		await expect(service.dispatch('rpc.auth.v1.external.exchange', request)).rejects.toMatchObject({
+			code: 'IDENTITY_NOT_CURRENT',
+		});
+		expect(create).not.toHaveBeenCalled();
 	});
 });

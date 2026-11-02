@@ -21,6 +21,7 @@ import {prepareIntegrationContentChange} from '@app/integration/IntegrationConte
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {IntegrationOperationRepository} from '@app/integration/IntegrationOperationRepository';
 import {IntegrationSchemas} from '@app/integration/IntegrationSchemas';
+import {withIntegrationStarterEditScope} from '@app/integration/IntegrationStarterEditContext';
 import {UserFlags} from '@fluxer/constants/src/UserConstants';
 import {FluxerError} from '@fluxer/errors/src/FluxerError';
 
@@ -498,27 +499,31 @@ export class IntegrationContentService {
 						const message = await withIntegrationAttachmentOperation(
 							request.operation_id,
 							() =>
-								services.messageRequestService.editMessage({
-									userId: user.id,
-									viewer: {kind: 'user', userId: user.id, bot: false, capable: true},
-									channelId: createChannelID(BigInt(request.thread_id)),
-									messageId: createMessageID(BigInt(request.thread_id)),
-									data: {
-										content: request.content ?? current.content ?? '',
-										allowed_mentions: {parse: [], replied_user: false},
-										...(request.attachments === undefined
-											? {}
-											: {
-													attachments: request.attachments.map((attachment) =>
-														'upload_filename' in attachment
-															? {...attachment, title: null, description: null, flags: 0}
-															: {id: BigInt(attachment.id), flags: 0},
-													),
-												}),
-									},
-									requestCache: cache,
-									expectedVersion: plan.message_version,
-								}),
+								withIntegrationStarterEditScope(
+									{actorUserId: user.id.toString(), guildId: request.guild_id, threadId: request.thread_id},
+									() =>
+										services.messageRequestService.editMessage({
+											userId: user.id,
+											viewer: {kind: 'user', userId: user.id, bot: false, capable: true},
+											channelId: createChannelID(BigInt(request.thread_id)),
+											messageId: createMessageID(BigInt(request.thread_id)),
+											data: {
+												content: request.content ?? current.content ?? '',
+												allowed_mentions: {parse: [], replied_user: false},
+												...(request.attachments === undefined
+													? {}
+													: {
+															attachments: request.attachments.map((attachment) =>
+																'upload_filename' in attachment
+																	? {...attachment, title: null, description: null, flags: 0}
+																	: {id: BigInt(attachment.id), flags: 0},
+															),
+														}),
+											},
+											requestCache: cache,
+											expectedVersion: plan.message_version,
+										}),
+								),
 							{channelId: request.thread_id, messageId: request.thread_id},
 						);
 						return {

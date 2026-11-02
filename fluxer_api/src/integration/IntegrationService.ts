@@ -54,7 +54,16 @@ export class IntegrationService {
 		// 绕过会话缓存读取权威状态，撤销和账户禁用即时影响本次解析。
 		const hash = createHash('sha256').update(token).digest();
 		const session = await this.sessions.getAuthoritativeAuthSession(hash);
-		if (!session) throw new IntegrationError('INVALID_TOKEN', 'Session is invalid');
+		const now = Date.now();
+		if (
+			!session ||
+			(session.authMethod === 'sso' &&
+				(!(session.createdAt instanceof Date) ||
+					!Number.isFinite(session.createdAt.getTime()) ||
+					session.createdAt.getTime() > now + 30_000)) ||
+			session.isExpiredSsoSession(now)
+		)
+			throw new IntegrationError('INVALID_TOKEN', 'Session is invalid');
 		const user = await this.availableUser(session.userId);
 		if (user.traits.has('discord_integration')) await this.identities.findDiscordId(user.id);
 		return {user, session, hash: hash.toString('base64url')};

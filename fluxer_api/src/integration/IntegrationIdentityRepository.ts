@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {UserID} from '@app/api/BrandedTypes';
+import {readSafeIntegerVersion} from '@app/api/database/CassandraVersion';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import type {DiscordProfile} from '@app/integration/IntegrationSchemas';
 import {getClient} from '@pkgs/cassandra/src/Client';
@@ -89,16 +90,19 @@ export class IntegrationIdentityRepository {
 
 	/** 提交当前登录主体并写入历史，锁由完成步骤单独释放 */
 	async setCurrent(userId: UserID, discordId: string, operationId: string, version: number): Promise<number> {
+		const requestedVersion = readSafeIntegerVersion(version);
 		const current = await getClient().execute(
 			'SELECT binding_version, binding_operation FROM integration_user_identities WHERE user_id = ?',
 			[userId],
 			INTEGRATION_QUERY_OPTIONS,
 		);
-		if (current.first()?.binding_operation === operationId) return Number(current.first()?.binding_version);
-		const nextVersion = Math.max(version, Number(current.first()?.binding_version ?? 1) + 1);
+		const row = current.first();
+		if (row?.binding_operation === operationId) return readSafeIntegerVersion(row.binding_version);
+		const previous = readSafeIntegerVersion(row?.binding_version ?? 1);
+		const nextVersion = readSafeIntegerVersion(Math.max(requestedVersion, previous + 1));
 		const result = await getClient().execute(
 			'UPDATE integration_user_identities SET discord_user_id = ?, binding_version = ?, binding_operation = ? WHERE user_id = ? IF rebind_operation = ?',
-			[discordId, nextVersion, operationId, userId, operationId],
+			[discordId, BigInt(nextVersion), operationId, userId, operationId],
 			INTEGRATION_QUERY_OPTIONS,
 		);
 		if (!result.wasApplied()) throw new IntegrationError('IDENTITY_CONFLICT', 'Binding ownership mismatch');
@@ -124,7 +128,7 @@ export class IntegrationIdentityRepository {
 			[userId],
 			INTEGRATION_QUERY_OPTIONS,
 		);
-		return Number(result.first()?.binding_version ?? 1);
+		return readSafeIntegerVersion(result.first()?.binding_version ?? 1);
 	}
 
 	/** 仅由持锁操作释放账户变更门禁 */

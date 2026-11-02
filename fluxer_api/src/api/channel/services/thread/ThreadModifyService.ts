@@ -29,6 +29,10 @@ import {getKVThreadAutoArchiveQueue} from '@app/api/middleware/ServiceSingletons
 import type {Channel} from '@app/api/models/Channel';
 import {deleteChannelMessageSearchDocuments} from '@app/api/search/MessageSearchIndexCleanup';
 import {deleteThreadSearchDocuments} from '@app/api/search/thread/ThreadSearchService';
+import {
+	finishIntegrationContentChange,
+	prepareIntegrationContentChange,
+} from '@app/integration/IntegrationContentHooks';
 import {AuditLogActionType} from '@fluxer/constants/src/AuditLogActionType';
 import {MessageTypes} from '@fluxer/constants/src/ChannelConstants';
 import {
@@ -139,8 +143,21 @@ export class ThreadModifyService {
 		};
 		if (delegatedForumFields && Object.keys(input).some((key) => key !== 'name' && key !== 'archived'))
 			throw new InvalidChannelTypeError();
+		const baseOnly =
+			state.externalLocked &&
+			Object.keys(input).every((key) => key === 'type' || key === 'locked' || key === 'archived');
+		const permissionActor = baseOnly
+			? {
+					...thread.actor,
+					thread: {
+						...thread.actor.thread,
+						locked: state.nativeLocked ?? false,
+						archived: state.nativeArchived ?? false,
+					},
+				}
+			: thread.actor;
 		if (!delegatedForumFields || (state.locked && patch.archived === false))
-			assertThreadAllowed(threadPatchRequirement(patch, state.flags, thread.actor));
+			assertThreadAllowed(threadPatchRequirement(patch, state.flags, permissionActor));
 		const appliedTags =
 			data.applied_tags !== undefined
 				? await this.resolvePatchedTags(
@@ -179,6 +196,7 @@ export class ThreadModifyService {
 			flags: data.flags,
 			applied_tags: appliedTags,
 		};
+		await prepareIntegrationContentChange(channel.id);
 		const transition = await this.deps.channelRepository.threads.updateState(channel.id, (current) =>
 			data.auto_archive_duration !== undefined && data.auto_archive_duration !== current.autoArchiveDuration
 				? {...statePatch, archive_timestamp: new Date()}
@@ -225,6 +243,7 @@ export class ThreadModifyService {
 			});
 		}
 		if (renamed) await this.sendNameChangeMessage(updatedChannel, userId);
+		await finishIntegrationContentChange(channel.id);
 		return updatedChannel;
 	}
 

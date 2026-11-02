@@ -7781,6 +7781,18 @@
 				{
 					"name": "state_version",
 					"type": "int"
+				},
+				{
+					"name": "native_locked",
+					"type": "boolean"
+				},
+				{
+					"name": "native_archived",
+					"type": "boolean"
+				},
+				{
+					"name": "external_locked",
+					"type": "boolean"
 				}
 			],
 			"primary_key": "((thread_id))",

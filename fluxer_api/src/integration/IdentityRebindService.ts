@@ -7,6 +7,7 @@ import {createUserID} from '@app/api/BrandedTypes';
 import {isAccountClosed, isTemporarilyBanned} from '@app/api/user/UserHelpers';
 import {DiscordAccountService} from '@app/integration/DiscordAccountService';
 import {IntegrationError} from '@app/integration/IntegrationError';
+import {publishIntegrationEvent} from '@app/integration/IntegrationEvents';
 import {IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
 import {IntegrationOperationRepository} from '@app/integration/IntegrationOperationRepository';
 import type {IntegrationSchemas} from '@app/integration/IntegrationSchemas';
@@ -39,6 +40,26 @@ interface RebindPlan {
 }
 
 export class IdentityRebindService {
+	/** 已完成操作重发稳定失效事件，关闭完成结果与发布之间的崩溃窗口 */
+	private async publishResult(plan: RebindPlan, operationId: string): Promise<void> {
+		await publishIntegrationEvent(
+			'events.identity.v1.binding_changed',
+			{
+				discord_user_id: plan.discord_user_id,
+				previous_discord_user_id: plan.previous_discord_user_id,
+				user_id: plan.user_id,
+				version: plan.version,
+				...(plan.merged_user_id ? {merged_user_id: plan.merged_user_id} : {}),
+			},
+			{eventId: `${operationId}:binding`},
+		);
+		for (const userId of [plan.user_id, ...(plan.merged_user_id ? [plan.merged_user_id] : [])])
+			await publishIntegrationEvent(
+				'events.auth.v1.user_invalidated',
+				{user_id: userId},
+				{eventId: `${operationId}:user:${userId}`},
+			);
+	}
 	/** 注入原生账户依赖及可替换仓储以验证中断恢复 */
 	constructor(
 		private readonly context: ApiContext,
@@ -115,7 +136,9 @@ export class IdentityRebindService {
 		if (operation.result) {
 			await this.identities.unlockRebind(userId, request.operation_id);
 			if (sourceId) await this.identities.unlockRebind(sourceId, request.operation_id);
-			return JSON.parse(operation.result) as RebindPlan;
+			const result = JSON.parse(operation.result) as RebindPlan;
+			await this.publishResult(result, request.operation_id);
+			return result;
 		}
 		const actor = await this.context.services.users.findUnique(userId);
 		if (!actor || isAccountClosed(actor) || isTemporarilyBanned(actor) || (actor.flags & UserFlags.DISABLED) !== 0n)
@@ -130,7 +153,9 @@ export class IdentityRebindService {
 		if (latest?.result) {
 			await this.identities.unlockRebind(userId, request.operation_id);
 			if (sourceId) await this.identities.unlockRebind(sourceId, request.operation_id);
-			return JSON.parse(latest.result) as RebindPlan;
+			const result = JSON.parse(latest.result) as RebindPlan;
+			await this.publishResult(result, request.operation_id);
+			return result;
 		}
 		const currentDiscord = await this.identities.currentDuringRebind(userId, request.operation_id);
 		if (currentDiscord !== plan.previous_discord_user_id && currentDiscord !== plan.discord_user_id) {
@@ -157,6 +182,7 @@ export class IdentityRebindService {
 		await this.operations.complete(request.operation_id, plan);
 		await this.identities.unlockRebind(userId, request.operation_id);
 		if (sourceId) await this.identities.unlockRebind(sourceId, request.operation_id);
+		await this.publishResult(plan, request.operation_id);
 		return plan;
 	}
 }

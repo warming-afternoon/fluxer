@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {createAuthHarness, createTestAccount} from '@app/api/auth/tests/AuthTestUtils';
-import {createChannelID} from '@app/api/BrandedTypes';
+import {createChannelID, createGuildID} from '@app/api/BrandedTypes';
 import {createApiContext} from '@app/api/CreateApiContext';
 import {ChannelRepository} from '@app/api/channel/ChannelRepository';
+import type {ThreadPolicy} from '@app/api/channel/services/thread/ThreadPolicyRepository';
 import {ThreadPolicyRepository} from '@app/api/channel/services/thread/ThreadPolicyRepository';
 import {createGuild, setupTestGuildWithMembers} from '@app/api/channel/tests/ChannelTestUtils';
 import {threadsRequest} from '@app/api/channel/tests/ThreadTestUtils';
@@ -291,5 +292,89 @@ describe('restricted content RPC native business paths', () => {
 			before_content: 'historical body',
 			after_content: 'body edited by B',
 		});
+	});
+
+	it('projects independently sourced external locks into real native archive indexes and retains native admin changes on release', async () => {
+		const owner = await createTestAccount(harness);
+		await ensureSessionStarted(harness, owner.token);
+		const guild = await createGuild(harness, owner.token, 'policies');
+		const forum = await threadsRequest<{id: string}>(harness, owner.token)
+			.post(`/guilds/${guild.id}/channels`)
+			.body({name: 'forum', type: ChannelTypes.GUILD_FORUM})
+			.execute();
+		vi.stubEnv('INTEGRATION_GUILD_ID', guild.id);
+		vi.stubEnv(
+			'INTEGRATION_FORUM_CHANNEL_IDS',
+			[forum.id, '111111111111111111', '222222222222222222', '333333333333333333'].join(','),
+		);
+		vi.stubEnv('FLUXER_THREAD_POLICY_ENABLED', 'true');
+		const policies = new Map<string, ThreadPolicy>();
+		vi.spyOn(ThreadPolicyRepository.prototype, 'set').mockImplementation(async (_channel, _user, policy) => {
+			policies.set(policy.source, policy);
+		});
+		vi.spyOn(ThreadPolicyRepository.prototype, 'list').mockImplementation(async () => [...policies.values()]);
+		vi.spyOn(ThreadPolicyRepository.prototype, 'hasActiveLock').mockImplementation(async () =>
+			[...policies.values()].some((policy) => policy.kind === 'lock' && policy.active),
+		);
+		const service = new IntegrationContentService(createApiContext(), new MemoryOperations());
+		const base = {
+			version: 1,
+			request_id: 'request_policy_native',
+			operation_id: 'operation_policy_create',
+			actor_user_id: owner.userId,
+			guild_id: guild.id,
+		};
+		const created = (await service.dispatch('rpc.content.v1.thread.create_service', {
+			...base,
+			channel_id: forum.id,
+			name: 'policy post',
+			content: 'body',
+		})) as {thread_id: string};
+		const repository = new ChannelRepository();
+		let revision = 0;
+		const change = async (source: string, active: boolean) =>
+			service.dispatch('rpc.content.v1.thread.policy_service', {
+				...base,
+				operation_id: `operation_policy_change_${++revision}`,
+				thread_id: created.thread_id,
+				kind: 'lock',
+				source,
+				active,
+				policy_version: revision,
+			});
+		await change('forum_work_lock', true);
+		expect(await repository.threads.getState(createChannelID(BigInt(created.thread_id)))).toMatchObject({
+			locked: true,
+			archived: true,
+		});
+		expect(await repository.threads.listActiveThreads(createGuildID(BigInt(guild.id)))).toHaveLength(0);
+		await threadsRequest(harness, owner.token)
+			.patch(`/channels/${created.thread_id}`)
+			.body({archived: false, locked: false})
+			.execute();
+		expect(await repository.threads.getState(createChannelID(BigInt(created.thread_id)))).toMatchObject({
+			locked: true,
+			archived: true,
+		});
+		await change('forum_soft_delete', true);
+		await change('forum_work_lock', false);
+		expect((await repository.threads.getState(createChannelID(BigInt(created.thread_id))))?.externalLocked).toBe(true);
+		await threadsRequest(harness, owner.token)
+			.patch(`/channels/${created.thread_id}`)
+			.body({archived: true, locked: true})
+			.execute();
+		await change('forum_soft_delete', false);
+		expect(await repository.threads.getState(createChannelID(BigInt(created.thread_id)))).toMatchObject({
+			locked: true,
+			archived: true,
+			externalLocked: false,
+			nativeLocked: true,
+			nativeArchived: true,
+		});
+		await threadsRequest(harness, owner.token)
+			.patch(`/channels/${created.thread_id}`)
+			.body({archived: false, locked: false})
+			.execute();
+		expect(await repository.threads.listActiveThreads(createGuildID(BigInt(guild.id)))).toHaveLength(1);
 	});
 });

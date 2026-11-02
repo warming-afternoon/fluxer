@@ -6,6 +6,7 @@ import {createApiContext} from '@app/api/CreateApiContext';
 import type {ApiTestHarness} from '@app/api/test/ApiTestHarness';
 import {DiscordAccountService} from '@app/integration/DiscordAccountService';
 import {IdentityRebindService} from '@app/integration/IdentityRebindService';
+import * as IntegrationEvents from '@app/integration/IntegrationEvents';
 import {IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
 import {
 	type IntegrationOperation,
@@ -92,6 +93,7 @@ describe('administrative identity rebind', () => {
 	});
 
 	it('merges an active C with its own password, preserves B password and revokes both sessions; same request recovers after interruption', async () => {
+		const published = vi.spyOn(IntegrationEvents, 'publishIntegrationEvent').mockResolvedValue();
 		const [admin, b, c] = await Promise.all([
 			createTestAccount(harness),
 			createTestAccount(harness),
@@ -142,6 +144,17 @@ describe('administrative identity rebind', () => {
 		expect(await identities.canonicalUserId(cId)).toBe(bId);
 		expect(identities.locks.size).toBe(0);
 		await expect(service.rebind(request)).resolves.toEqual(result);
+		expect(published).toHaveBeenCalledWith(
+			'events.identity.v1.binding_changed',
+			expect.objectContaining({discord_user_id: request.discord_user_id, user_id: b.userId, merged_user_id: c.userId}),
+			{eventId: `${request.operation_id}:binding`},
+		);
+		for (const id of [b.userId, c.userId])
+			expect(published).toHaveBeenCalledWith(
+				'events.auth.v1.user_invalidated',
+				{user_id: id},
+				{eventId: `${request.operation_id}:user:${id}`},
+			);
 		await expect(service.rebind({...request, user_id: c.userId})).rejects.toMatchObject({code: 'OPERATION_CONFLICT'});
 	});
 });

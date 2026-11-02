@@ -5,6 +5,7 @@ import type {ApiContext} from '@app/api/ApiContext';
 import {createChannelID, createGuildID, createMessageID, createUserID} from '@app/api/BrandedTypes';
 import {ChannelRepository} from '@app/api/channel/ChannelRepository';
 import {ThreadMoveService} from '@app/api/channel/services/thread/ThreadMoveService';
+import {ThreadPolicyProjectionService} from '@app/api/channel/services/thread/ThreadPolicyProjectionService';
 import {
 	ThreadPolicyRepository,
 	ThreadPolicyVersionConflictError,
@@ -14,6 +15,7 @@ import {createRequestCache} from '@app/api/middleware/RequestCacheMiddleware';
 import {RequestServices} from '@app/api/middleware/ServiceMiddleware';
 import {getGuildAuditLogService, getGuildRepository} from '@app/api/middleware/ServiceSingletons';
 import {isAccountClosed, isTemporarilyBanned} from '@app/api/user/UserHelpers';
+import {prepareIntegrationContentChange} from '@app/integration/IntegrationContentHooks';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {IntegrationOperationRepository} from '@app/integration/IntegrationOperationRepository';
 import {IntegrationSchemas} from '@app/integration/IntegrationSchemas';
@@ -99,11 +101,12 @@ export class IntegrationContentService {
 					operation_id: request.operation_id,
 					fingerprint,
 					actor_id: BigInt(request.actor_user_id),
-					payload: JSON.stringify(await prepare()),
+					payload: JSON.stringify({operation_request: request, operation_plan: await prepare()}),
 					result: null,
 				});
 			hasPersistedPlan = true;
-			const result = await apply(JSON.parse(record.payload) as P);
+			const saved = JSON.parse(record.payload);
+			const result = await apply((saved.operation_plan ?? saved) as P);
 			if (!(await this.context.services.cache.extendLock(key, lease, 120)))
 				throw new IntegrationError('BUSY', 'Operation lease expired; retry the same operation', true);
 			await this.operations.complete(request.operation_id, result);
@@ -248,6 +251,12 @@ export class IntegrationContentService {
 						});
 						if (parentAuth.channel.guildId?.toString() !== request.guild_id)
 							throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Forum belongs to another guild');
+						await prepareIntegrationContentChange(createChannelID(BigInt(plan.thread_id)), {
+							guild_id: request.guild_id,
+							channel_id: request.channel_id,
+							thread_id: plan.thread_id,
+							creation_operation_id: request.operation_id,
+						});
 						await services.threadService.creation.createForumPost({
 							viewer,
 							user,
@@ -306,12 +315,21 @@ export class IntegrationContentService {
 								throw new IntegrationError('OPERATION_CONFLICT', error.message);
 							throw error;
 						}
+						const projected =
+							request.kind === 'lock'
+								? await new ThreadPolicyProjectionService(this.context).project(
+										createChannelID(BigInt(request.thread_id)),
+									)
+								: null;
 						return {
 							guild_id: request.guild_id,
 							channel_id: plan.channel_id,
 							thread_id: request.thread_id,
 							source: request.source,
 							policy_version: request.policy_version,
+							...(projected
+								? {state_version: projected.stateVersion, archived: projected.archived, locked: projected.locked}
+								: {}),
 							event_id: request.operation_id,
 						};
 					},

@@ -165,6 +165,12 @@ export class IntegrationIdentityRepository {
 				[1n],
 				INTEGRATION_QUERY_OPTIONS,
 			);
+		if (process.env.FLUXER_THREAD_POLICY_ENABLED === 'true')
+			await getClient().execute(
+				'SELECT native_locked, native_archived, external_locked FROM thread_state WHERE thread_id = ?',
+				[1n],
+				INTEGRATION_QUERY_OPTIONS,
+			);
 		await getClient().execute(
 			'SELECT discord_user_id FROM integration_discord_identities WHERE discord_user_id = ?',
 			['__readiness__'],

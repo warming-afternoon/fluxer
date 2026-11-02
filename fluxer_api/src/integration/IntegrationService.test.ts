@@ -319,11 +319,29 @@ describe('Integration native authority', () => {
 		const account = await createTestAccount(harness);
 		const context = createApiContext();
 		const exchanges = new IntegrationExchangeRepository(Buffer.alloc(32, 1));
-		const request = IntegrationSchemas['rpc.auth.v1.external.exchange'].parse({version: 1, request_id: operation, exchange_id: operation, discord_user_id: '987654321098765432', verified_at: new Date().toISOString(), profile, origin: {ip: '127.0.0.1', user_agent: null, client_os: null}});
-		vi.spyOn(exchanges, 'find').mockResolvedValue({fingerprint: createHash('sha256').update(JSON.stringify({...request, request_id: undefined})).digest('hex'), user_id: createUserID(BigInt(account.userId)), encrypted_token: 'prepared', state: 'allocated', expires_at: new Date(Date.now() + 600_000)});
+		const request = IntegrationSchemas['rpc.auth.v1.external.exchange'].parse({
+			version: 1,
+			request_id: operation,
+			exchange_id: operation,
+			discord_user_id: '987654321098765432',
+			verified_at: new Date().toISOString(),
+			profile,
+			origin: {ip: '127.0.0.1', user_agent: null, client_os: null},
+		});
+		vi.spyOn(exchanges, 'find').mockResolvedValue({
+			fingerprint: createHash('sha256')
+				.update(JSON.stringify({...request, request_id: undefined}))
+				.digest('hex'),
+			user_id: createUserID(BigInt(account.userId)),
+			encrypted_token: 'prepared',
+			state: 'allocated',
+			expires_at: new Date(Date.now() + 600_000),
+		});
 		const create = vi.spyOn(AuthSession, 'createAuthSession');
 		const service = new IntegrationService(context, exchanges);
-		await expect(service.dispatch('rpc.auth.v1.external.exchange', request)).rejects.toMatchObject({code: 'IDENTITY_NOT_CURRENT'});
+		await expect(service.dispatch('rpc.auth.v1.external.exchange', request)).rejects.toMatchObject({
+			code: 'IDENTITY_NOT_CURRENT',
+		});
 		expect(create).not.toHaveBeenCalled();
 	});
 });

@@ -162,6 +162,24 @@ test('事件发布账号仅订阅专用确认收件箱，Forum 独占固定内�
 	]) {
 		assert.equal(compose.services[service].environment.INTEGRATION_EVENT_INBOX_PREFIX, prefix);
 		assert.ok(compose.services[service].environment.FLUXER_THREAD_POLICY_ENABLED);
+		assert.equal(
+			compose.services[service].environment.INTEGRATION_GUILD_ID,
+			compose.services['fluxer-integration'].environment.INTEGRATION_GUILD_ID,
+		);
+		assert.equal(
+			compose.services[service].environment.INTEGRATION_FORUM_CHANNEL_IDS,
+			compose.services['fluxer-integration'].environment.INTEGRATION_FORUM_CHANNEL_IDS,
+		);
+	}
+});
+
+test('外部锁基态三列同时进入原生目标 schema 和既有库迁移', () => {
+	const target = JSON.parse(fs.readFileSync(path.join(root, 'tools/dev/cassandra_target_schema.json'), 'utf8'));
+	const table = target.tables.find((entry) => entry.name === 'thread_state');
+	const migration = fs.readFileSync(path.join(root, 'fluxer_api/src/integration/upgrade-v3-thread-policy.cql'), 'utf8');
+	for (const name of ['native_locked', 'native_archived', 'external_locked']) {
+		assert.ok(table.columns.some((column) => column.name === name && column.type === 'boolean'));
+		assert.ok(migration.includes(`ALTER TABLE thread_state ADD ${name} boolean;`));
 	}
 });
 

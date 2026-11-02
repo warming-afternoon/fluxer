@@ -30,6 +30,18 @@ const OPTIONS = {
 export class ThreadPolicyVersionConflictError extends Error {}
 
 export class ThreadPolicyRepository {
+	/** 外部锁由全部持久来源组合，解除一个来源不能清除另一个来源 */
+	async hasActiveLock(channelId: ChannelID): Promise<boolean> {
+		const result = await getClient().execute(
+			'SELECT kind, active, expires_at FROM thread_external_policies WHERE thread_id = ? AND user_id = ?',
+			[channelId, 0n],
+			OPTIONS,
+		);
+		const now = Date.now();
+		return result.rows.some(
+			(row) => row.kind === 'lock' && row.active && (!row.expires_at || row.expires_at.getTime() > now),
+		);
+	}
 	/** 读取 thread 级锁及用户处罚，不改变原生锁字段 */
 	async list(channelId: ChannelID, userId: UserID): Promise<Array<ThreadPolicy>> {
 		const result = await getClient().execute(

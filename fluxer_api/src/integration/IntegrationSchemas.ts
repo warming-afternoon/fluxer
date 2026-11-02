@@ -114,7 +114,9 @@ export const IntegrationSchemas = {
 	})
 		.strict()
 		.refine((value) =>
-			value.kind === 'lock' ? value.target_user_id === undefined : value.target_user_id !== undefined,
+			value.kind === 'lock'
+				? value.target_user_id === undefined && value.expires_at == null
+				: value.target_user_id !== undefined,
 		),
 	'rpc.content.v1.starter.edit_service': ServiceOperation.extend({
 		/** 原生帖子，其首消息 ID 相同 */

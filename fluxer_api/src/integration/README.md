@@ -2,7 +2,7 @@
 
 使用现有 `fluxer_api` 构建流程，在 API 镜像中运行 `node dist/IntegrationEntrypoint.js`。开发命令为 `pnpm --filter fluxer_api start:integration`。集成进程复用原生仓储、Snowflake ID、账户初始化、资产存储、密码逻辑和会话，不启动原生公共 API 或定时任务。
 
-全新部署在原生 Cassandra keyspace 中应用 `schema.cql`；已安装第一版身份表的环境先逐条执行一次 `upgrade-v2.cql`，再应用 `schema.cql` 创建新增表。不能只运行 `CREATE TABLE IF NOT EXISTS` 升级既有列。身份权威存储仅支持 Cassandra。现有内部 NATS/JetStream 配置保持独立，原生服务、网关调用和任务发布仍使用内部代理。
+先使用最新原生目标 schema 创建或升级原生库；已有原生库也可逐条执行一次 `upgrade-v3-thread-policy.cql` 补齐 thread 原生基态列。全新集成部署再应用 `schema.cql`；已安装第一版身份表的环境先逐条执行一次 `upgrade-v2.cql`，再应用 `schema.cql` 创建新增表。不能只运行 `CREATE TABLE IF NOT EXISTS` 升级既有列。身份权威存储仅支持 Cassandra。现有内部 NATS/JetStream 配置保持独立，原生服务、网关调用和任务发布仍使用内部代理。
 
 | 环境变量 | 含义 |
 | --- | --- |
@@ -64,13 +64,21 @@ Bot 预建与 Forum 外部登录共用 `ensureDiscordAccount`。每个 Discord �
 
 创建返回 `{guild_id,channel_id,thread_id,message_id,state_version,event_id}`；首消息 ID 与 thread ID 相同。移动另返回 `source_channel_id,target_channel_id`。`event_id` 在 RPC 结果中为操作 ID，仅用于关联操作；实际异步内容事件版本由事件发布层维护，不能把 `ThreadState.stateVersion` 当作正文或反应变化的全局版本。读取返回 `{guild_id,channel_id,thread_id,state_version,archived,locked,message}`。
 
-`kind:"deny_send"` 必须有 `target_user_id`，只禁止该 thread 下发言及新建子帖，不额外禁止正文编辑、读取、收藏、反应或标签；锁定与归档仍按各自规则禁止正文编辑。`kind:"lock"` 不填写目标用户，以 `user_id=0` 保存 thread 级外部来源，禁止发言、新建子帖及正文编辑，不改原生 `locked`。来源匹配 `forum_[a-zA-Z0-9_-]{1,64}`。Forum 聚合锁使用 `forum_work_lock`，软删除用 `forum_soft_delete`；恢复只撤销自己的来源，不能解除其他来源或原生锁。`policy_version` 在 `(thread,user,source)` 内单调，旧版本为无副作用重试，同版不同内容拒绝。软删除不调用原生 purge，首期无可恢复 purge RPC。
+`kind:"deny_send"` 必须有 `target_user_id`，只禁止该 thread 下发言及新建子帖，不额外禁止正文编辑、读取、收藏、反应或标签；锁定与归档仍按各自规则禁止正文编辑。`kind:"lock"` 不填写目标用户，以 `user_id=0` 保存 thread 级外部来源。服务读取全部持久有效来源，把实际原生 `locked/archived` 投影为“原生基态或外部锁”，同步活动/归档索引、自动归档队列、搜索及网关。原生基态分别保存在 `native_locked/native_archived`；外部生效时原生管理员设置的锁/归档也保留为新基态，不能用原生 unarchive 绕过外部限制。解除一个外部来源不会清除另一个来源或原生基态。首期锁是显式解除，不接受非空 `expires_at`；用户发言处罚仍支持期限。
+
+来源匹配 `forum_[a-zA-Z0-9_-]{1,64}`。Forum 聚合锁使用 `forum_work_lock`，软删除用 `forum_soft_delete`；恢复只撤销自己的来源。`policy_version` 在 `(thread,user,source)` 内单调，旧版本为无副作用重试，同版不同内容拒绝。软删除不调用原生 purge，首期无可恢复 purge RPC。
 
 内容日志记录终止的原生校验失败，重复操作得到相同错误；存储或发布结果不确定时保留计划和资源占用，重试必须沿用同一 operation ID。正文操作保存原消息版本，已完成写入可恢复成功，后来出现不同正文时返回 `MESSAGE_VERSION_CONFLICT`，不把旧请求覆盖回去。
 
 ## 会话与事件限制
 
-新的会话解析绕过原生短期会话缓存，读取原生会话与当前账户状态。失效事件为加速提示，采用尽力交付，没有持久化 outbox。若只有发布者连接故障、Forum 连接仍正常，Forum 不一定更换缓存代次；未收到事件的已有正缓存可能保持到原先最长一小时的 TTL，不能保证立即撤销。新的 RPC 解析仍读取权威状态并拒绝失效会话。
+会话解析仍读取权威存储。事件现采用 Cassandra `integration_event_journal` 与外部 JetStream 持久确认，发送失败保留待发记录，恢复时沿用相同 `event_id`。接收端使用 `ODYSSEIA_AUTH/forum-auth` 持久消费者，绑定变更也进入该流。消费端必须在持久 inbox/缓存代次处理成功后 ACK；检测到消费者重建、保留窗口缺口或失去连续性时，必须清空正缓存并重新读取权威状态。敏感操作不能只依赖事件缓存；跨进程撤销不承诺瞬时传播。
+
+日志按固定十六分片保存 `d:` 资源跟踪、`s:` 快照摘要和独立版本、`p:` 待发事件。同分区条件批次原子写快照版本与待发事件，避免仅保存版本却丢失通知。原生消息创建/编辑/删除、逐表情反应、帖子创建/修改/删除路径在写入前持久化资源跟踪，提交后立即重读原生快照；普通读取 404 或依赖失败不会被当作删除，删除事件必须有显式原生删除意图。写前日志存储不可用时不开始对应原生变更。
+
+API、worker 和 integration 进程启动时恢复日志。每秒推进一个分片，最多处理一百条待发与一百条资源跟踪，分别保留键游标并循环覆盖新插入的小键；待发记录无 TTL 或最大重试丢弃。broker 失败保留数据并等待下轮。启动和每轮完成十分钟后对配置四个论坛分页对账，每页二十帖；已关联身份索引每三十秒一页一百条，完整一轮后等待十分钟。对账不扫描历史操作日志或全部原生用户。大量积压与依赖故障会延长恢复时间，不能把上述调度间隔当作端到端最大延迟。
+
+内容流为 `ODYSSEIA_CONTENT/forum-index`，主题 `events.content.v1.thread.changed` 与 `.deleted`。事件包含 `{event_id,occurred_at,platform,guild_id,channel_id,thread_id,state_version,creation_operation_id,snapshot}`，snapshot 包含标题、正文、作者、图片、原生 emoji 对象及各自计数、回复数、归档和锁定状态。`state_version` 是独立投影版本，不使用只覆盖线程元数据的原生 `ThreadState.stateVersion`。创建 RPC 在原生副作用前持久化通用 `creation_operation_id`，消费方据此关联自己的创建任务，避免子帖被误当作新作品。native 独立创建不携此相关性。
 
 原生仓储撤销与账户状态变更发送顶层事件：
 

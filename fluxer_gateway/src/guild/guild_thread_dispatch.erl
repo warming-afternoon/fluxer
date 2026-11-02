@@ -135,6 +135,13 @@ thread_create(Data, State0) ->
 %% 合并成员恢复前后的候选，取消归档时也通知未持有浏览租约的成员
 -spec thread_update(map(), guild_state()) -> {[delivery()], guild_state()}.
 thread_update(Data, State0) ->
+    case guild_state_threads:thread_update_allowed(Data, State0) of
+        true -> apply_thread_update(Data, State0);
+        false -> {[], State0}
+    end.
+
+-spec apply_thread_update(map(), guild_state()) -> {[delivery()], guild_state()}.
+apply_thread_update(Data, State0) ->
     ThreadId = snowflake_id:parse(maps:get(<<"id">>, Data)),
     WasActive = guild_thread_gate:thread(ThreadId, State0) =/= undefined,
     Before = thread_or_context(ThreadId, Data, State0),

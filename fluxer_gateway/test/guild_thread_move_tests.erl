@@ -292,3 +292,175 @@ store_move_preserves_member_count_test() ->
     after
         guild_thread_store:destroy(Tab)
     end.
+
+versioned_thread(Parent, Version) ->
+    (thread(?T1, Parent, 11))#{<<"_fluxer_state_version">> => Version}.
+
+moved_state(State0) ->
+    State1 = guild_thread_subscriptions:update(<<"p">>, #{threads => true}, State0),
+    Moved = dispatch(thread_update, versioned_thread(?HIDDEN, 2), State1),
+    ?assertMatch([_], received(p, thread_delete, drain())),
+    Moved.
+
+assert_hidden(State) ->
+    Tab = guild_thread_gate:store(State),
+    Current = guild_thread_gate:thread(?T1, State),
+    ?assertEqual(?HIDDEN, guild_thread_permissions:parent_id(Current)),
+    ?assertEqual(2, maps:get(<<"_fluxer_state_version">>, Current)),
+    ?assertEqual([], guild_thread_store:parent_thread_ids(Tab, ?TEXT) -- [?T2]),
+    ?assertEqual([?T1], guild_thread_store:parent_thread_ids(Tab, ?HIDDEN)),
+    ?assert(guild_thread_store:is_member(Tab, ?T1, ?A)).
+
+late_source_update_does_not_restore_removed_viewer_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        After = dispatch(thread_update, versioned_thread(?TEXT, 1), Moved),
+        assert_hidden(After),
+        ?assertEqual([], drain()),
+        ?assertEqual(1, guild_thread_store:member_count(guild_thread_gate:store(After), ?T1))
+    end).
+
+same_version_conflicting_scope_is_ignored_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        SameVersion = dispatch(thread_update, versioned_thread(?TEXT, 2), Moved),
+        SameType = (versioned_thread(?HIDDEN, 2))#{<<"type">> => 12},
+        After = dispatch(thread_update, SameType, SameVersion),
+        assert_hidden(After),
+        ?assertEqual(11, maps:get(<<"type">>, guild_thread_gate:thread(?T1, After))),
+        ?assertEqual([], drain())
+    end).
+
+same_version_native_title_and_slowmode_edit_is_delivered_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        Edit = (versioned_thread(?HIDDEN, 2))#{
+            <<"name">> => <<"new title">>, <<"rate_limit_per_user">> => 15
+        },
+        After = dispatch(thread_update, Edit, Moved),
+        assert_hidden(After),
+        Current = guild_thread_gate:thread(?T1, After),
+        ?assertEqual(<<"new title">>, maps:get(<<"name">>, Current)),
+        ?assertEqual(15, maps:get(<<"rate_limit_per_user">>, Current)),
+        Events = drain(),
+        ?assertMatch([_], received(a, thread_update, Events)),
+        ?assertEqual([], received(p, thread_create, Events)),
+        ?assertEqual([], received(p, thread_update, Events)),
+        ?assert(lists:all(fun({_Tag, _Event, Payload}) ->
+            not maps:is_key(<<"_fluxer_state_version">>, Payload)
+        end, Events)),
+        _Replay = dispatch(thread_update, Edit, After),
+        ?assertEqual([], drain())
+    end).
+
+newer_version_may_legitimately_move_back_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        After = dispatch(thread_update, versioned_thread(?TEXT, 3), Moved),
+        ?assertEqual(?TEXT, guild_thread_permissions:parent_id(guild_thread_gate:thread(?T1, After))),
+        ?assertEqual([], guild_thread_store:parent_thread_ids(guild_thread_gate:store(After), ?HIDDEN)),
+        ?assertMatch([_], received(p, thread_create, drain())),
+        ?assertEqual(1, guild_thread_store:member_count(guild_thread_gate:store(After), ?T1))
+    end).
+
+missing_version_cannot_change_bound_parent_or_erase_watermark_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        Unchanged = dispatch(thread_update, thread(?T1, ?TEXT, 11), Moved),
+        ?assertEqual([], drain()),
+        Edit = (thread(?T1, ?HIDDEN, 11))#{<<"name">> => <<"legacy title">>},
+        AfterEdit = dispatch(thread_update, Edit, Unchanged),
+        ?assertMatch([_], received(a, thread_update, drain())),
+        AfterLate = dispatch(thread_update, versioned_thread(?TEXT, 1), AfterEdit),
+        assert_hidden(AfterLate),
+        ?assertEqual(<<"legacy title">>, maps:get(<<"name">>, guild_thread_gate:thread(?T1, AfterLate))),
+        ?assertEqual([], drain())
+    end).
+
+malformed_explicit_versions_are_not_legacy_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        After = lists:foldl(fun(Version, Acc) ->
+            dispatch(thread_update, versioned_thread(?TEXT, Version), Acc)
+        end, Moved, [-1, 2.0, <<"3">>, null, undefined]),
+        assert_hidden(After),
+        ?assertEqual([], drain())
+    end).
+
+direct_store_update_obeys_version_boundary_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        After = guild_state_threads:apply_event(thread_update, versioned_thread(?TEXT, 1), Moved),
+        assert_hidden(After),
+        ?assertEqual([], drain())
+    end).
+
+stale_member_context_cannot_restore_old_parent_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        Data = #{<<"id">> => integer_to_binary(?T1),
+            <<"_fluxer_thread">> => versioned_thread(?TEXT, 1),
+            <<"added_members">> => [thread_member(?T1, ?P)], <<"member_count">> => 2},
+        After = dispatch(thread_members_update, Data, Moved),
+        assert_hidden(After),
+        Tab = guild_thread_gate:store(After),
+        ?assertEqual(2, guild_thread_store:member_count(Tab, ?T1)),
+        ?assert(guild_thread_store:is_member(Tab, ?T1, ?P)),
+        ?assertEqual([], received(p, thread_create, drain()))
+    end).
+
+private_version_survives_store_handoff_but_not_wire_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        Tab = guild_thread_store:import(guild_thread_store:export(guild_thread_gate:store(Moved))),
+        try
+            After = Moved#{data => (maps:get(data, Moved))#{thread_store => Tab}},
+            Rejected = dispatch(thread_update, versioned_thread(?TEXT, 1), After),
+            assert_hidden(Rejected),
+            ?assertEqual(1, guild_thread_store:member_count(Tab, ?T1)),
+            Current = guild_thread_store:get_thread(Tab, ?T1),
+            Payload = guild_data_wire:payload(guild_thread_view:thread_payload(Current)),
+            ?assertNot(maps:is_key(<<"_fluxer_state_version">>, Payload)),
+            ?assertEqual([], drain())
+        after
+            guild_thread_store:destroy(Tab)
+        end
+    end).
+
+watched_context_version_is_kept_when_active_row_is_absent_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        WatchTab = guild_thread_watch_store:new(),
+        try
+            true = guild_thread_watch_store:put_context(WatchTab, ?T1, versioned_thread(?HIDDEN, 2)),
+            ok = guild_thread_store:remove_thread(guild_thread_gate:store(Moved), ?T1),
+            Watched = Moved#{thread_watch_store => WatchTab},
+            Unchanged = dispatch(thread_update, versioned_thread(?TEXT, 1), Watched),
+            ?assertEqual(undefined, guild_thread_gate:thread(?T1, Unchanged)),
+            ?assertEqual([], drain()),
+            Legacy = (thread(?T1, ?HIDDEN, 11))#{<<"name">> => <<"watched title">>},
+            After = dispatch(thread_update, Legacy, Unchanged),
+            Current = guild_thread_gate:thread(?T1, After),
+            ?assertEqual(?HIDDEN, guild_thread_permissions:parent_id(Current)),
+            ?assertEqual(2, maps:get(<<"_fluxer_state_version">>, Current)),
+            ?assertEqual(2, maps:get(<<"_fluxer_state_version">>, guild_thread_watch_store:context(WatchTab, ?T1))),
+            ?assertEqual([], received(p, thread_create, drain()))
+        after
+            ets:delete(WatchTab)
+        end
+    end).
+
+version_fence_does_not_change_delete_or_other_thread_members_test() ->
+    with_guild(fun(State0) ->
+        Moved = moved_state(State0),
+        After = dispatch(thread_delete, versioned_thread(?HIDDEN, 2), Moved),
+        Tab = guild_thread_gate:store(After),
+        ?assertEqual(undefined, guild_thread_gate:thread(?T1, After)),
+        ?assertEqual(unknown, guild_thread_store:member_count(Tab, ?T1)),
+        ?assertEqual([], guild_thread_store:parent_thread_ids(Tab, ?HIDDEN)),
+        ?assert(guild_thread_store:is_member(Tab, ?T2, ?A)),
+        ?assertEqual(1, guild_thread_store:member_count(Tab, ?T2)),
+        Events = drain(),
+        ?assertMatch([_], received(a, thread_delete, Events)),
+        ?assertEqual([], received(p, thread_delete, Events))
+    end).

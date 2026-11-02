@@ -7,6 +7,7 @@
     apply_event/3,
     after_regular_event/3,
     after_replayed_event/3,
+    thread_update_allowed/2,
     thread_context/2
 ]).
 
@@ -33,7 +34,10 @@ apply_store_event(thread_create, Data, Tab, State) ->
             bump_forum_parent(Thread, State)
     end;
 apply_store_event(thread_update, Data, Tab, State) ->
-    ok = update_thread(Tab, Data),
+    case thread_update_allowed(Data, State) of
+        true -> ok = update_thread(Tab, Data, State);
+        false -> ok
+    end,
     State;
 apply_store_event(thread_delete, Data, Tab, State) ->
     case snowflake_id:parse_maybe(maps:get(<<"id">>, Data, undefined)) of
@@ -52,9 +56,11 @@ apply_store_event(thread_members_update, Data, Tab, State) ->
 apply_store_event(_Event, _Data, _Tab, State) ->
     State.
 
--spec update_thread(ets:table(), map()) -> ok.
-update_thread(Tab, Data) ->
-    Thread = normalize_thread(Data),
+-spec update_thread(ets:table(), map(), map()) -> ok.
+update_thread(Tab, Data, State) ->
+    Incoming = normalize_thread(Data),
+    Existing = guild_thread_watches:context(maps:get(<<"id">>, Incoming), State),
+    Thread = keep_version(Incoming, Existing),
     ThreadId = maps:get(<<"id">>, Thread),
     RestoreMembers =
         case archived(Thread) of
@@ -69,6 +75,52 @@ update_thread(Tab, Data) ->
     case RestoreMembers of
         true -> ok = put_members(Tab, list_field(<<"_fluxer_members">>, Data));
         false -> ok
+    end.
+
+%% 版本只来自内部事件；先拒绝旧父权限，再计算收件人或更新浏览缓存。
+%% 标题与慢速模式可能共用同一 stateVersion，不能把同版合法编辑一起丢弃。
+-spec thread_update_allowed(map(), map()) -> boolean().
+thread_update_allowed(Data, State) ->
+    case snowflake_id:parse_maybe(maps:get(<<"id">>, Data, undefined)) of
+        ThreadId when is_integer(ThreadId) ->
+            Existing = guild_thread_watches:context(ThreadId, State),
+            Thread = normalize_thread(Data),
+            compatible_update(Data, Thread, Existing) andalso
+                keep_version(Thread, Existing) =/= Existing;
+        _ -> false
+    end.
+
+-spec compatible_update(map(), map(), map() | undefined) -> boolean().
+compatible_update(Data, Thread, Existing) ->
+    case {event_version(Data), event_version(Existing)} of
+        {invalid, _} -> false;
+        {Version, Previous} when is_integer(Version), is_integer(Previous) ->
+            Version > Previous orelse
+                (Version =:= Previous andalso same_scope(Thread, Existing));
+        {legacy, Previous} when is_integer(Previous) -> same_scope(Thread, Existing);
+        _ -> true
+    end.
+
+-spec event_version(map() | undefined) -> non_neg_integer() | legacy | invalid.
+event_version(Data) when is_map(Data) ->
+    case maps:find(<<"_fluxer_state_version">>, Data) of
+        error -> legacy;
+        {ok, Version} when is_integer(Version), Version >= 0 -> Version;
+        _ -> invalid
+    end;
+event_version(_) -> legacy.
+
+-spec same_scope(map(), map()) -> boolean().
+same_scope(Thread, Existing) ->
+    guild_thread_permissions:parent_id(Thread) =:= guild_thread_permissions:parent_id(Existing)
+        andalso maps:get(<<"type">>, Thread, undefined) =:= maps:get(<<"type">>, Existing, undefined).
+
+%% 无版本旧编辑不能抹掉已知水位；私有键会由既有 wire/payload 过滤器移除。
+-spec keep_version(map(), map() | undefined) -> map().
+keep_version(Thread, Existing) ->
+    case {event_version(Thread), event_version(Existing)} of
+        {legacy, Version} when is_integer(Version) -> Thread#{<<"_fluxer_state_version">> => Version};
+        _ -> Thread
     end.
 
 -spec update_thread_members(ets:table(), map()) -> ok.
@@ -104,9 +156,13 @@ ensure_thread(Tab, ThreadId, Data) when is_integer(ThreadId) ->
         of
             {undefined, Context} when is_map(Context) ->
                 Thread = normalize_thread(Context),
-                not archived(Thread) andalso Thread;
+                compatible_update(Context, Thread, undefined) andalso not archived(Thread) andalso Thread;
             {Existing, Context} when is_map(Existing), is_map(Context) ->
-                maps:merge(Existing, normalize_thread(Context));
+                Thread = normalize_thread(Context),
+                case compatible_update(Context, Thread, Existing) of
+                    true -> maps:merge(Existing, keep_version(Thread, Existing));
+                    false -> false
+                end;
             _ ->
                 false
         end,
@@ -171,9 +227,14 @@ normalize_thread(Data) ->
             List when is_list(List) -> Data#{<<"member_ids_preview">> => List};
             _ -> Data
         end,
-    case guild_data_normalize:thread(WithPreview) of
-        Thread when is_map(Thread) -> Thread;
-        _ -> WithPreview
+    Thread =
+        case guild_data_normalize:thread(WithPreview) of
+            Normalized when is_map(Normalized) -> Normalized;
+            _ -> WithPreview
+        end,
+    case event_version(Data) of
+        Version when is_integer(Version) -> Thread#{<<"_fluxer_state_version">> => Version};
+        _ -> Thread
     end.
 
 -spec archived(map()) -> boolean().

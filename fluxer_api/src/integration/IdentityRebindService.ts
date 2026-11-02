@@ -51,6 +51,7 @@ export class IdentityRebindService {
 				discord_user_id: plan.discord_user_id,
 				previous_discord_user_id: plan.previous_discord_user_id,
 				user_id: plan.user_id,
+				affected_user_ids: [plan.user_id, ...(plan.merged_user_id ? [plan.merged_user_id] : [])],
 				version: plan.version,
 				...(plan.merged_user_id ? {merged_user_id: plan.merged_user_id} : {}),
 			},

@@ -147,8 +147,10 @@ thread_update(Data, State0) ->
         guild_state_threads:apply_event(thread_update, Data, State0)
     ),
     After = thread_or_context(ThreadId, Data, State),
+    ParentChanged = is_map(Before) andalso is_map(After) andalso
+        guild_thread_permissions:parent_id(Before) =/= guild_thread_permissions:parent_id(After),
     Viewers =
-        case WasActive of
+        case WasActive andalso not ParentChanged of
             false -> union(BeforeViewers, event_sessions(After, [], State));
             true -> BeforeViewers
         end,
@@ -160,10 +162,20 @@ thread_update(Data, State0) ->
         shared_memo(Before, After, Memo)
     ),
     Payload = public_payload(Data),
-    Deliveries = [
-        {thread_update, Pid, Payload}
-     || {_Sid, #{pid := Pid}} <- union(BeforeRecipients, AfterRecipients)
-    ],
+    %% 移动后不再可见的会话只收到移除；新增可见会话收到完整帖子建立事件。
+    Deliveries = case ParentChanged of
+        false -> [
+            {thread_update, Pid, Payload}
+         || {_Sid, #{pid := Pid}} <- union(BeforeRecipients, AfterRecipients)
+        ];
+        true ->
+            BeforeIds = maps:from_list([{Sid, true} || {Sid, _} <- BeforeRecipients]),
+            AfterIds = maps:from_list([{Sid, true} || {Sid, _} <- AfterRecipients]),
+            Removed = maps:with([<<"id">>, <<"guild_id">>, <<"parent_id">>, <<"type">>], Before),
+            [{thread_delete, Pid, Removed} || {Sid, #{pid := Pid}} <- BeforeRecipients, not is_map_key(Sid, AfterIds)] ++
+            [{case is_map_key(Sid, BeforeIds) of true -> thread_update; false -> thread_create end, Pid, Payload}
+             || {Sid, #{pid := Pid}} <- AfterRecipients]
+    end,
     count(thread_update, length(Deliveries)),
     MemberDeliveries =
         case {WasActive, guild_thread_gate:thread(ThreadId, State)} of

@@ -503,6 +503,20 @@ removed_user_without_view_still_gets_members_update_test() ->
         ?assertEqual([integer_to_binary(?P)], maps:get(<<"removed_member_ids">>, Update))
     end).
 
+%% 移入隐藏父频道时撤销旧会话的帖子可见性，移回时重新建立帖子。
+thread_move_recomputes_parent_visibility_test() ->
+    with_guild(fun(State0) ->
+        State1 = guild_thread_subscriptions:update(<<"p">>, #{threads => true}, State0),
+        State2 = dispatch(thread_update, thread(?T1, ?HIDDEN, 11), State1),
+        Events = drain(),
+        ?assertMatch([_], received(p, thread_delete, Events)),
+        ?assertEqual([], received(p, thread_update, Events)),
+        ?assertEqual(?HIDDEN, guild_thread_permissions:parent_id(guild_thread_gate:thread(?T1, State2))),
+        ?assertNot(lists:member(?T1, guild_thread_store:parent_thread_ids(guild_thread_gate:store(State2), ?TEXT))),
+        _State3 = dispatch(thread_update, thread(?T1, ?TEXT, 11), State2),
+        ?assertMatch([_], received(p, thread_create, drain()))
+    end).
+
 thread_delete_payload_is_exact_test() ->
     with_guild(fun(State) ->
         Data = #{

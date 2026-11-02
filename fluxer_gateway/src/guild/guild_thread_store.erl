@@ -144,6 +144,17 @@ insert_thread(Tab, Thread) ->
     case snowflake_id:parse_optional(maps:get(<<"id">>, Thread, undefined)) of
         ThreadId when is_integer(ThreadId) ->
             Known = ets:member(Tab, {t, ThreadId}),
+            %% 跨论坛移动必须移除旧父索引，不能让原频道继续枚举已移走的帖子。
+            case get_thread(Tab, ThreadId) of
+                Previous when is_map(Previous) ->
+                    OldParent = snowflake_id:parse_optional(maps:get(<<"parent_id">>, Previous, undefined)),
+                    NewParent = snowflake_id:parse_optional(maps:get(<<"parent_id">>, Thread, undefined)),
+                    case is_integer(OldParent) andalso OldParent =/= NewParent of
+                        true -> ets:delete(Tab, {p, OldParent, ThreadId});
+                        false -> ok
+                    end;
+                _ -> ok
+            end,
             true = ets:insert(Tab, {{t, ThreadId}, Thread}),
             case snowflake_id:parse_optional(maps:get(<<"parent_id">>, Thread, undefined)) of
                 ParentId when is_integer(ParentId) ->
@@ -411,6 +422,20 @@ cap_keeps_newest_threads_test() ->
         ?assertEqual(undefined, get_thread(Tab, 5)),
         ?assertEqual(?MAX_THREADS, thread_count(Tab)),
         ?assertNotEqual(undefined, get_thread(Tab, ?MAX_THREADS + 10))
+    after
+        destroy(Tab)
+    end.
+
+%% 移动只改变父目录，不丢失成员或留下旧父目录项。
+move_parent_preserves_members_test() ->
+    Tab = new(),
+    try
+        ok = load(Tab, [thread(20, 1)], [member(20, 9)]),
+        ok = put_thread(Tab, thread(20, 2)),
+        ?assertEqual([], parent_thread_ids(Tab, 1)),
+        ?assertEqual([20], parent_thread_ids(Tab, 2)),
+        ?assert(is_member(Tab, 20, 9)),
+        ?assertEqual([20], user_thread_ids(Tab, 9))
     after
         destroy(Tab)
     end.

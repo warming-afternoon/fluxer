@@ -46,6 +46,10 @@ import {
 	ThreadStats as ThreadStatsTable,
 	ThreadsByParent,
 } from '@app/api/Tables';
+import {
+	finishIntegrationContentChange,
+	prepareIntegrationContentChange,
+} from '@app/integration/IntegrationContentHooks';
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
 import {
 	ChannelFlags,
@@ -79,7 +83,16 @@ export interface CreateThreadParams {
 export type ThreadStatePatch = Partial<
 	Pick<
 		ThreadStateRow,
-		'archived' | 'locked' | 'invitable' | 'auto_archive_duration' | 'archive_timestamp' | 'flags' | 'applied_tags'
+		| 'archived'
+		| 'locked'
+		| 'native_locked'
+		| 'native_archived'
+		| 'external_locked'
+		| 'invitable'
+		| 'auto_archive_duration'
+		| 'archive_timestamp'
+		| 'flags'
+		| 'applied_tags'
 	>
 >;
 
@@ -287,6 +300,11 @@ export class ThreadRepository {
 		if (guildId == null || parentId == null) {
 			throw new Error('Thread channel rows require a guild and a parent');
 		}
+		await prepareIntegrationContentChange(threadId, {
+			guild_id: guildId.toString(),
+			channel_id: parentId.toString(),
+			thread_id: threadId.toString(),
+		});
 		await upsertOne(
 			ThreadsByParent.upsertAll({parent_id: parentId, thread_id: threadId, guild_id: guildId, type: channel.type}),
 		);
@@ -298,6 +316,9 @@ export class ThreadRepository {
 			type: channel.type,
 			archived: false,
 			locked: false,
+			native_locked: null,
+			native_archived: null,
+			external_locked: false,
 			invitable: isPrivateType(channel.type) ? (params.invitable ?? true) : null,
 			auto_archive_duration: params.autoArchiveDuration,
 			archive_timestamp: params.createdAt,
@@ -400,6 +421,7 @@ export class ThreadRepository {
 			if (requested === null) return {previous: current, state: current};
 			const patch = this.withArchiveRules(current, requested);
 			if (Object.keys(patch).length === 0) return {previous: current, state: current};
+			await prepareIntegrationContentChange(threadId);
 			const nextRow: ThreadStateRow = {...current.toRow(), ...patch, state_version: current.stateVersion + 1};
 			const applied = await executeConditional(
 				ThreadStateTable.conditionalPatchByPk(
@@ -411,14 +433,38 @@ export class ThreadRepository {
 			if (!applied) continue;
 			const next = new ThreadState(nextRow);
 			await this.moveIndexes(current, next);
+			await finishIntegrationContentChange(threadId);
 			return {previous: current, state: next};
 		}
 		throw new ServiceUnavailableError();
 	}
 
+	/** 只组合来源投影，不把外部处罚误写为管理员原生锁。 */
+	async projectExternalLock(threadId: ChannelID, active: boolean): Promise<ThreadStateTransition | null> {
+		return this.updateState(threadId, () => ({external_locked: active}));
+	}
+
 	private withArchiveRules(current: ThreadState, requested: ThreadStatePatch): ThreadStatePatch {
+		const desired: ThreadStatePatch = {...requested};
+		const external = requested.external_locked ?? current.externalLocked;
+		if (requested.external_locked !== undefined) {
+			// 首次外部处罚捕获旧状态，此后保留原生管理过程中更新的基态。
+			desired.native_locked = current.nativeLocked ?? current.locked;
+			desired.native_archived = current.nativeArchived ?? current.archived;
+			desired.locked = desired.native_locked || external;
+			desired.archived = desired.native_archived || external;
+		} else {
+			if (requested.locked !== undefined) {
+				desired.native_locked = requested.locked;
+				desired.locked = requested.locked || external;
+			}
+			if (requested.archived !== undefined) {
+				desired.native_archived = requested.archived;
+				desired.archived = requested.archived || external;
+			}
+		}
 		const patch: ThreadStatePatch = {};
-		for (const [key, value] of Object.entries(requested) as Array<[keyof ThreadStatePatch, unknown]>) {
+		for (const [key, value] of Object.entries(desired) as Array<[keyof ThreadStatePatch, unknown]>) {
 			if (value === undefined) continue;
 			if (sameValue(current.toRow()[key], value)) continue;
 			(patch as Record<string, unknown>)[key] = value;
@@ -1041,6 +1087,7 @@ export class ThreadRepository {
 
 	async purgeThread(threadId: ChannelID): Promise<void> {
 		const state = await this.getState(threadId);
+		await prepareIntegrationContentChange(threadId, undefined, true);
 		const channel = await fetchOne<ChannelRow>(FETCH_CHANNEL.bind({channel_id: threadId, soft_deleted: false}));
 		const parentId = state?.parentId ?? channel?.parent_id ?? null;
 		await this.messages.deleteAllChannelMessages(threadId);

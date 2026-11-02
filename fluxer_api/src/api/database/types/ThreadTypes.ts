@@ -18,6 +18,14 @@ export interface ThreadStateRow {
 	type: number;
 	archived: boolean;
 	locked: boolean;
+	/** 独立原生锁；空值表示尚未建立外部限制投影。 */
+	native_locked?: boolean | null;
+
+	/** 独立原生归档状态，外部限制解除时恢复该状态。 */
+	native_archived?: boolean | null;
+
+	/** 所有有效外部锁的合并结果。 */
+	external_locked?: boolean | null;
 	invitable: boolean | null;
 	auto_archive_duration: number;
 	archive_timestamp: Date | null;
@@ -37,6 +45,9 @@ export const THREAD_STATE_COLUMNS = [
 	'type',
 	'archived',
 	'locked',
+	'native_locked',
+	'native_archived',
+	'external_locked',
 	'invitable',
 	'auto_archive_duration',
 	'archive_timestamp',

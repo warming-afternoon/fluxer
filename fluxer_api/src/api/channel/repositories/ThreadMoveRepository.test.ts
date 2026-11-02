@@ -3,6 +3,7 @@
 import {createChannelID, createGuildID, createUserID} from '@app/api/BrandedTypes';
 import {ChannelRepository} from '@app/api/channel/ChannelRepository';
 import {ThreadMoveRepository} from '@app/api/channel/repositories/ThreadMoveRepository';
+import {ThreadMoveService} from '@app/api/channel/services/thread/ThreadMoveService';
 import {
 	executeConditional,
 	fetchMany,
@@ -15,6 +16,8 @@ import {Channels, ThreadMembersByUser, ThreadState, ThreadsByParent} from '@app/
 import {InMemoryCassandraQueryExecutor} from '@app/api/test/InMemoryCassandraQueryExecutor';
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
 import {ChannelFlags} from '@fluxer/constants/src/ThreadConstants';
+import {InvalidChannelTypeError} from '@fluxer/errors/src/domains/channel/InvalidChannelTypeError';
+import {InputValidationError} from '@fluxer/errors/src/domains/core/InputValidationError';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 const guild = createGuildID(1900000000000000000n);
@@ -155,5 +158,75 @@ describe('跨论坛移动的持久索引与恢复', () => {
 		);
 		expect(rows).toHaveLength(1);
 		expect(rows[0]?.parent_id).toBe(target);
+	});
+
+	it('外部锁投影真实归档状态，解除后恢复原先活动状态', async () => {
+		const locked = await repository.threads.projectExternalLock(thread, true);
+		expect(locked?.state.locked).toBe(true);
+		expect(locked?.state.archived).toBe(true);
+		expect(locked?.state.nativeLocked).toBe(false);
+		expect(locked?.state.nativeArchived).toBe(false);
+		expect(await repository.threads.listActiveThreads(guild)).toEqual([]);
+		const restored = await repository.threads.projectExternalLock(thread, false);
+		expect(restored?.state.locked).toBe(false);
+		expect(restored?.state.archived).toBe(false);
+		expect((await repository.threads.listActiveThreads(guild)).map((item) => item.threadId)).toEqual([thread]);
+	});
+
+	it('外部锁生效时管理员再次锁定，解除外部锁不能解除该原生限制', async () => {
+		await repository.threads.projectExternalLock(thread, true);
+		await repository.threads.updateState(thread, () => ({locked: true, archived: true}));
+		const restored = await repository.threads.projectExternalLock(thread, false);
+		expect(restored?.state.locked).toBe(true);
+		expect(restored?.state.archived).toBe(true);
+		expect(restored?.state.nativeLocked).toBe(true);
+	});
+
+	it('普通状态修改不会绕过仍然生效的外部锁，且恢复保留原有归档', async () => {
+		await repository.threads.updateState(thread, () => ({archived: true}));
+		await repository.threads.projectExternalLock(thread, true);
+		await repository.threads.updateState(thread, () => ({locked: false}));
+		expect((await repository.threads.getState(thread))?.locked).toBe(true);
+		await moves.move({threadId: thread, sourceParentId: source, targetParentId: target, appliedTags: []});
+		const restored = await repository.threads.projectExternalLock(thread, false);
+		expect(restored?.state.locked).toBe(false);
+		expect(restored?.state.archived).toBe(true);
+		expect(restored?.state.parentId).toBe(target);
+	});
+
+	it('目标论坛缺少唯一标签映射时拒绝移动，不静默丢失原生标签', async () => {
+		const service = new ThreadMoveService({channelRepository: repository} as ConstructorParameters<
+			typeof ThreadMoveService
+		>[0]);
+		await expect(
+			service.move({
+				threadId: thread,
+				sourceParentId: source,
+				targetParentId: target,
+				userId: member,
+				auditLogReason: null,
+			}),
+		).rejects.toBeInstanceOf(InputValidationError);
+		expect((await repository.threads.getState(thread))?.parentId).toBe(source);
+		expect((await repository.threads.getState(thread))?.appliedTags).toEqual([10n]);
+	});
+
+	it('跨服务器移动在任何持久副作用之前被拒绝', async () => {
+		await upsertOne(
+			Channels.upsertAll({...channelRow(target, ChannelTypes.GUILD_FORUM), guild_id: createGuildID(99n)}),
+		);
+		const service = new ThreadMoveService({channelRepository: repository} as ConstructorParameters<
+			typeof ThreadMoveService
+		>[0]);
+		await expect(
+			service.move({
+				threadId: thread,
+				sourceParentId: source,
+				targetParentId: target,
+				userId: member,
+				auditLogReason: null,
+			}),
+		).rejects.toBeInstanceOf(InvalidChannelTypeError);
+		expect((await repository.threads.getState(thread))?.parentId).toBe(source);
 	});
 });

@@ -12,6 +12,14 @@ export class ThreadState {
 	readonly type: number;
 	readonly archived: boolean;
 	readonly locked: boolean;
+	/** 不受外部服务锁覆盖的原生管理状态。 */
+	readonly nativeLocked: boolean | null;
+
+	/** 不受外部服务归档覆盖的原生归档状态。 */
+	readonly nativeArchived: boolean | null;
+
+	/** 外部来源合并后的有效锁。 */
+	readonly externalLocked: boolean;
 	readonly invitable: boolean | null;
 	readonly autoArchiveDuration: number;
 	readonly archiveTimestamp: Date | null;
@@ -30,6 +38,9 @@ export class ThreadState {
 		this.type = row.type;
 		this.archived = row.archived ?? false;
 		this.locked = row.locked ?? false;
+		this.nativeLocked = row.native_locked ?? null;
+		this.nativeArchived = row.native_archived ?? null;
+		this.externalLocked = row.external_locked ?? false;
 		this.invitable = row.type === ChannelTypes.PRIVATE_THREAD ? (row.invitable ?? true) : null;
 		this.autoArchiveDuration = row.auto_archive_duration;
 		this.archiveTimestamp = row.archive_timestamp ?? null;
@@ -58,6 +69,9 @@ export class ThreadState {
 			type: this.type,
 			archived: this.archived,
 			locked: this.locked,
+			native_locked: this.nativeLocked,
+			native_archived: this.nativeArchived,
+			external_locked: this.externalLocked,
 			invitable: this.invitable,
 			auto_archive_duration: this.autoArchiveDuration,
 			archive_timestamp: this.archiveTimestamp,

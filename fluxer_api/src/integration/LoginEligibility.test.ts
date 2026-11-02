@@ -23,13 +23,34 @@ vi.mock('@app/integration/DiscordAccountService', () => ({DiscordAccountService:
 vi.mock('@app/integration/DiscordPasswordProof', () => ({issueDiscordPasswordProof: vi.fn()}));
 vi.mock('@app/integration/IdentityRebindService', () => ({IdentityRebindService: class {}}));
 vi.mock('@app/integration/IntegrationContentService', () => ({IntegrationContentService: class {}}));
-vi.mock('@app/api/user/repositories/auth/AuthSessionRepository', () => ({
-	AuthSessionRepository: class {
-		async getAuthoritativeAuthSession() {
-			return {userId: 202n};
-		}
-	},
-}));
+vi.mock('@app/api/user/repositories/auth/AuthSessionRepository', async () => {
+	const {AuthSession} = await import('@app/api/models/AuthSession');
+	const {createUserID} = await import('@app/api/BrandedTypes');
+	return {
+		AuthSessionRepository: class {
+			async getAuthoritativeAuthSession() {
+				return new AuthSession({
+					user_id: createUserID(202n),
+					session_id_hash: Buffer.alloc(32),
+					created_at: new Date(),
+					approx_last_used_at: new Date(),
+					client_ip: '127.0.0.1',
+					client_user_agent: null,
+					client_os: null,
+					client_country: null,
+					app_platform: null,
+					app_version: null,
+					app_release_channel: null,
+					app_build_number: null,
+					app_beta_number: null,
+					auth_method: null,
+					version: 1,
+				});
+			}
+		},
+	};
+});
+
 vi.mock('@app/integration/IntegrationIdentityRepository', () => ({
 	IntegrationIdentityRepository: class {
 		async find() {

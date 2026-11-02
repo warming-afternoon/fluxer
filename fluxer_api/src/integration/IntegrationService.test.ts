@@ -6,9 +6,11 @@ import {createAuthHarness, createTestAccount} from '@app/api/auth/tests/AuthTest
 import {createUserID, type UserID} from '@app/api/BrandedTypes';
 import {createApiContext} from '@app/api/CreateApiContext';
 import {BatchBuilder, deleteOneOrMany} from '@app/api/database/CassandraQueryExecution';
+import {AuthSession as AuthSessionModel} from '@app/api/models/AuthSession';
 import {AuthSessions} from '@app/api/Tables';
 import type {ApiTestHarness} from '@app/api/test/ApiTestHarness';
 import {createBuilder} from '@app/api/test/TestRequestBuilder';
+import {AuthSessionRepository} from '@app/api/user/repositories/auth/AuthSessionRepository';
 import {DiscordAccountService} from '@app/integration/DiscordAccountService';
 import * as IntegrationEvents from '@app/integration/IntegrationEvents';
 import {type ExchangeRecord, IntegrationExchangeRepository} from '@app/integration/IntegrationExchangeRepository';
@@ -215,6 +217,72 @@ describe('Integration native authority', () => {
 		});
 		const service = new IntegrationService(context, new IntegrationExchangeRepository(Buffer.alloc(32, 1)));
 		await expect(service.resolve(account.token)).rejects.toMatchObject({code: 'INVALID_TOKEN'});
+	});
+
+	it.each([
+		{label: 'recent SSO', method: 'sso', age: 1_000, valid: true},
+		{label: 'exact native maximum', method: 'sso', age: 30 * 86_400_000, valid: true},
+		{label: 'one millisecond expired', method: 'sso', age: 30 * 86_400_000 + 1, valid: false},
+		{label: 'allowed external clock tolerance', method: 'sso', age: -30_000, valid: true},
+		{label: 'beyond external clock tolerance', method: 'sso', age: -30_001, valid: false},
+		{label: 'invalid timestamp', method: 'sso', age: Number.NaN, valid: false},
+		{label: 'missing timestamp', method: 'sso', age: null, valid: false},
+		{label: 'non-SSO native lifetime unchanged', method: null, age: 31 * 86_400_000, valid: true},
+	])('preserves authoritative native session lifetime: $label', async ({method, age, valid}) => {
+		const account = await createTestAccount(harness);
+		const context = createApiContext();
+		const hash = createHash('sha256').update(account.token).digest();
+		const original = (await new AuthSessionRepository().getAuthoritativeAuthSession(hash))!;
+		const now = Date.now();
+		const row = {
+			...original.toRow(),
+			auth_method: method,
+			created_at: age === null ? (undefined as unknown as Date) : new Date(now - age),
+			approx_last_used_at: new Date(now),
+		};
+		vi.spyOn(AuthSessionRepository.prototype, 'getAuthoritativeAuthSession').mockResolvedValue(
+			new AuthSessionModel(row),
+		);
+		const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+		try {
+			const service = new IntegrationService(context, new IntegrationExchangeRepository(Buffer.alloc(32, 1)));
+			if (valid) expect((await service.resolve(account.token)).user.id.toString()).toBe(account.userId);
+			else await expect(service.resolve(account.token)).rejects.toMatchObject({code: 'INVALID_TOKEN'});
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it('拒绝通过解析或密码证明使用过期 SSO，但仍允许显式撤销该权威行', async () => {
+		const account = await createTestAccount(harness);
+		const context = createApiContext();
+		const hash = createHash('sha256').update(account.token).digest();
+		const original = (await new AuthSessionRepository().getAuthoritativeAuthSession(hash))!;
+		const expired = new AuthSessionModel({
+			...original.toRow(),
+			auth_method: 'sso',
+			created_at: new Date(Date.now() - 31 * 86_400_000),
+		});
+		const authority = vi
+			.spyOn(AuthSessionRepository.prototype, 'getAuthoritativeAuthSession')
+			.mockResolvedValue(expired);
+		const service = new IntegrationService(context, new IntegrationExchangeRepository(Buffer.alloc(32, 1)));
+		const envelope = {version: 1, request_id: 'expired_session_request', token: account.token};
+		await expect(service.dispatch('rpc.auth.v1.session.resolve', envelope)).rejects.toMatchObject({
+			code: 'INVALID_TOKEN',
+		});
+		await expect(
+			service.dispatch('rpc.auth.v1.external.prove', {
+				...envelope,
+				discord_user_id: '123456789012345678',
+				verified_at: new Date().toISOString(),
+				purpose: 'set_initial_password',
+				operation_id: 'expired_session_prove',
+			}),
+		).rejects.toMatchObject({code: 'INVALID_TOKEN'});
+		await expect(service.dispatch('rpc.auth.v1.session.revoke_current', envelope)).resolves.toEqual({revoked: true});
+		authority.mockRestore();
+		expect(await new AuthSessionRepository().getAuthoritativeAuthSession(hash)).toBeNull();
 	});
 
 	it('returns an already persisted exchange result within ten minutes without requiring a new Discord verification', async () => {

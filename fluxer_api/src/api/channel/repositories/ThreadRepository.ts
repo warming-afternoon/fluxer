@@ -772,7 +772,55 @@ export class ThreadRepository {
 				);
 				throw new UnknownChannelError();
 			}
-			return {added: rows.map((row) => new ThreadMember(row)), state: next ?? state};
+			const finalState = await this.reconcileMemberParents(threadId, rows, next ?? state);
+			return {added: rows.map((row) => new ThreadMember({...row, parent_id: finalState.parentId})), state: finalState};
+		}
+		throw new ServiceUnavailableError();
+	}
+
+	/** 并发移动不能让刚加入的成员留在旧论坛索引，也不能复活已删除的成员。 */
+	private async reconcileMemberParents(
+		threadId: ChannelID,
+		rows: Array<ThreadMemberRow>,
+		fallback: ThreadState,
+	): Promise<ThreadState> {
+		let state = fallback;
+		for (let attempt = 0; attempt < STATE_CAS_ATTEMPTS; attempt++) {
+			const currentState = await this.getState(threadId);
+			if (!currentState || currentState.deleteDispatched) {
+				await this.discardFrozenRemoval(threadId, rows.map((row) => new ThreadMember(row)));
+				throw new UnknownChannelError();
+			}
+			state = currentState;
+			if (rows.every((row) => row.parent_id === state.parentId)) return state;
+			for (const row of rows) {
+				if (row.parent_id === state.parentId) continue;
+				const current = await this.getMember(threadId, row.user_id);
+				if (!current) continue;
+				const applied = await executeConditional(
+					ThreadMembers.conditionalPatchByPk(
+						{thread_id: threadId, user_id: row.user_id},
+						{parent_id: Db.set(state.parentId)},
+						{parent_id: current.parentId, join_timestamp: row.join_timestamp},
+					),
+				);
+				if (!applied) continue;
+				const batch = new BatchBuilder();
+				batch.addPrepared(
+					ThreadMembersByUser.deleteByPk(
+						this.memberByUserRow({...state.toRow(), parent_id: row.parent_id}, row.user_id),
+					),
+				);
+				batch.addPrepared(ThreadMembersByUser.upsertAll(this.memberByUserRow(state.toRow(), row.user_id)));
+				await batch.execute(false);
+				row.parent_id = state.parentId;
+			}
+			const latest = await this.getState(threadId);
+			if (!latest || latest.deleteDispatched) {
+				await this.discardFrozenRemoval(threadId, rows.map((row) => new ThreadMember(row)));
+				throw new UnknownChannelError();
+			}
+			if (latest.parentId === state.parentId) return latest;
 		}
 		throw new ServiceUnavailableError();
 	}

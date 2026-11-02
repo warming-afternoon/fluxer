@@ -110,6 +110,7 @@ describe('Integration native authority', () => {
 	const operation = 'operation_123456789';
 
 	it('concurrent Bot and Forum provisioning converge on one initialized native account', async () => {
+		const published = vi.spyOn(IntegrationEvents, 'publishIntegrationEvent').mockResolvedValue();
 		const context = createApiContext();
 		const identities = new MemoryIdentities();
 		const bot = new DiscordAccountService(context, identities);
@@ -126,6 +127,15 @@ describe('Integration native authority', () => {
 		expect(user.email).toBeNull();
 		expect(await context.services.users.findSettings(user.id)).not.toBeNull();
 		expect(await context.services.users.findUsersByUsername(user.username)).toHaveLength(1);
+		const binding = identities.bindings.get('123456789012345678')!;
+		expect(published).toHaveBeenLastCalledWith(
+			'events.identity.v1.binding_changed',
+			expect.objectContaining({
+				user_id: user.id.toString(),
+				affected_user_ids: [user.id.toString()],
+			}),
+			{eventId: `${binding.operation_id}:binding:${user.id}:1`},
+		);
 	});
 
 	it('recovers both a half claim and account creation interrupted before commit without overwriting profiles', async () => {

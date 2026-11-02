@@ -129,7 +129,7 @@ export function startIntegrationEvents(): void {
 /** 持久化后尝试发送，发布失败由恢复循环继续而不吞掉存储失败 */
 export async function publishIntegrationEvent(
 	subject: string,
-	data: Record<string, string | number>,
+	data: Record<string, string | number | ReadonlyArray<string>>,
 	options: {defer?: boolean; eventId?: string} = {},
 ): Promise<void> {
 	if (!process.env.INTEGRATION_NATS_URL) return;

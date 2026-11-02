@@ -21,6 +21,7 @@ export class DiscordAccountService {
 				kind: 'binding_changed',
 				discord_user_id: binding.discord_user_id,
 				user_id: userId.toString(),
+				affected_user_ids: [userId.toString()],
 				version,
 			},
 			{eventId: `${binding.operation_id}:binding:${userId}:${version}`},

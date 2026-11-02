@@ -102,6 +102,8 @@ API、worker 和 integration 进程启动时恢复日志。每秒推进一个分
 - `events.identity.v1.binding_changed`：`{event_id,occurred_at,discord_user_id,user_id,version}`
 
 管理绑定事件另含 `kind:"managed_merge"|"binding_changed",operation_id,actor_user_id,previous_discord_user_id,merged_user_id?`。消费方只有在明确管理合并上下文匹配时才迁移历史归属。普通预建或登录不会把历史别名重新选为当前身份，也不会发送缺少管理上下文的跨用户改绑事件。
+本版本管理绑定事件还携带权威 `affected_user_ids` 完整直接受影响主体集合：首次绑定和普通换绑为 `[user_id]`，管理合并为 `[user_id, merged_user_id]`。消费方须先在同一失效屏障中推进全部主体，再等待资料或数据库投影；不能依赖随后不同 subject 的 `user_invalidated` 到达或回调顺序。旧事件缺少完整集合时应保守失效整个认证缓存代次，不猜测旧主体，也不把历史归属当作当前准入。
+
 
 事件与错误响应不包含令牌、密码或证明。`INVALID_TOKEN` 和 `ACCOUNT_UNAVAILABLE` 表示鉴权失败；`UNAVAILABLE`、`STORAGE_UNAVAILABLE`、`BUSY`、`EXCHANGE_UNCERTAIN` 表示可重试的依赖/处理失败，不能作为鉴权成功。`PROOF_NOT_AVAILABLE` 表示正常登录可以继续，但不满足首次密码设置条件。
 

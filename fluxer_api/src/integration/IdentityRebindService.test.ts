@@ -163,6 +163,7 @@ describe('administrative identity rebind', () => {
 				discord_user_id: request.discord_user_id,
 				user_id: b.userId,
 				merged_user_id: c.userId,
+				affected_user_ids: [b.userId, c.userId],
 			}),
 			{eventId: `${request.operation_id}:binding`},
 		);
@@ -173,5 +174,52 @@ describe('administrative identity rebind', () => {
 				{eventId: `${request.operation_id}:user:${id}`},
 			);
 		await expect(service.rebind({...request, user_id: c.userId})).rejects.toMatchObject({code: 'OPERATION_CONFLICT'});
+	});
+
+	it('已完成普通换绑重放仍携带完整单主体失效集合', async () => {
+		const published = vi.spyOn(IntegrationEvents, 'publishIntegrationEvent').mockResolvedValue();
+		const administrator = await createTestAccount(harness);
+		const context = createApiContext();
+		const identities = new MemoryBindings();
+		const operations = new MemoryOperations();
+		const request = {
+			version: 1 as const,
+			request_id: 'request_completed_binding',
+			operation_id: 'operation_completed_binding',
+			actor_user_id: administrator.userId,
+			user_id: administrator.userId,
+			discord_user_id: '123456789012345678',
+			reason: 'replay completed binding',
+			profile: {username: 'example', display_name: null, avatar_url: null},
+		};
+		const plan = {
+			actor_user_id: administrator.userId,
+			reason: request.reason,
+			user_id: administrator.userId,
+			discord_user_id: request.discord_user_id,
+			previous_discord_user_id: '223456789012345678',
+			merged_user_id: null,
+			version: 3,
+		};
+		const {createHash} = await import('node:crypto');
+		operations.records.set(request.operation_id, {
+			operation_id: request.operation_id,
+			fingerprint: createHash('sha256')
+				.update(JSON.stringify({...request, request_id: undefined}))
+				.digest('hex'),
+			actor_id: createUserID(BigInt(administrator.userId)),
+			payload: JSON.stringify(plan),
+			result: JSON.stringify(plan),
+		});
+		const service = new IdentityRebindService(context, identities, operations);
+		await expect(service.rebind(request)).resolves.toEqual(plan);
+		expect(published).toHaveBeenCalledWith(
+			'events.identity.v1.binding_changed',
+			expect.objectContaining({
+				user_id: administrator.userId,
+				affected_user_ids: [administrator.userId],
+			}),
+			{eventId: `${request.operation_id}:binding`},
+		);
 	});
 });

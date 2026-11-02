@@ -8,6 +8,7 @@ import type {Message} from '@app/api/models/Message';
 import type {UserRepository} from '@app/api/user/repositories/UserRepository';
 import {IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
 import {IntegrationOperationRepository} from '@app/integration/IntegrationOperationRepository';
+import {currentIntegrationStarterEditScope} from '@app/integration/IntegrationStarterEditContext';
 import {UserFlags} from '@fluxer/constants/src/UserConstants';
 import {MissingPermissionsError} from '@fluxer/errors/src/domains/core/MissingPermissionsError';
 
@@ -32,6 +33,20 @@ export class StarterEditCapabilityService {
 			!auth.thread?.state.hasStarter ||
 			BigInt(message.id) !== BigInt(auth.channel.id) ||
 			!auth.thread.parent.isThreadOnly()
+		)
+			return null;
+		const scope = currentIntegrationStarterEditScope();
+		const forums = (process.env.INTEGRATION_FORUM_CHANNEL_IDS ?? '').split(',').filter(Boolean);
+		if (
+			!scope ||
+			scope.actorUserId !== actor.toString() ||
+			scope.threadId !== auth.channel.id.toString() ||
+			scope.threadId !== message.channelId.toString() ||
+			scope.guildId !== auth.channel.guildId?.toString() ||
+			scope.guildId !== process.env.INTEGRATION_GUILD_ID ||
+			forums.length !== 4 ||
+			new Set(forums).size !== 4 ||
+			!forums.includes(auth.thread.parent.id.toString())
 		)
 			return null;
 		const original = await this.users.findUnique(message.authorId);

@@ -268,6 +268,12 @@ describe('restricted content RPC native business paths', () => {
 			.spyOn(IntegrationOperationRepository.prototype, 'allocate')
 			.mockImplementation(async (record) => record);
 		vi.spyOn(IntegrationOperationRepository.prototype, 'complete').mockResolvedValue();
+		// 规范合并关系不是普通 HTTP 的作者权限；仅受信 Forum 主帖能力可代理编辑。
+		await threadsRequest(harness, b.token)
+			.patch(`/channels/${created.thread_id}/messages/${created.thread_id}`)
+			.body({content: 'ordinary HTTP must not delegate'})
+			.expect(403)
+			.execute();
 		await expect(
 			service.dispatch('rpc.content.v1.starter.edit_service', {
 				version: 1,

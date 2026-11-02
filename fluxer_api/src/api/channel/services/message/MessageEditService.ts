@@ -111,10 +111,11 @@ export class MessageEditService {
 		if (!message) throw new UnknownMessageError();
 		const capability = new StarterEditCapabilityService(this.deps.userRepository);
 		const capabilityAuditId = await capability.authorize(userId, authChannel, message, data);
-		if (message.authorId === userId) {
+		const editsBodyAsAuthor = message.authorId === userId || capabilityAuditId !== null;
+		if (editsBodyAsAuthor) {
 			assertGuildMemberCanCommunicate(member);
 		}
-		assertThreadInteractionAllowed(authChannel, 'edit', {ignoreTimeout: message.authorId !== userId});
+		assertThreadInteractionAllowed(authChannel, 'edit', {ignoreTimeout: !editsBodyAsAuthor});
 		if (authChannel.thread) await new ThreadPolicyService().assertAllowed(channelId, userId, 'edit');
 		if (data.message_snapshots !== undefined) {
 			throw new MissingPermissionsError();

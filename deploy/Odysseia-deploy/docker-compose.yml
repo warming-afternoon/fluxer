@@ -757,7 +757,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${FLUXER_GATEWAY_MEMORY_LIMIT:-5gb}
+          memory: ${FLUXER_GATEWAY_MEMORY_LIMIT:-10gb}
         reservations:
           memory: ${FLUXER_GATEWAY_MEMORY_RESERVATION:-384mb}
     environment:

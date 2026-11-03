@@ -70,3 +70,8 @@ API、worker 和 integration 均需具备各自事件发布凭据、专用确认
 `thread.create_service.attachments` 只接受新预上传描述；`starter.edit_service.attachments` 可混合新描述和 `{id:"原生附件ID"}` 保留引用，顺序决定图片首图。省略 attachments 保留原附件，空数组删除附件；正文可省略，附件编辑使用原生当前正文，避免 PG 投影覆盖更新。合并账号仍审核实际 B 上传者和委托能力，不改变历史作者 C。
 
 附件子操作复用 `integration_operations` 保存不可变计划、扫描结果及永久 CDN 附件 ID，先持久结果再绑定上传，恢复不重扫重分配；临时对象保留给既有清理策略。启用 thread policy 时所有受信创建在完成持久化前保持初始化锁与归档；可重试中断恢复同一 prepared thread，终止 4xx 清理中间线程。默认主帖完成后仅释放自己的初始化来源，defer_open 子帖由 Forum 政策任务完成后释放。
+
+
+## Gateway memory limit
+
+The default Gateway memory limit is 10 GiB. Set `FLUXER_GATEWAY_MEMORY_LIMIT` to override this container limit. The separate memory reservation defaults to 384 MiB and can be overridden with `FLUXER_GATEWAY_MEMORY_RESERVATION`; changing the limit does not change the reservation.

@@ -33,6 +33,13 @@ assert.deepEqual(document.errors, []);
 const compose = document.toJS();
 const template = fs.readFileSync(path.join(directory, 'Caddyfile'), 'utf8');
 
+test('Gateway default memory limit is 10 GiB and reservation remains independently configurable', () => {
+	// biome-ignore lint/suspicious/noTemplateCurlyInString: Validate the original Compose interpolation.
+	assert.equal(compose.services.gateway.deploy.resources.limits.memory, '${FLUXER_GATEWAY_MEMORY_LIMIT:-10gb}');
+	// biome-ignore lint/suspicious/noTemplateCurlyInString: Validate the independent reservation interpolation.
+	assert.equal(compose.services.gateway.deploy.resources.reservations.memory, '${FLUXER_GATEWAY_MEMORY_RESERVATION:-384mb}');
+});
+
 /** 为渲染器构造 Compose JSON 中已经按字节规范化的资源字段。 */
 function resolvedFixture(memoryMiB = 2560) {
 	const result = structuredClone(compose);

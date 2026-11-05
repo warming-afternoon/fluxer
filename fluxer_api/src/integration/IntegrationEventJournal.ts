@@ -111,6 +111,17 @@ export class IntegrationEventJournal {
 		);
 	}
 
+	/** Each preference attempt owns its own durable intent; remove only that completed attempt. */
+	async completePreferenceIntent(resource: string): Promise<void> {
+		if (!resource.startsWith('nsfw:')) throw new Error('Not a preference intent');
+		const shard = createHash('sha256').update(resource).digest()[0]! % 16;
+		await getClient().execute(
+			'DELETE FROM integration_event_journal WHERE shard = ? AND entry_key = ?',
+			[shard, `d:${resource}`],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+	}
+
 	/** 完整快照允许合并旧待发版本，版本记录缺失则保留待发而不是降级发送 */
 	async superseded(event: JournalEvent, resource: string, version: number): Promise<boolean> {
 		const response = await getClient().execute(

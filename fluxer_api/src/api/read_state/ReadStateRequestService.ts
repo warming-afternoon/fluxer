@@ -4,6 +4,7 @@ import type {UserID} from '@app/api/BrandedTypes';
 import {createChannelID, createMessageID} from '@app/api/BrandedTypes';
 import {mapReadStateResponse} from '@app/api/read_state/ReadStateResponseMapper';
 import type {ReadStateService} from '@app/api/read_state/ReadStateService';
+import {filterNsfwReadStates} from '@app/api/read_state/ReadStateVisibility';
 import type {
 	ReadStateAckBulkRequest,
 	ReadStateAckRequest,
@@ -48,7 +49,7 @@ export class ReadStateRequestService {
 			})),
 		});
 		return {
-			read_states: readStates.map(mapReadStateResponse),
+			read_states: (await filterNsfwReadStates(readStates, userId)).map(mapReadStateResponse),
 		};
 	}
 }

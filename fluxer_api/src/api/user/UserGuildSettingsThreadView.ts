@@ -8,6 +8,7 @@ import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import type {UserGuildSettings} from '@app/api/models/UserGuildSettings';
 import {ThreadOnlyChannelsByGuild} from '@app/api/Tables';
 import type {HonoEnv} from '@app/api/types/HonoEnv';
+import {forumNsfwGuildId} from '@app/api/user/NsfwDisplayScope';
 import {mapUserGuildSettingsToResponse, type UserGuildSettingsThreadView} from '@app/api/user/UserMappers';
 import type {UserGuildSettingsResponse} from '@fluxer/schema/src/domains/user/UserResponseSchemas';
 import type {Context} from 'hono';
@@ -67,13 +68,19 @@ export async function dispatchUserGuildSettingsUpdate(
 	userId: UserID,
 	settings: UserGuildSettings,
 ): Promise<void> {
-	const payload = mapUserGuildSettingsToResponse(settings, await controlUserGuildSettingsView(settings));
+	const payload = {
+		...mapUserGuildSettingsToResponse(settings, await controlUserGuildSettingsView(settings)),
+		forum_nsfw_guild_id: forumNsfwGuildId(),
+	};
 	if (payload.guild_id === null) {
 		await gatewayService.dispatchPresence({userId, event: 'USER_GUILD_SETTINGS_UPDATE', data: payload});
 		await gatewayService.syncPushUserGuildSettings({userId, guildId: settings.guildId, settings: payload});
 		return;
 	}
-	const full = mapUserGuildSettingsToResponse(settings, SYSTEM_USER_GUILD_SETTINGS_VIEW);
+	const full = {
+		...mapUserGuildSettingsToResponse(settings, SYSTEM_USER_GUILD_SETTINGS_VIEW),
+		forum_nsfw_guild_id: forumNsfwGuildId(),
+	};
 	if (JSON.stringify(full) === JSON.stringify(payload)) {
 		await gatewayService.dispatchPresence({userId, event: 'USER_GUILD_SETTINGS_UPDATE', data: payload});
 	} else {

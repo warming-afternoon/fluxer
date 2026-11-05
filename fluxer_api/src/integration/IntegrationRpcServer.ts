@@ -73,6 +73,7 @@ export class IntegrationRpcServer {
 		if (
 			(message.subject.startsWith('rpc.auth.') ||
 				message.subject.startsWith('rpc.content.') ||
+				message.subject.startsWith('rpc.preferences.') ||
 				message.subject === 'rpc.identity.v1.login_eligibility' ||
 				message.subject === 'rpc.identity.v1.rebind_service') &&
 			!reply.startsWith(this.forumReplyPrefix)

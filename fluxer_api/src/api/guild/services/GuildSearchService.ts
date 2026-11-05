@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type {ChannelID, GuildID, UserID} from '@app/api/BrandedTypes';
+import {type ChannelID, createChannelID, type GuildID, type UserID} from '@app/api/BrandedTypes';
 import type {ChannelRepository} from '@app/api/channel/ChannelRepository';
 import {threadSearchIndexEnqueueCappedTotal} from '@app/api/channel/threads/ThreadMetrics';
+import {isNsfwVisibilityGuild, NsfwVisibility} from '@app/api/channel/utils/NsfwVisibility';
 import {
 	THREAD_FEATURE_CHANNEL_TYPES,
 	THREAD_PARENT_CHANNEL_TYPES,
@@ -72,13 +73,14 @@ export class GuildSearchService {
 			const channels = await this.channelRepository.channelData.listGuildChannels(guildId, 'enrolled');
 			channelIds = channels.filter((c) => threadsVisible || !c.isThreadOnly()).map((c) => c.id);
 		}
-		const includeNsfwRequested = searchParams.include_nsfw ?? false;
-		const canUserAccessNsfw =
-			guildIsAgeRestricted || includeNsfwRequested ? await getCanUserAccessNsfw(this.userRepository, userId) : false;
-		if (guildIsAgeRestricted && !canUserAccessNsfw) {
-			throw new NsfwContentRequiresAgeVerificationError();
-		}
-		const canIncludeNsfw = canUserAccessNsfw && (includeNsfwRequested || guildIsAgeRestricted);
+		const resolveNsfwEligibility = async () => {
+			const includeRequested = searchParams.include_nsfw ?? false;
+			const eligible =
+				guildIsAgeRestricted || includeRequested ? await getCanUserAccessNsfw(this.userRepository, userId) : false;
+			if (guildIsAgeRestricted && !eligible) throw new NsfwContentRequiresAgeVerificationError();
+			return eligible && (includeRequested || guildIsAgeRestricted);
+		};
+		const priorNsfwEligibility = isNsfwVisibilityGuild(guildId) ? null : await resolveNsfwEligibility();
 		const guildNsfw = guildData?.nsfw ?? false;
 		const channels = await this.channelRepository.channelData.listChannels(channelIds);
 		const channelMap = new Map<string, Channel>();
@@ -92,8 +94,15 @@ export class GuildSearchService {
 				throw InputValidationError.fromCode('channel_ids', ValidationErrorCodes.ALL_CHANNELS_MUST_BELONG_TO_GUILD);
 			}
 		}
+		const visibility = new NsfwVisibility(userId, this.channelRepository);
+		const visibleChannels = await visibility.filter(channels);
+		const visibleIds = new Set(visibleChannels.map((channel) => channel.id));
+		channelIds = channelIds.filter((id) => visibleIds.has(id));
+		if (channelIds.length === 0) return emptyMessageSearchResponse(searchParams);
+		const canIncludeNsfw = priorNsfwEligibility ?? (await resolveNsfwEligibility());
+		const requestedIds = new Set(channelIds.map((id) => id.toString()));
 		const requestedThreads = explicitChannelIds
-			? channels.filter((channel) => channelMap.get(channel.id.toString())?.isThread())
+			? visibleChannels.filter((channel) => channelMap.get(channel.id.toString())?.isThread())
 			: [];
 		if (requestedThreads.length > 0) {
 			const threadIds = new Set(requestedThreads.map((thread) => thread.id.toString()));
@@ -158,10 +167,17 @@ export class GuildSearchService {
 				guildId,
 				validChannelIds,
 				channelMap,
-				requestedIds: explicitChannelIds ? new Set(params.channelIds.map((id) => id.toString())) : null,
+				requestedIds: explicitChannelIds ? requestedIds : null,
 			});
 		} else {
 			searchChannelIds = validChannelIds.map((id) => id.toString());
+		}
+		if (isNsfwVisibilityGuild(guildId)) {
+			const liveChannels = await this.channelRepository.channelData.listChannels(
+				searchChannelIds.map((id) => createChannelID(BigInt(id))),
+			);
+			searchChannelIds = (await visibility.filter(liveChannels)).map((channel) => channel.id.toString());
+			if (searchChannelIds.length === 0) return emptyMessageSearchResponse(searchParams);
 		}
 		return runMessageSearch({
 			searchService,
@@ -183,7 +199,18 @@ export class GuildSearchService {
 		searchParams: MessageSearchRequest;
 		requestCache: RequestCache;
 	}): Promise<MessageSearchResponse> {
-		const {userId, viewer, channelIds, searchParams, requestCache} = params;
+		const {userId, viewer, searchParams, requestCache} = params;
+		let {channelIds} = params;
+		if (channelIds.length > 0) {
+			const visibility = new NsfwVisibility(userId, this.channelRepository);
+			const requestedChannels = await this.channelRepository.channelData.listChannels(channelIds);
+			const visible = new Set((await visibility.filter(requestedChannels)).map((channel) => channel.id));
+			const hidden = new Set(
+				requestedChannels.filter((channel) => !visible.has(channel.id)).map((channel) => channel.id),
+			);
+			channelIds = channelIds.filter((id) => !hidden.has(id));
+			if (channelIds.length === 0) return emptyMessageSearchResponse(searchParams);
+		}
 		const searchService = getMessageSearchService();
 		if (!searchService) {
 			throw new FeatureTemporarilyDisabledError();
@@ -343,6 +370,7 @@ export class GuildSearchService {
 		threadParents: Map<string, Channel>;
 	}> {
 		const guildIds = await this.userRepository.getUserGuildIds(userId);
+		const visibility = new NsfwVisibility(userId, this.channelRepository);
 		const accessibleChannels = new Map<string, Channel>();
 		const unindexedChannelIds = new Set<string>();
 		const guildNsfwLevels = new Map<string, number>();
@@ -367,7 +395,8 @@ export class GuildSearchService {
 				guildNsfwLevels.set(guildId.toString(), guildData.nsfw_level);
 			}
 			const viewableChannelIds = new Set(viewableChannels.map((channelId) => channelId.toString()));
-			for (const channel of guildChannels) {
+			const visibleGuildChannels = await visibility.filter(guildChannels);
+			for (const channel of visibleGuildChannels) {
 				if (channel.type === ChannelTypes.GUILD_CATEGORY) {
 					parentCategories.set(channel.id.toString(), channel);
 				}
@@ -414,6 +443,21 @@ export class GuildSearchService {
 			userId,
 			groups: Array.from(threadParentsByGuild, ([guildId, parentIds]) => ({guildId, parentIds})),
 		});
+		// Directory/search indexes can lag a thread move. Recheck the actual channel before exposing its messages.
+		const targetThreadIds = [...scope]
+			.filter(([, parentId]) => isNsfwVisibilityGuild(parentById.get(parentId.toString())?.guildId ?? null))
+			.map(([id]) => createChannelID(BigInt(id)));
+		if (targetThreadIds.length > 0) {
+			const liveThreads = await visibility.filter(
+				await this.channelRepository.channelData.listChannels(targetThreadIds),
+			);
+			const liveIds = new Set(
+				liveThreads
+					.filter((thread) => thread.parentId === scope.get(thread.id.toString()))
+					.map((thread) => thread.id.toString()),
+			);
+			for (const id of targetThreadIds) if (!liveIds.has(id.toString())) scope.delete(id.toString());
+		}
 		const threadParents = new Map(
 			Array.from(scope, ([threadId, parentId]) => [threadId, parentById.get(parentId.toString())!] as const),
 		);

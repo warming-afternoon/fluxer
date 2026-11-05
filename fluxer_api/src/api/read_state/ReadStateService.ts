@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type {ChannelID, MessageID, UserID} from '@app/api/BrandedTypes';
+import type {ChannelID, GuildID, MessageID, UserID} from '@app/api/BrandedTypes';
 import {Config} from '@app/api/Config';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import {Logger} from '@app/api/Logger';
@@ -13,9 +13,15 @@ import type {
 } from '@app/api/read_state/ReadStateRepository';
 import {visibleReadStates} from '@app/api/read_state/ReadStateVisibility';
 
-function threadScope(readState: ReadState | null | undefined): Record<string, unknown> {
-	if (!readState?.isMarked) return {};
-	return {flags: readState.flags ?? 0, __thread_scoped: readState.guildId!.toString()};
+function threadScope(
+	readState: ReadState | null | undefined,
+	channelGuildId?: GuildID | null,
+): Record<string, unknown> {
+	const guildId = readState?.guildId ?? channelGuildId;
+	return {
+		...(guildId != null ? {__guild_id: guildId.toString()} : {}),
+		...(readState?.isMarked ? {flags: readState.flags ?? 0, __thread_scoped: readState.guildId!.toString()} : {}),
+	};
 }
 
 function hadUnreadThrough(previous: ReadState | null, messageId: MessageID, unreadThrough: MessageID | null): boolean {
@@ -74,7 +80,14 @@ export class ReadStateService {
 		);
 		await this.afterWrite(userId, channelId, async () => {
 			if (!implicit && emitGateway && Config.readState?.combinedGatewayRpcEnabled) {
-				await this.notifyCombinedReadState({userId, channelId, messageId, readState, manual});
+				await this.notifyCombinedReadState({
+					userId,
+					channelId,
+					messageId,
+					readState,
+					manual,
+					guildId: params.channel?.guildId,
+				});
 				return;
 			}
 			if (!implicit) {
@@ -91,6 +104,7 @@ export class ReadStateService {
 					manual,
 					version: readState.version,
 					readState,
+					guildId: params.channel?.guildId,
 				}).catch((error) => {
 					Logger.error(
 						{userId: userId.toString(), channelId: channelId.toString(), error},
@@ -251,7 +265,7 @@ export class ReadStateService {
 			channel: params.channel,
 		});
 		await this.repository.upsertPinAck(userId, channelId, timestamp, marker);
-		await this.dispatchPinsAck({userId, channelId, timestamp, marker});
+		await this.dispatchPinsAck({userId, channelId, timestamp, marker, guildId: params.channel?.guildId});
 	}
 
 	/** 单条和批量显式确认复用同一已读网关通知，保持权威游标与原清理游标。 */
@@ -260,6 +274,7 @@ export class ReadStateService {
 		channelId: ChannelID;
 		messageId: MessageID;
 		readState: ReadState;
+		guildId?: GuildID | null;
 		manual?: boolean;
 	}): Promise<void> {
 		const {userId, channelId, messageId, readState, manual} = params;
@@ -274,7 +289,7 @@ export class ReadStateService {
 					mention_count: readState.mentionCount,
 					manual,
 					version: readState.version?.toString(),
-					...threadScope(readState),
+					...threadScope(readState, params.guildId),
 				},
 			});
 		} catch (error) {
@@ -294,6 +309,7 @@ export class ReadStateService {
 		manual?: boolean;
 		version?: bigint;
 		readState?: ReadState | null;
+		guildId?: GuildID | null;
 	}): Promise<void> {
 		const {userId, channelId, messageId, mentionCount, manual, version} = params;
 		await this.gatewayService.dispatchPresence({
@@ -305,7 +321,7 @@ export class ReadStateService {
 				mention_count: mentionCount,
 				manual,
 				version: version?.toString(),
-				...threadScope(params.readState),
+				...threadScope(params.readState, params.guildId),
 			},
 		});
 	}
@@ -330,6 +346,7 @@ export class ReadStateService {
 		channelId: ChannelID;
 		timestamp: Date;
 		marker: ReadStateMarker | null;
+		guildId?: GuildID | null;
 	}): Promise<void> {
 		const {userId, channelId, timestamp, marker} = params;
 		await this.gatewayService.dispatchPresence({
@@ -338,6 +355,9 @@ export class ReadStateService {
 			data: {
 				channel_id: channelId.toString(),
 				timestamp: timestamp.toISOString(),
+				...((marker?.guildId ?? params.guildId) != null
+					? {__guild_id: (marker?.guildId ?? params.guildId)!.toString()}
+					: {}),
 				...(marker ? {__thread_scoped: marker.guildId.toString()} : {}),
 			},
 		});

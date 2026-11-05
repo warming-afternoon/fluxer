@@ -68,6 +68,17 @@ const ServiceUploadedAttachment = ClientUploadedAttachmentRequest.pick({
 }).strict();
 const ServiceAttachmentReference = z.object({id: IdentityId}).strict();
 export const IntegrationSchemas = {
+	'rpc.preferences.v1.get_service': Envelope.extend({actor_user_id: IdentityId, guild_id: IdentityId}).strict(),
+	'rpc.preferences.v1.update_service': Envelope.extend({
+		actor_user_id: IdentityId,
+		guild_id: IdentityId,
+		show_nsfw: z.boolean(),
+		expected_version: z
+			.number()
+			.int()
+			.min(0)
+			.max(Number.MAX_SAFE_INTEGER - 1),
+	}).strict(),
 	'rpc.content.v1.thread.update_service': ServiceOperation.extend({
 		/** 操作只限允许论坛中的原生帖子 */
 		thread_id: IdentityId,

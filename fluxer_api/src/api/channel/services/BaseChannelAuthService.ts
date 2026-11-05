@@ -22,6 +22,7 @@ import {
 	computeEffectiveChannelNsfw,
 	guildResponseToContentWarningView,
 } from '@app/api/channel/utils/EffectiveContentWarning';
+import {NsfwVisibility} from '@app/api/channel/utils/NsfwVisibility';
 import {SYSTEM_USER_ID} from '@app/api/constants/Core';
 import {
 	THREAD_CHANNEL_TYPES,
@@ -142,6 +143,8 @@ export abstract class BaseChannelAuthService {
 			const recipients = await this.userRepository.listUsers(Array.from(channel.recipientIds));
 			return this.getDMChannelAuth({channel, recipients, userId});
 		}
+		// This independent display gate must run before visitor fallback and cannot be skipped with age validation.
+		await new NsfwVisibility(userId, this.channelRepository, this.guildRepository).assertVisible(channel);
 		if (access !== 'visitor_read') {
 			return this.getGuildChannelAuth({channel, userId, skipNsfwValidation});
 		}

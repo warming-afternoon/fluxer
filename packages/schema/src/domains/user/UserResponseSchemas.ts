@@ -466,6 +466,18 @@ const UserGuildChannelOverride = z.object({
 	),
 });
 export const UserGuildSettingsResponse = z.object({
+	show_nsfw: z
+		.boolean()
+		.nullable()
+		.optional()
+		.describe('Independent NSFW display preference in the configured Forum guild'),
+	nsfw_version: z
+		.number()
+		.int()
+		.min(0)
+		.max(Number.MAX_SAFE_INTEGER)
+		.optional()
+		.describe('Monotonic NSFW preference CAS version'),
 	guild_id: SnowflakeStringType.nullable().describe('The ID of the guild these settings apply to'),
 	message_notifications: withFieldDescription(
 		UserNotificationSettingsSchema,

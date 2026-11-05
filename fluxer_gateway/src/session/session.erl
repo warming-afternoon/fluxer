@@ -120,8 +120,12 @@ handle_call({heartbeat_ack, Seq}, _From, State) when is_integer(Seq), Seq >= 0 -
 handle_call({resume, Seq, SocketPid}, _From, State) when
     is_integer(Seq), Seq >= 0, is_pid(SocketPid)
 ->
+    ok = gateway_nsfw_preferences:register_socket(maps:get(user_id, State),
+        maps:get(forum_nsfw_preference, State, #{}), SocketPid),
     case gateway_nsfw_preferences:stale_session(State) of
-        true -> {stop, normal, {error, invalid_session}, State#{buffer => []}};
+        true ->
+            SocketPid ! nsfw_preference_revoked,
+            {stop, normal, {error, invalid_session}, State#{buffer => []}};
         false -> session_lifecycle:handle_resume(Seq, SocketPid, State)
     end;
 handle_call({get_state}, _From, State) ->

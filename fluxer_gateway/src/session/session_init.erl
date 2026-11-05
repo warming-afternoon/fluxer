@@ -164,7 +164,8 @@ build_state(SessionData) ->
     GwTimings0 = maps:get(gw_timings, SessionData, gateway_timings:new()),
     Preference = gateway_nsfw_preferences:attach(
         maps:get(user_id, SessionData),
-        maps:get(forum_nsfw_preference, SessionData, #{})
+        maps:get(forum_nsfw_preference, SessionData, #{}),
+        maps:get(socket_pid, SessionData, undefined)
     ),
     BaseState0 = (extract_fields(SessionData))#{forum_nsfw_preference => Preference,
         forum_nsfw_channels => maps:get(forum_nsfw_channels, SessionData, #{})},

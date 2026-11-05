@@ -8,7 +8,7 @@ import {clsx} from 'clsx';
 import {observer} from 'mobx-react-lite';
 import type React from 'react';
 
-const FLUXER_TAG_REGEX = /^[a-zA-Z0-9_]+$/;
+const FLUXER_TAG_REGEX = /^[a-zA-Z0-9_.]+$/;
 
 interface UsernameValidationResult {
 	validLength: boolean;
@@ -44,7 +44,7 @@ export const UsernameValidationRules: React.FC<UsernameValidationRulesProps> = o
 		{
 			key: 'characters',
 			valid: validation.validCharacters,
-			label: <Trans>Letters (a-z, A-Z), numbers (0-9), and underscores (_) only</Trans>,
+			label: <Trans>Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only</Trans>,
 		},
 	];
 	return (

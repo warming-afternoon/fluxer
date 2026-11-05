@@ -21158,8 +21158,8 @@ msgid "Lets you sign in to this account with {providerName}."
 msgstr "Bu hesaba {providerName} ile giriş yapmanı sağlar."
 
 #: src/features/ui/components/form/UsernameValidationRules.tsx
-msgid "Letters (a-z, A-Z), numbers (0-9), and underscores (_) only"
-msgstr "Yalnızca harfler (a-z, A-Z), rakamlar (0-9) ve alt çizgi (_)"
+msgid "Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only"
+msgstr "Yalnızca harfler (a-z, A-Z), rakamlar (0-9), alt çizgi (_) ve nokta (.)"
 
 #. Error modal body shown when entrance sound library quota is reached.
 #: src/features/user/components/modals/tabs/hooks/useEntranceSound.ts
@@ -25527,8 +25527,8 @@ msgstr "Yalnızca arkadaşlarınız sizi arayabilir (önerilir)"
 
 #. Short label in the authentication auth register form core. Keep the tone plain and specific.
 #: src/features/auth/flow/AuthRegisterFormCore.tsx
-msgid "Only letters, numbers, and underscores"
-msgstr "Yalnızca harfler, rakamlar ve alt çizgiler"
+msgid "Only letters, numbers, underscores, and dots"
+msgstr "Yalnızca harfler, rakamlar, alt çizgiler ve noktalar"
 
 #: src/features/guild/components/modals/guild_tabs/CloneAllowedToggle.tsx
 msgid "Only members with the \"{manageCommunityPermissionLabel}\" permission can change this."
@@ -40741,8 +40741,8 @@ msgstr "Kullanıcı adı zaten alınmış"
 
 #. Label in the bot profile section.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
-msgid "Username can only contain letters, numbers, and underscores"
-msgstr "Kullanıcı adı yalnızca harf, rakam ve alt çizgi içerebilir"
+msgid "Username can only contain letters, numbers, underscores, and dots"
+msgstr "Kullanıcı adı yalnızca harf, rakam, alt çizgi ve nokta içerebilir"
 
 #. Short label in the bot profile section. Keep it concise.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
@@ -40780,8 +40780,8 @@ msgid "Usernames"
 msgstr "Kullanıcı adları"
 
 #: src/features/user/components/modals/FluxerTagChangeModal.tsx
-msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are case-insensitive."
-msgstr "Kullanıcı adları yalnızca harf (a-z, A-Z), rakam (0-9) ve alt çizgi içerebilir. Kullanıcı adlarında büyük/küçük harf duyarlılığı yoktur."
+msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are case-insensitive."
+msgstr "Kullanıcı adları yalnızca harf (a-z, A-Z), rakam (0-9), alt çizgi ve nokta içerebilir. Kullanıcı adlarında büyük/küçük harf duyarlılığı yoktur."
 
 #. Section header in the message search popout listing matching users for from: / mentions: filters. Title Case.
 #. Section heading in the channel and chat autocomplete for user suggestions.

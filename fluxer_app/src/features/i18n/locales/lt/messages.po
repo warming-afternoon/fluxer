@@ -21159,8 +21159,8 @@ msgid "Lets you sign in to this account with {providerName}."
 msgstr "Leidžia prisijungti prie šios paskyros per {providerName}."
 
 #: src/features/ui/components/form/UsernameValidationRules.tsx
-msgid "Letters (a-z, A-Z), numbers (0-9), and underscores (_) only"
-msgstr "Tik raidės (a-z, A-Z), skaitmenys (0-9) ir apatiniai brūkšniai (_)"
+msgid "Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only"
+msgstr "Tik raidės (a-z, A-Z), skaitmenys (0-9), apatiniai brūkšniai (_) ir taškai (.)"
 
 #. Error modal body shown when entrance sound library quota is reached.
 #: src/features/user/components/modals/tabs/hooks/useEntranceSound.ts
@@ -25528,8 +25528,8 @@ msgstr "Tik draugai gali jums skambinti (rekomenduojama)"
 
 #. Short label in the authentication auth register form core. Keep the tone plain and specific.
 #: src/features/auth/flow/AuthRegisterFormCore.tsx
-msgid "Only letters, numbers, and underscores"
-msgstr "Tik raidės, skaičiai ir apatiniai brūkšniai"
+msgid "Only letters, numbers, underscores, and dots"
+msgstr "Tik raidės, skaičiai, apatiniai brūkšniai ir taškai"
 
 #: src/features/guild/components/modals/guild_tabs/CloneAllowedToggle.tsx
 msgid "Only members with the \"{manageCommunityPermissionLabel}\" permission can change this."
@@ -40742,8 +40742,8 @@ msgstr "Naudotojo vardas jau užimtas"
 
 #. Label in the bot profile section.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
-msgid "Username can only contain letters, numbers, and underscores"
-msgstr "Naudotojo vardą gali sudaryti tik raidės, skaičiai ir apatiniai brūkšniai"
+msgid "Username can only contain letters, numbers, underscores, and dots"
+msgstr "Naudotojo vardą gali sudaryti tik raidės, skaičiai, apatiniai brūkšniai ir taškai"
 
 #. Short label in the bot profile section. Keep it concise.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
@@ -40781,8 +40781,8 @@ msgid "Usernames"
 msgstr "Vartotojo vardai"
 
 #: src/features/user/components/modals/FluxerTagChangeModal.tsx
-msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are case-insensitive."
-msgstr "Naudotojo vardą gali sudaryti tik raidės (a-z, A-Z), skaičiai (0-9) ir apatiniai brūkšniai. Naudotojų varduose didžiosios ir mažosios raidės neskiriamos."
+msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are case-insensitive."
+msgstr "Naudotojo vardą gali sudaryti tik raidės (a-z, A-Z), skaičiai (0-9), apatiniai brūkšniai ir taškai. Naudotojų varduose didžiosios ir mažosios raidės neskiriamos."
 
 #. Section header in the message search popout listing matching users for from: / mentions: filters. Title Case.
 #. Section heading in the channel and chat autocomplete for user suggestions.

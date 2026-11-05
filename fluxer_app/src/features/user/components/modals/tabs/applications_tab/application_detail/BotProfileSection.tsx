@@ -42,7 +42,7 @@ const USERNAME_MUST_BE_AT_MOST_32_CHARACTERS_DESCRIPTOR = msg({
 	comment: 'Label in the bot profile section.',
 });
 const USERNAME_CAN_ONLY_CONTAIN_LETTERS_NUMBERS_AND_UNDERSCORES_DESCRIPTOR = msg({
-	message: 'Username can only contain letters, numbers, and underscores',
+	message: 'Username can only contain letters, numbers, underscores, and dots',
 	comment: 'Label in the bot profile section.',
 });
 
@@ -159,7 +159,7 @@ export const BotProfileSection: React.FC<BotProfileSectionProps> = ({
 							minLength: {value: 1, message: i18n._(USERNAME_MUST_BE_AT_LEAST_1_CHARACTER_DESCRIPTOR)},
 							maxLength: {value: 32, message: i18n._(USERNAME_MUST_BE_AT_MOST_32_CHARACTERS_DESCRIPTOR)},
 							pattern: {
-								value: /^[a-zA-Z0-9_]+$/,
+								value: /^[a-zA-Z0-9_.]+$/,
 								message: i18n._(USERNAME_CAN_ONLY_CONTAIN_LETTERS_NUMBERS_AND_UNDERSCORES_DESCRIPTOR),
 							},
 						}}

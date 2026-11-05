@@ -21158,8 +21158,8 @@ msgid "Lets you sign in to this account with {providerName}."
 msgstr "يتيح لك تسجيل الدخول إلى هذا الحساب باستخدام {providerName}."
 
 #: src/features/ui/components/form/UsernameValidationRules.tsx
-msgid "Letters (a-z, A-Z), numbers (0-9), and underscores (_) only"
-msgstr "الأحرف (a-z وA-Z) والأرقام (0-9) والشرطات السفلية (_) فقط"
+msgid "Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only"
+msgstr "الأحرف (a-z وA-Z) والأرقام (0-9) والشرطات السفلية (_) والنقاط (.) فقط"
 
 #. Error modal body shown when entrance sound library quota is reached.
 #: src/features/user/components/modals/tabs/hooks/useEntranceSound.ts
@@ -25527,8 +25527,8 @@ msgstr "يمكن للأصدقاء فقط الاتصال بك (موصى به)"
 
 #. Short label in the authentication auth register form core. Keep the tone plain and specific.
 #: src/features/auth/flow/AuthRegisterFormCore.tsx
-msgid "Only letters, numbers, and underscores"
-msgstr "أحرف وأرقام وشرطات سفلية فقط"
+msgid "Only letters, numbers, underscores, and dots"
+msgstr "أحرف وأرقام وشرطات سفلية ونقاط فقط"
 
 #: src/features/guild/components/modals/guild_tabs/CloneAllowedToggle.tsx
 msgid "Only members with the \"{manageCommunityPermissionLabel}\" permission can change this."
@@ -40741,8 +40741,8 @@ msgstr "اسم المستخدم هذا مُستخدَم بالفعل"
 
 #. Label in the bot profile section.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
-msgid "Username can only contain letters, numbers, and underscores"
-msgstr "يمكن أن يحتوي اسم المستخدم على أحرف وأرقام وشرطات سفلية فقط"
+msgid "Username can only contain letters, numbers, underscores, and dots"
+msgstr "يمكن أن يحتوي اسم المستخدم على أحرف وأرقام وشرطات سفلية ونقاط فقط"
 
 #. Short label in the bot profile section. Keep it concise.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
@@ -40780,8 +40780,8 @@ msgid "Usernames"
 msgstr "أسماء المستخدمين"
 
 #: src/features/user/components/modals/FluxerTagChangeModal.tsx
-msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are case-insensitive."
-msgstr "يمكن أن تتضمن أسماء المستخدمين أحرفًا (a-z, A-Z) وأرقامًا (0-9) وشرطات سفلية فقط. لا تميّز أسماء المستخدمين بين الأحرف الكبيرة والصغيرة."
+msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are case-insensitive."
+msgstr "يمكن أن تتضمن أسماء المستخدمين أحرفًا (a-z, A-Z) وأرقامًا (0-9) وشرطات سفلية ونقاط فقط. لا تميّز أسماء المستخدمين بين الأحرف الكبيرة والصغيرة."
 
 #. Section header in the message search popout listing matching users for from: / mentions: filters. Title Case.
 #. Section heading in the channel and chat autocomplete for user suggestions.

@@ -11,6 +11,7 @@ import styles from '@app/features/auth/flow/AuthPageStyles.module.css';
 import {DateOfBirthField} from '@app/features/auth/flow/DateOfBirthField';
 import {asksDateOfBirthAtSignUp} from '@app/features/auth/flow/DateOfBirthRules';
 import {type RegisterFormFields, readRegistrationUrlCode} from '@app/features/auth/flow/RegisterFormFields';
+import {isRegistrationFormClosed} from '@app/features/auth/flow/RegistrationFormGate';
 import {
 	getRegistrationLegalConsentConfig,
 	RegistrationLegalNotice,
@@ -157,7 +158,7 @@ export const AuthRegisterFormCore = observer(function AuthRegisterFormCore({
 		[location.search],
 	);
 	const registrationTarget = useMemo(() => instanceTargetFromSnapshot(runtimeSnapshot), [runtimeSnapshot]);
-	const isPublicRegistrationClosed = runtimeSnapshot.registration.mode === 'closed' && !registrationUrlCode;
+	const isPublicRegistrationClosed = isRegistrationFormClosed(runtimeSnapshot, registrationUrlCode, setupToken);
 	const [ageBlocked] = useState(() => isAgeBlocked());
 	const collectDateOfBirth = asksDateOfBirthAtSignUp(runtimeSnapshot);
 	const {getRegisterFormDraft, setRegisterFormDraft, clearRegisterFormDraft} = useAuthRegisterDraftContext();

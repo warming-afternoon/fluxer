@@ -44395,3 +44395,18 @@ msgstr "Role notifications were skipped because the combined audience exceeds th
 #: src/features/channel/components/ThreadMentionWarning.tsx
 msgid "Role notifications were skipped because role information is temporarily unavailable."
 msgstr "Role notifications were skipped because role information is temporarily unavailable."
+
+#. NSFW display preference. English fallback until translated.
+#: src/features/guild/components/modals/GuildPrivacySettingsModal.tsx
+msgid "Show NSFW content"
+msgstr "Show NSFW content"
+
+#. NSFW display preference. English fallback until translated.
+#: src/features/guild/components/modals/GuildPrivacySettingsModal.tsx
+msgid "Show NSFW channels and posts in this community. Existing access and age restrictions still apply."
+msgstr "Show NSFW channels and posts in this community. Existing access and age restrictions still apply."
+
+#. NSFW display preference. English fallback until translated.
+#: src/features/guild/components/modals/GuildPrivacySettingsModal.tsx
+msgid "Could not confirm the change. Reload your settings and try again."
+msgstr "Could not confirm the change. Reload your settings and try again."

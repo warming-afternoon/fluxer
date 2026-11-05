@@ -44394,3 +44394,15 @@ msgstr "提及角色的合计受众超过规模限制，已跳过角色通知。
 #: src/features/channel/components/ThreadMentionWarning.tsx
 msgid "Role notifications were skipped because role information is temporarily unavailable."
 msgstr "角色信息暂不可用，已跳过角色通知。"
+
+#: src/features/guild/components/modals/GuildPrivacySettingsModal.tsx
+msgid "Show NSFW content"
+msgstr "显示 NSFW 内容"
+
+#: src/features/guild/components/modals/GuildPrivacySettingsModal.tsx
+msgid "Show NSFW channels and posts in this community. Existing access and age restrictions still apply."
+msgstr "显示此社区的 NSFW 频道和帖子。现有访问权限和年龄限制仍然适用。"
+
+#: src/features/guild/components/modals/GuildPrivacySettingsModal.tsx
+msgid "Could not confirm the change. Reload your settings and try again."
+msgstr "无法确认更改是否成功。请重新加载设置后再试。"

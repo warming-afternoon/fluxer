@@ -23,13 +23,14 @@ import {
 import type {ApiTestHarness} from '@app/api/test/ApiTestHarness';
 import {HTTP_STATUS} from '@app/api/test/TestConstants';
 import {createBuilder, createBuilderWithoutAuth} from '@app/api/test/TestRequestBuilder';
+import {AccountIdentityModes} from '@fluxer/constants/src/AccountIdentityConstants';
 import {AdminACLs} from '@fluxer/constants/src/AdminACLs';
 import {APIErrorCodes} from '@fluxer/constants/src/ApiErrorCodes';
 import {UserFlags} from '@fluxer/constants/src/UserConstants';
 import {ValidationErrorCodes} from '@fluxer/constants/src/ValidationErrorCodes';
 import {getSameIpDecisionKey} from '@fluxer/ip_utils/src/IpAddress';
 import {ms} from 'itty-time';
-import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
+import {afterAll, beforeAll, beforeEach, describe, expect, it, vi} from 'vitest';
 
 function bootstrapRegistrationBody(prefix: string): Record<string, unknown> {
 	return {
@@ -423,6 +424,97 @@ describe('Setup token registration', () => {
 			});
 		},
 	);
+
+	it('creates the username-mode bootstrap admin while registration is closed', async () => {
+		await withSetupTokenInstance(async () => {
+			const repository = getInstanceConfigRepository();
+			await repository.setAccountIdentityMode(AccountIdentityModes.USERNAME, 'setup');
+			await repository.setRegistrationConfig({mode: 'closed'});
+			const {status, json} = await register({
+				username: createUniqueUsername('closedusername'),
+				password: 'a-strong-password',
+				consent: true,
+				setup_token: SETUP_TOKEN,
+			});
+			expect(status).toBe(HTTP_STATUS.OK);
+			await expectUserACLs(json.user_id!, [AdminACLs.WILDCARD]);
+			await expect(repository.getRegistrationConfig()).resolves.toMatchObject({mode: 'closed'});
+		});
+	});
+
+	it('keeps closed registration closed for missing, invalid, and reused setup tokens', async () => {
+		await withSetupTokenInstance(async () => {
+			const repository = getInstanceConfigRepository();
+			await repository.setRegistrationConfig({mode: 'closed'});
+			for (const token of [undefined, WRONG_SETUP_TOKEN]) {
+				const body: Record<string, unknown> = {...bootstrapRegistrationBody('closedinvalid'), setup_token: token};
+				const {status} = await register(body);
+				expect(status).toBe(HTTP_STATUS.BAD_REQUEST);
+				expect(await getUserRepository().findByEmail(body.email as string)).toBeNull();
+			}
+			await registerAdmin('closedbootstrap');
+			for (const configured of [false, true]) {
+				await repository.setAppPublicConfig({setup: {configured}});
+				for (const token of [undefined, WRONG_SETUP_TOKEN, SETUP_TOKEN]) {
+					const body: Record<string, unknown> = {...bootstrapRegistrationBody('closedreplay'), setup_token: token};
+					const {status, json} = await register(body);
+					expect(status).toBe(HTTP_STATUS.FORBIDDEN);
+					expect(json.code).toBe(APIErrorCodes.REGISTRATION_CLOSED);
+					expect(await getUserRepository().findByEmail(body.email as string)).toBeNull();
+				}
+			}
+			await expect(repository.getRegistrationConfig()).resolves.toMatchObject({mode: 'closed'});
+		});
+	});
+
+	it('does not use a setup token to create an unclaimed account through closed registration', async () => {
+		await withSetupTokenInstance(async () => {
+			const repository = getInstanceConfigRepository();
+			await repository.setRegistrationConfig({mode: 'closed'});
+			await repository.updateAuthConfig({instant_accounts: {enabled: true}});
+			const {status, json} = await register({global_name: 'Unclaimed Operator', setup_token: SETUP_TOKEN});
+			expect(status).toBe(HTTP_STATUS.FORBIDDEN);
+			expect(json.code).toBe(APIErrorCodes.REGISTRATION_CLOSED);
+			await expect(repository.isAdminBootstrapped()).resolves.toBe(false);
+			await registerAdmin('afterunclaimed');
+		});
+	});
+
+	it('creates only the winning bootstrap account when valid setup registrations race', async () => {
+		await withSetupTokenInstance(async () => {
+			const repository = getInstanceConfigRepository();
+			// A configured identity does not take the setup lock. The database claim must still protect registration.
+			getConfig().instance.setup.configured = true;
+			await repository.setRegistrationConfig({mode: 'closed'});
+			const claimAdminBootstrap = repository.claimAdminBootstrap.bind(repository);
+			let claims = 0;
+			const ready = Promise.withResolvers<void>();
+			const claim = vi.spyOn(repository, 'claimAdminBootstrap').mockImplementation(async (userId) => {
+				if (++claims === 2) ready.resolve();
+				await ready.promise;
+				return await claimAdminBootstrap(userId);
+			});
+			const bodies: Array<Record<string, unknown>> = ['closedraceone', 'closedracetwo'].map((prefix) => ({
+				...bootstrapRegistrationBody(prefix),
+				setup_token: SETUP_TOKEN,
+			}));
+			try {
+				const results = await Promise.all(bodies.map((body) => register(body)));
+				expect(results.map(({status}) => status).sort()).toEqual([HTTP_STATUS.OK, HTTP_STATUS.FORBIDDEN]);
+				for (const [index, result] of results.entries()) {
+					if (result.status === HTTP_STATUS.OK) {
+						await expectUserACLs(result.json.user_id!, [AdminACLs.WILDCARD]);
+					} else {
+						expect(result.json.code).toBe(APIErrorCodes.REGISTRATION_CLOSED);
+						expect(await getUserRepository().findByEmail(bodies[index].email as string)).toBeNull();
+					}
+				}
+				await expect(repository.isAdminBootstrapped()).resolves.toBe(true);
+			} finally {
+				claim.mockRestore();
+			}
+		});
+	});
 
 	it('reports the missing setup token before any other registration check', async () => {
 		await withSetupTokenInstance(async () => {

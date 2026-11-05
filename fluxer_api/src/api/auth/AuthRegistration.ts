@@ -264,6 +264,7 @@ export async function createAccount(
 	return await withAccountIdentitySetupLock(cache, () => createAccountUnlocked(ctx, deps, params, {setupTokenPassed}));
 }
 
+/** 按已验证的初始化状态执行注册，并仅向成功认领初始化的账号授予管理员权限。 */
 async function createAccountUnlocked(
 	ctx: ApiContext,
 	deps: RegistrationDependencies,
@@ -280,6 +281,9 @@ async function createAccountUnlocked(
 	const usernameMode = accountIdentity.mode === AccountIdentityModes.USERNAME;
 	const uniqueUsernames = accountIdentity.tagStyle === TagStyles.NONE;
 	const instant = isInstantAccountRequest({email: input.email, password: input.password}, {usernameMode});
+	// 初始化令牌仅允许创建具备正式账号凭据的首个管理员。
+	const setupBootstrapRegistration =
+		setupTokenVerified && (usernameMode ? Boolean(input.password) : input.email !== null);
 	let olderAppUsername: string | undefined;
 	if (usernameMode) {
 		assertUsernameModeRegistration(input);
@@ -291,9 +295,9 @@ async function createAccountUnlocked(
 		input.consent,
 	);
 	const now = new Date();
-	if (!setupTokenVerified) await assertSignUpsOpenAfterSetup(config, instanceConfigRepository);
+	if (!setupBootstrapRegistration) await assertSignUpsOpenAfterSetup(config, instanceConfigRepository);
 	let registrationAccess: RegistrationAccess;
-	if (setupTokenVerified) {
+	if (setupBootstrapRegistration) {
 		registrationAccess = {pendingApproval: false, registrationUrl: null};
 	} else {
 		registrationAccess = await resolveRegistrationAccess(
@@ -450,6 +454,8 @@ async function createAccountUnlocked(
 			});
 		}
 		const grantBootstrapAdmin = bootstrapAdminEligible && (await instanceConfigRepository.claimAdminBootstrap(userId));
+		// 初始化认领失败时终止注册，避免绕过关闭注册的限制创建普通账号。
+		if (setupBootstrapRegistration && !grantBootstrapAdmin) throw new RegistrationClosedError();
 		creationAttempt = grantBootstrapAdmin ? 'bootstrap_admin' : 'ordinary_account';
 		user = await users.create(grantBootstrapAdmin ? {...userRow, acls: new Set([AdminACLs.WILDCARD])} : userRow);
 	} catch (error) {

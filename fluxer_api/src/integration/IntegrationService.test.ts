@@ -10,7 +10,9 @@ import {AuthSession as AuthSessionModel} from '@app/api/models/AuthSession';
 import {AuthSessions} from '@app/api/Tables';
 import type {ApiTestHarness} from '@app/api/test/ApiTestHarness';
 import {createBuilder} from '@app/api/test/TestRequestBuilder';
+import {UserIndexRepository} from '@app/api/user/repositories/account/crud/UserIndexRepository';
 import {AuthSessionRepository} from '@app/api/user/repositories/auth/AuthSessionRepository';
+import * as UniqueUsernames from '@app/api/user/UniqueUsernames';
 import {DiscordAccountService} from '@app/integration/DiscordAccountService';
 import * as IntegrationEvents from '@app/integration/IntegrationEvents';
 import {type ExchangeRecord, IntegrationExchangeRepository} from '@app/integration/IntegrationExchangeRepository';
@@ -19,6 +21,8 @@ import type {DiscordProfile} from '@app/integration/IntegrationSchemas';
 import {IntegrationSchemas} from '@app/integration/IntegrationSchemas';
 import {IntegrationService} from '@app/integration/IntegrationService';
 import {UserFlags} from '@fluxer/constants/src/UserConstants';
+import {ValidationErrorCodes} from '@fluxer/constants/src/ValidationErrorCodes';
+import {InputValidationError} from '@fluxer/errors/src/domains/core/InputValidationError';
 import {afterAll, beforeAll, beforeEach, describe, expect, it, vi} from 'vitest';
 
 vi.mock('@app/api/infrastructure/APIReadiness', () => ({
@@ -127,6 +131,7 @@ describe('Integration native authority', () => {
 		const user = results[0]!.user;
 		expect(user.passwordHash).toBeNull();
 		expect(user.email).toBeNull();
+		expect(user.username).toBe('discordname');
 		expect(await context.services.users.findSettings(user.id)).not.toBeNull();
 		expect(await context.services.users.findUsersByUsername(user.username)).toHaveLength(1);
 		const binding = identities.bindings.get('123456789012345678')!;
@@ -138,6 +143,239 @@ describe('Integration native authority', () => {
 			}),
 			{eventId: `${binding.operation_id}:binding:${user.id}:1`},
 		);
+	});
+
+	it.each(['discord.name', 'a'.repeat(32)])('uses the available Discord username unchanged: %s', async (username) => {
+		const context = createApiContext();
+		const accounts = new DiscordAccountService(context, new MemoryIdentities());
+		const result = await accounts.ensureDiscordAccount('123456789012345678', {...profile, username}, operation);
+		expect(result.user.username).toBe(username);
+		expect(result.binding.username).toBe(username);
+	});
+
+	it('adds a stable suffix only for a real, case-insensitive native username collision', async () => {
+		await createTestAccount(harness, {username: 'DiscordName'});
+		const context = createApiContext();
+		const accounts = new DiscordAccountService(context, new MemoryIdentities());
+		const result = await accounts.ensureDiscordAccount(
+			'123456789012345678',
+			{...profile, username: 'discordname'},
+			operation,
+		);
+		expect(result.user.username).toBe(`discordname_${result.user.id}`);
+		expect((await accounts.ensureDiscordAccount('123456789012345678', profile, operation)).user.username).toBe(
+			result.user.username,
+		);
+	});
+
+	it('retries a taken suffix without allocating another account ID', async () => {
+		const userId = createUserID(123456789012345678n);
+		await createTestAccount(harness, {username: 'shared'});
+		await createTestAccount(harness, {username: `shared_${userId}`});
+		const context = createApiContext();
+		vi.spyOn(context.services.snowflake, 'generate').mockResolvedValue(userId);
+		const accounts = new DiscordAccountService(context, new MemoryIdentities());
+		const result = await accounts.ensureDiscordAccount(
+			'123456789012345678',
+			{...profile, username: 'shared'},
+			operation,
+		);
+		expect(result.user.id).toBe(userId);
+		expect(result.user.username).toBe(`shared_${userId}_2`);
+	});
+
+	it('holds the native name lock through index publication across concurrent different identities', async () => {
+		const context = createApiContext();
+		const syncIndices = UserIndexRepository.prototype.syncIndices;
+		vi.spyOn(UserIndexRepository.prototype, 'syncIndices').mockImplementation(async function (
+			this: UserIndexRepository,
+			data,
+			oldData,
+		) {
+			expect(
+				await context.services.cache.acquireLock(
+					`unique-username:${data.username!.toLowerCase().replaceAll('.', '-')}`,
+					1,
+				),
+			).toBeNull();
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			return syncIndices.call(this, data, oldData);
+		});
+		const identities = new MemoryIdentities();
+		const accounts = new DiscordAccountService(context, identities);
+		const results = await Promise.all(
+			Array.from({length: 4}, (_, index) =>
+				accounts.ensureDiscordAccount(
+					`${123456789012345678n + BigInt(index)}`,
+					{...profile, username: 'shared.name'},
+					`${operation}${index}`,
+				),
+			),
+		);
+		expect(new Set(results.map(({user}) => user.id)).size).toBe(4);
+		expect(new Set(results.map(({user}) => user.username.toLowerCase())).size).toBe(4);
+		expect(results.filter(({user}) => user.username === 'shared.name')).toHaveLength(1);
+		for (const {user} of results)
+			expect(await context.services.users.findUsersByUsername(user.username)).toHaveLength(1);
+	});
+
+	it('returns retryable busy rather than adding a suffix when only the name lock is busy', async () => {
+		const context = createApiContext();
+		const identities = new MemoryIdentities();
+		const accounts = new DiscordAccountService(context, identities);
+		const reserve = vi
+			.spyOn(UniqueUsernames, 'reserveUsername')
+			.mockRejectedValueOnce(InputValidationError.fromCode('username', ValidationErrorCodes.USERNAME_ALREADY_TAKEN));
+		await expect(accounts.ensureDiscordAccount('123456789012345678', profile, operation)).rejects.toMatchObject({
+			code: 'BUSY',
+			retryable: true,
+		});
+		expect(reserve).toHaveBeenCalledTimes(1);
+		const pending = identities.bindings.get('123456789012345678')!;
+		expect(await context.services.users.findUnique(pending.user_id)).toBeNull();
+		const recovered = await accounts.ensureDiscordAccount('123456789012345678', profile, operation);
+		expect(recovered.user.id).toBe(pending.user_id);
+		expect(recovered.user.username).toBe('discordname');
+	});
+
+	it('propagates reservation dependency failures without selecting another name', async () => {
+		const context = createApiContext();
+		const accounts = new DiscordAccountService(context, new MemoryIdentities());
+		const reserve = vi
+			.spyOn(UniqueUsernames, 'reserveUsername')
+			.mockRejectedValueOnce(new Error('storage unavailable'));
+		await expect(accounts.ensureDiscordAccount('123456789012345678', profile, operation)).rejects.toThrow(
+			'storage unavailable',
+		);
+		expect(reserve).toHaveBeenCalledTimes(1);
+	});
+
+	it('repairs an interrupted username index without changing the committed account or its profile', async () => {
+		const context = createApiContext();
+		const identities = new MemoryIdentities();
+		const accounts = new DiscordAccountService(context, identities);
+		vi.spyOn(UserIndexRepository.prototype, 'syncIndices').mockRejectedValueOnce(new Error('index unavailable'));
+		await expect(accounts.ensureDiscordAccount('123456789012345678', profile, operation)).rejects.toThrow(
+			'index unavailable',
+		);
+		const pending = identities.bindings.get('123456789012345678')!;
+		const committed = await context.services.users.findUnique(pending.user_id);
+		expect(committed?.username).toBe('discordname');
+		const recovered = await accounts.ensureDiscordAccount(
+			'123456789012345678',
+			{...profile, username: 'different', display_name: 'Different'},
+			operation,
+		);
+		expect(recovered.user.id).toBe(pending.user_id);
+		expect(recovered.user.username).toBe('discordname');
+		expect(recovered.user.globalName).toBe(profile.display_name);
+		expect(await context.services.users.findUsersByUsername(recovered.user.username)).toHaveLength(1);
+	});
+
+	it('fails closed if another identity claims the name between an index failure and recovery', async () => {
+		const context = createApiContext();
+		const identities = new MemoryIdentities();
+		const accounts = new DiscordAccountService(context, identities);
+		const sync = vi
+			.spyOn(UserIndexRepository.prototype, 'syncIndices')
+			.mockRejectedValueOnce(new Error('index unavailable'));
+		const firstId = '123456789012345678';
+		const secondId = '123456789012345679';
+		const shared = {...profile, username: 'shared.name'};
+		await expect(accounts.ensureDiscordAccount(firstId, shared, operation)).rejects.toThrow('index unavailable');
+		const pending = identities.bindings.get(firstId)!;
+		const original = await context.services.users.findUnique(pending.user_id);
+		const winner = await accounts.ensureDiscordAccount(secondId, shared, `${operation}_other`);
+		expect(winner.user.username).toBe('shared.name');
+		sync.mockClear();
+		for (let attempt = 0; attempt < 2; attempt++) {
+			await expect(accounts.ensureDiscordAccount(firstId, shared, operation)).rejects.toMatchObject({
+				code: 'IDENTITY_CONFLICT',
+				retryable: false,
+			});
+		}
+		expect(sync).not.toHaveBeenCalled();
+		expect((await context.services.users.findUnique(pending.user_id))?.toRow()).toEqual(original!.toRow());
+		expect(identities.bindings.get(firstId)?.state).toBe('pending');
+		expect((await context.services.users.findUsersByUsername('shared.name')).map(({id}) => id)).toEqual([
+			winner.user.id,
+		]);
+		expect(
+			(
+				await UniqueUsernames.findPersonByLoginHandle(context.services.users, {
+					username: 'shared.name',
+					discriminator: null,
+				})
+			)?.id,
+		).toBe(winner.user.id);
+	});
+
+	it('leaves a committed pending account unchanged when its recovery name lock is busy', async () => {
+		const context = createApiContext();
+		const identities = new MemoryIdentities();
+		const accounts = new DiscordAccountService(context, identities);
+		identities.failCompleteOnce = true;
+		await expect(accounts.ensureDiscordAccount('123456789012345678', profile, operation)).rejects.toThrow('crash');
+		const pending = identities.bindings.get('123456789012345678')!;
+		const committed = await context.services.users.findUnique(pending.user_id);
+		const reserve = vi
+			.spyOn(UniqueUsernames, 'reserveUsername')
+			.mockRejectedValueOnce(InputValidationError.fromCode('username', ValidationErrorCodes.USERNAME_ALREADY_TAKEN));
+		await expect(accounts.ensureDiscordAccount('123456789012345678', profile, operation)).rejects.toMatchObject({
+			code: 'BUSY',
+			retryable: true,
+		});
+		expect(reserve).toHaveBeenCalledTimes(1);
+		expect((await context.services.users.findUnique(pending.user_id))?.toRow()).toEqual(committed!.toRow());
+		expect(identities.bindings.get('123456789012345678')?.state).toBe('pending');
+		const recovered = await accounts.ensureDiscordAccount('123456789012345678', profile, operation);
+		expect(recovered.user.id).toBe(pending.user_id);
+		expect(recovered.user.username).toBe(committed!.username);
+	});
+
+	it('reacquires the actual username lock when a pending account changes while waiting for its old lock', async () => {
+		const context = createApiContext();
+		const identities = new MemoryIdentities();
+		const accounts = new DiscordAccountService(context, identities);
+		vi.spyOn(UserIndexRepository.prototype, 'syncIndices').mockRejectedValueOnce(new Error('index unavailable'));
+		await expect(accounts.ensureDiscordAccount('123456789012345678', profile, operation)).rejects.toThrow(
+			'index unavailable',
+		);
+		const pending = identities.bindings.get('123456789012345678')!;
+		const reserveUsername = UniqueUsernames.reserveUsername;
+		let renamed = false;
+		const reserve = vi.spyOn(UniqueUsernames, 'reserveUsername').mockImplementation(async (deps, username, userId) => {
+			const reservation = await reserveUsername(deps, username, userId);
+			if (!renamed) {
+				renamed = true;
+				const original = await context.services.users.findUnique(pending.user_id);
+				await context.services.users.patchUpsert(pending.user_id, {username: 'native_choice'}, original!.toRow());
+			}
+			return reservation;
+		});
+		const recovered = await accounts.ensureDiscordAccount('123456789012345678', profile, operation);
+		expect(recovered.user.id).toBe(pending.user_id);
+		expect(recovered.user.username).toBe('native_choice');
+		expect(reserve.mock.calls.map(([, username]) => username)).toEqual(['discordname', 'native_choice']);
+		expect(await context.services.users.findUsersByUsername('discordname')).toHaveLength(0);
+		expect((await context.services.users.findUsersByUsername('native_choice')).map(({id}) => id)).toEqual([
+			pending.user_id,
+		]);
+	});
+
+	it('preserves ready account IDs and user-edited usernames on subsequent Discord logins', async () => {
+		const context = createApiContext();
+		const accounts = new DiscordAccountService(context, new MemoryIdentities());
+		const created = await accounts.ensureDiscordAccount('123456789012345678', profile, operation);
+		await context.services.users.patchUpsert(created.user.id, {username: 'native_choice'}, created.user.toRow());
+		const later = await accounts.ensureDiscordAccount(
+			'123456789012345678',
+			{...profile, username: 'new.discord.name'},
+			`${operation}_later`,
+		);
+		expect(later.user.id).toBe(created.user.id);
+		expect(later.user.username).toBe('native_choice');
+		expect(later.created).toBe(false);
 	});
 
 	it('recovers both a half claim and account creation interrupted before commit without overwriting profiles', async () => {

@@ -17,7 +17,7 @@ export interface DiscordBinding {
 	/** 首次创建操作 */
 	operation_id: string;
 
-	/** 初始用户名 */
+	/** 首次首选用户名；确认重名后的实际名字以原生账户为准 */
 	username: string;
 
 	/** 初始昵称 */

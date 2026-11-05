@@ -30,6 +30,12 @@ resolve(UserId, Thread, Member, State) ->
     {permission(), map()}.
 resolve_cached(UserId, Thread, Member, State, Cache) ->
     %% 缓存只保存父权限，私有成员关系和超时仍逐子频道判断。
+    case gateway_nsfw_preferences:channel_allowed(UserId, Thread, State) of
+        false -> {0, Cache};
+        true -> resolve_allowed(UserId, Thread, Member, State, Cache)
+    end.
+
+resolve_allowed(UserId, Thread, Member, State, Cache) ->
     case parent_channel(Thread, State) of
         undefined ->
             note_unknown_parent(),

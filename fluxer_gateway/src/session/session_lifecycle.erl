@@ -61,6 +61,7 @@ any_hash_matches(AuthHash, Hashes) ->
 
 -spec terminate(term(), session_state()) -> ok.
 terminate(_Reason, State) ->
+    ok = gateway_nsfw_preferences:detach(),
     try_decrement_user_sessions(State),
     maybe_release_transferred_resources(State),
     try_cleanup_guild_monitors(State),
@@ -610,6 +611,8 @@ serialize_transfer_state(State) ->
 -spec serialize_transfer_identity(session_state()) -> map().
 serialize_transfer_identity(State) ->
     #{
+        forum_nsfw_preference => maps:get(forum_nsfw_preference, State, #{}),
+        forum_nsfw_channels => maps:get(forum_nsfw_channels, State, #{}),
         id => maps:get(id, State),
         user_id => maps:get(user_id, State),
         user_data => maps:get(user_data, State),

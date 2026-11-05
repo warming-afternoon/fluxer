@@ -21,12 +21,26 @@
 
 -spec handle_dispatch(event(), map() | list() | {pre_encoded, binary()}, session_state()) ->
     {noreply, session_state()}.
-handle_dispatch(Event, {pre_encoded, _} = Data, State) ->
+handle_dispatch(Event, Data0, State0) ->
+    {Data, State} = case is_map(Data0) of
+        true -> session_nsfw_backstop:consume_snapshot(Data0, State0);
+        false -> {Data0, State0}
+    end,
+    case gateway_nsfw_preferences:stale_session(State) of
+        true -> {noreply, State};
+        false ->
+            case session_nsfw_backstop:check(Event, Data, State) of
+                drop -> {noreply, State};
+                {ok, Filtered} -> handle_current_dispatch(Event, Filtered, State)
+            end
+    end.
+
+handle_current_dispatch(Event, {pre_encoded, _} = Data, State) ->
     case skip_pre_encoded(Event, Data, State) of
         true -> {noreply, State};
         false -> do_handle_dispatch_pre_encoded(Event, Data, State)
     end;
-handle_dispatch(Event, Data, State) ->
+handle_current_dispatch(Event, Data, State) ->
     case session_thread_backstop:check(Event, Data, State) of
         drop -> {noreply, State};
         {ok, Data1} -> handle_plain_dispatch(Event, Data1, State)

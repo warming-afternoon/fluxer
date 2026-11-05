@@ -145,6 +145,10 @@ websocket_info(Msg, State) ->
     end.
 
 -spec handle_message(term(), state()) -> ws_info_result().
+handle_message(nsfw_preference_revoked, State) ->
+    gateway_handler_encode:close_with_reason(
+        invalid_seq, <<"Visibility changed; identify again">>, State
+    );
 handle_message({heartbeat_check, Token}, State) when is_reference(Token) ->
     hibernate(gateway_handler_heartbeat:handle_heartbeat_check(Token, State));
 handle_message({dispatch, ready, Data, Seq}, State) when is_integer(Seq), is_map(Data) ->

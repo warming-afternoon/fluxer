@@ -9,6 +9,10 @@
 -define(REMOTE_EXECUTE_TIMEOUT, 15000).
 
 -spec execute_method(binary(), map()) -> term().
+execute_method(<<"guild.begin_nsfw_preference_update">>, Params) ->
+    gateway_nsfw_preferences:begin_cluster(Params);
+execute_method(<<"guild.sync_nsfw_preference">>, Params) ->
+    gateway_nsfw_preferences:sync_cluster(Params);
 execute_method(Method, Params) ->
     case maybe_forward_to_owner(Method, Params) of
         local ->

@@ -25,6 +25,15 @@
 init_base_state(GuildState) ->
     TransferSafe = guild_handoff:remonitor_transferred_sessions(GuildState),
     Data0 = maps:get(data, TransferSafe, #{}),
+    ok = gateway_nsfw_preferences:seed_scope(
+        maps:get(<<"forum_nsfw_guild_id">>, Data0, undefined)
+    ),
+    case maps:get(id, TransferSafe, undefined) =:= gateway_nsfw_preferences:scope() of
+        true ->
+            [gen_server:cast(Pid, nsfw_preference_revoked) ||
+                #{pid := Pid} <- maps:values(maps:get(sessions, TransferSafe, #{})), is_pid(Pid)];
+        false -> ok
+    end,
     ExistingVoice = maps:get(voice_states, TransferSafe, #{}),
     {VoiceStates, Data1} = extract_voice_states_from_data(Data0, ExistingVoice),
     {ThreadExtras, Data2} = guild_thread_load:take_extras(Data1),

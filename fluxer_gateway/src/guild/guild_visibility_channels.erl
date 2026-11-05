@@ -35,7 +35,8 @@ get_user_viewable_channels(UserId, State) ->
             [];
         _ ->
             Base = guild_permissions:member_base_permissions(UserId, Member, State),
-            compute_viewable_with_categories(UserId, Base, Channels, State)
+            [Id || Id <- compute_viewable_with_categories(UserId, Base, Channels, State),
+                gateway_nsfw_preferences:allowed(UserId, Id, State)]
     end.
 
 -spec compute_viewable_with_categories(

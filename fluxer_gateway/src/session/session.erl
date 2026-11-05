@@ -104,6 +104,13 @@ init(SessionData) ->
 
 -spec handle_call(term(), gen_server:from(), session_state()) ->
     {reply, term(), session_state()} | {stop, normal, term(), session_state()}.
+handle_call(nsfw_preference_revoke, _From, State) ->
+    case maps:get(socket_pid, State, undefined) of
+        SocketPid when is_pid(SocketPid) -> SocketPid ! nsfw_preference_revoked;
+        _ -> ok
+    end,
+    {stop, normal, {ok, maps:get(socket_pid, State, undefined)},
+        State#{buffer => [], buffer_bytes => 0, replay_payload_bytes => 0}};
 handle_call({token_verify, Token}, _From, State) when is_binary(Token) ->
     session_lifecycle:handle_token_verify(Token, State);
 handle_call({is_staff}, _From, State) ->
@@ -113,7 +120,10 @@ handle_call({heartbeat_ack, Seq}, _From, State) when is_integer(Seq), Seq >= 0 -
 handle_call({resume, Seq, SocketPid}, _From, State) when
     is_integer(Seq), Seq >= 0, is_pid(SocketPid)
 ->
-    session_lifecycle:handle_resume(Seq, SocketPid, State);
+    case gateway_nsfw_preferences:stale_session(State) of
+        true -> {stop, normal, {error, invalid_session}, State#{buffer => []}};
+        false -> session_lifecycle:handle_resume(Seq, SocketPid, State)
+    end;
 handle_call({get_state}, _From, State) ->
     {reply, session_lifecycle:serialize_state(State), State};
 handle_call(export_state, _From, State) ->
@@ -137,8 +147,44 @@ handle_cast(Msg, State) ->
 
 -spec handle_cast_message(term(), session_state()) ->
     {noreply, session_state()} | {stop, normal, session_state()}.
+handle_cast_message({nsfw_channel_classification, Channels}, State) when is_map(Channels) ->
+    {noreply, State#{forum_nsfw_channels => Channels}};
+handle_cast_message(nsfw_preference_revoked, State) ->
+    case maps:get(socket_pid, State, undefined) of
+        SocketPid when is_pid(SocketPid) -> SocketPid ! nsfw_preference_revoked;
+        _ -> ok
+    end,
+    {stop, normal, State#{buffer => [], buffer_bytes => 0, replay_payload_bytes => 0}};
 handle_cast_message({presence_update, Update}, State) when is_map(Update) ->
     session_lifecycle:handle_presence_update_cast(Update, State);
+handle_cast_message({dispatch, user_guild_settings_update, Data}, State) when is_map(Data) ->
+    case snowflake_id:parse_optional(maps:get(<<"guild_id">>, Data, undefined)) of
+        GuildId when is_integer(GuildId) ->
+            case GuildId =:= gateway_nsfw_preferences:scope() of
+                true ->
+                    UserId = maps:get(user_id, State),
+                    WireScope = snowflake_id:parse_optional(maps:get(<<"forum_nsfw_guild_id">>, Data, undefined)),
+                    {_, CurrentVersion} = gateway_nsfw_preferences:current(GuildId, UserId),
+                    ValidScope = WireScope =:= GuildId,
+                    IncomingVersion = maps:get(<<"nsfw_version">>, Data, 0),
+                    Version = case ValidScope of
+                        true -> IncomingVersion;
+                        false -> CurrentVersion
+                    end,
+                    _ = gateway_nsfw_preferences:import(UserId, #{
+                        guild_id => GuildId,
+                        show_nsfw => ValidScope andalso maps:get(<<"show_nsfw">>, Data, false) =:= true,
+                        nsfw_version => Version
+                    }),
+                    case gateway_nsfw_preferences:stale_session(State) of
+                        true -> handle_cast_message(nsfw_preference_revoked, State);
+                        false -> session_dispatch:handle_dispatch(user_guild_settings_update,
+                            maps:remove(<<"forum_nsfw_guild_id">>, Data), State)
+                    end;
+                false -> session_dispatch:handle_dispatch(user_guild_settings_update, Data, State)
+            end;
+        _ -> session_dispatch:handle_dispatch(user_guild_settings_update, Data, State)
+    end;
 handle_cast_message({dispatch, Event, {pre_encoded, EncodedData} = Data}, State) when
     is_atom(Event), is_binary(EncodedData)
 ->

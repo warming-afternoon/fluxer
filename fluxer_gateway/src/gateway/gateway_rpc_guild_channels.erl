@@ -104,7 +104,8 @@ get_viewable_channels_cached_or_rpc(GuildId, UserId) ->
 
 -spec get_viewable_channels_from_snapshot(integer(), integer(), map()) ->
     {ok, [integer()]} | error.
-get_viewable_channels_from_snapshot(GuildId, UserId, Snapshot) ->
+get_viewable_channels_from_snapshot(GuildId, UserId, Snapshot0) ->
+    Snapshot = Snapshot0#{api_native_permissions => true},
     case should_bypass_viewable_cache(UserId, Snapshot) of
         true -> get_viewable_channels_via_rpc(GuildId, UserId);
         false -> {ok, guild_visibility_channels:get_user_viewable_channels(UserId, Snapshot)}
@@ -134,7 +135,7 @@ get_viewable_channels_via_rpc(GuildId, UserId) ->
 
 -spec get_viewable_channels_from_pid(integer(), pid(), integer()) -> {ok, [integer()]} | error.
 get_viewable_channels_from_pid(GuildId, Pid, UserId) ->
-    Request = {get_viewable_channels, #{user_id => UserId}},
+    Request = {get_viewable_channels, #{user_id => UserId, api_native_permissions => true}},
     case gateway_rpc_guild_infra:safe_guild_call(GuildId, Pid, Request, ?GUILD_CALL_TIMEOUT) of
         {ok, #{channel_ids := CIds}} when is_list(CIds) -> {ok, snowflake_id:parse_list(CIds)};
         _ -> error

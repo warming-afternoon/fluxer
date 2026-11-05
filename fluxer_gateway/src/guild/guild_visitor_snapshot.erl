@@ -17,7 +17,8 @@
 view(#{adult := Adult, thread_viewer := Viewer} = Visibility, State) ->
     Visitors = guild_visitor_state:get(State),
     Views = maps:get(views, Visitors),
-    Key = {Adult, Viewer},
+    UserId = maps:get(user_id, Visibility, undefined),
+    Key = {Adult, Viewer, gateway_nsfw_preferences:cache_key(UserId, State)},
     case maps:get(Key, Views, undefined) of
         View when is_map(View) ->
             {View, State};
@@ -27,8 +28,10 @@ view(#{adult := Adult, thread_viewer := Viewer} = Visibility, State) ->
     end.
 
 -spec compute_view(visibility(), guild_data:guild_state()) -> #{integer() => true}.
-compute_view(#{adult := Adult, thread_viewer := Viewer}, State) ->
-    Full = guild_visitor_permissions:viewable_channel_map(State, Adult),
+compute_view(#{adult := Adult, thread_viewer := Viewer} = Visibility, State) ->
+    UserId = maps:get(user_id, Visibility, undefined),
+    Full = maps:filter(fun(Id, _) -> gateway_nsfw_preferences:allowed(UserId, Id, State) end,
+        guild_visitor_permissions:viewable_channel_map(State, Adult)),
     case Viewer orelse not guild_thread_gate:needs_variant(State) of
         true ->
             Full;
@@ -62,7 +65,8 @@ build(Session, State) ->
     Visible = [C || C <- AllChannels, maps:is_key(channel_id(C), View)],
     Channels = [
         mask_channel(Session, guild_visitor_permissions:strip_overwrites(C, GuildId), State)
-     || C <- with_parents(Visible, AllChannels)
+     || C <- with_parents(Visible, AllChannels),
+        gateway_nsfw_preferences:channel_allowed(maps:get(user_id, Session), C, State)
     ],
     Roles = [
         mask_role(Session, R, State)

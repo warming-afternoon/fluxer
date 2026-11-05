@@ -50,6 +50,15 @@
         | {error, not_member},
         #{viewable_channels_cache => ets:tid(), term() => term()}}.
 handle_session_connect(Request, Pid, State) ->
+    case gateway_nsfw_preferences:connect_allowed(Request, Pid, State) of
+        false -> {reply, {error, not_member}, State};
+        true -> handle_registered_session_connect(Request, Pid, State)
+    end.
+
+handle_registered_session_connect(Request, Pid, State) ->
+    _ = gateway_nsfw_preferences:import(
+        maps:get(user_id, Request), maps:get(forum_nsfw_preference, Request, #{})
+    ),
     #{session_id := SessionId, user_id := UserId} = Request,
     Sessions = maps:get(sessions, State, #{}),
     case maps:is_key(SessionId, Sessions) of

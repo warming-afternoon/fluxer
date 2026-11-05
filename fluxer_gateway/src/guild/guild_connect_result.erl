@@ -75,11 +75,13 @@ compute_available_connect(GuildId, UserId, Request, State) ->
         undefined ->
             #{not_member => true};
         _Member ->
+            PreferenceSnapshot = gateway_nsfw_preferences:current(GuildId, UserId),
             ThreadFields = guild_thread_gate:session_fields(Request, UserId, State),
             GS = guild_data:get_guild_state(
                 UserId, State, guild_thread_gate:state_opts(maps:merge(Request, ThreadFields))
             ),
             #{
+                nsfw_preference_snapshot => PreferenceSnapshot,
                 guild_state => GS,
                 thread_viewer => maps:get(thread_viewer, ThreadFields),
                 initial_last_message_ids => guild_sessions_connect:build_initial_last_message_ids(

@@ -12,7 +12,8 @@
     integer(), [integer()], #{viewable_channels_cache => ets:tid(), term() => term()}
 ) -> map().
 get(UserId, UserRoles, State) ->
-    CacheKey = {UserId, list_to_tuple(lists:sort(UserRoles))},
+    CacheKey = {UserId, list_to_tuple(lists:sort(UserRoles)),
+        gateway_nsfw_preferences:cache_key(UserId, State)},
     CacheTab = viewable_channels_cache_table(State),
     lookup_or_compute_viewable(UserId, CacheKey, CacheTab, State).
 

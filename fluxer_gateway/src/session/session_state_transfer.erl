@@ -78,7 +78,13 @@ handle_call({receive_state, SessionId, SessionState}, _From, Store) when
 handle_call({pop_state, SessionId}, _From, Store) when is_binary(SessionId) ->
     case maps:take(SessionId, Store) of
         {#{state := State}, RemainingStore} ->
-            {reply, {ok, State}, RemainingStore};
+            %% A new owner may not have the previous node's revocation watermark.
+            %% Scoped sessions re-identify against authoritative API storage.
+            Reply = case gateway_nsfw_preferences:requires_identify(State) of
+                true -> {error, not_found};
+                false -> {ok, State}
+            end,
+            {reply, Reply, RemainingStore};
         error ->
             {reply, {error, not_found}, Store}
     end;

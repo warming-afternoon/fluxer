@@ -322,11 +322,12 @@ mask_for(_Session, Event, Payload, State) ->
 
 -spec channel_visible(guild_visitors:visitor_session(), integer(), map()) -> boolean().
 channel_visible(#{viewable_channels := View} = Session, ChannelId, State) ->
-    maps:is_key(ChannelId, View) orelse
-        case guild_thread_gate:thread(ChannelId, State) of
-            Thread when is_map(Thread) -> thread_visible(Session, Thread, State);
-            _ -> false
-        end.
+    gateway_nsfw_preferences:allowed(maps:get(user_id, Session), ChannelId, State) andalso
+        (maps:is_key(ChannelId, View) orelse
+            case guild_thread_gate:thread(ChannelId, State) of
+                Thread when is_map(Thread) -> thread_visible(Session, Thread, State);
+                _ -> false
+            end).
 
 -spec thread_visible(session(), map(), guild_state()) -> boolean().
 thread_visible(#{viewable_channels := View} = Session, Thread, State) ->
@@ -337,6 +338,7 @@ thread_visible(#{viewable_channels := View} = Session, Thread, State) ->
                 map_utils:get_integer(Thread, <<"type">>, undefined)
             ),
     PublicThread andalso
+        gateway_nsfw_preferences:channel_allowed(maps:get(user_id, Session), Thread, State) andalso
         maps:is_key(
             snowflake_id:parse_maybe(maps:get(<<"parent_id">>, Thread, undefined)), View
         ).

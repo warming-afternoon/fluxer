@@ -33,6 +33,7 @@ ensure_table(TableName, Options) ->
 init([]) ->
     erlang:process_flag(fullsweep_after, 0),
     ok = ensure_core_tables(),
+    ok = gateway_nsfw_preferences:init(),
     {ok, #{sweep_timer => schedule_orphan_sweep()}}.
 
 -spec handle_call(term(), gen_server:from(), state()) -> {reply, ok, state()}.

@@ -229,6 +229,7 @@ update_members(NewMembers, #{members := OldMembers, members_by_role := OldRoleMe
 do_update_members(NewMembers, NewRoleMembers, State) ->
     OldMembers = maps:get(members, State, []),
     record_membership_transitions(OldMembers, NewMembers),
+    ok = gateway_nsfw_preferences:note_nodes(NewMembers ++ maps:get(members, State, [])),
     persistent_term:put(?MEMBERS_KEY, NewMembers),
     persistent_term:put(?ROLE_MEMBERS_KEY, NewRoleMembers),
     _ = gateway_node_metadata:refresh_node_pod_names(NewMembers),

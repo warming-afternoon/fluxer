@@ -280,6 +280,8 @@ async function createAccountUnlocked(
 	const usernameMode = accountIdentity.mode === AccountIdentityModes.USERNAME;
 	const uniqueUsernames = accountIdentity.tagStyle === TagStyles.NONE;
 	const instant = isInstantAccountRequest({email: input.email, password: input.password}, {usernameMode});
+	const setupBootstrapRegistration =
+		setupTokenVerified && (usernameMode ? Boolean(input.password) : input.email !== null);
 	let olderAppUsername: string | undefined;
 	if (usernameMode) {
 		assertUsernameModeRegistration(input);
@@ -291,9 +293,9 @@ async function createAccountUnlocked(
 		input.consent,
 	);
 	const now = new Date();
-	if (!setupTokenVerified) await assertSignUpsOpenAfterSetup(config, instanceConfigRepository);
+	if (!setupBootstrapRegistration) await assertSignUpsOpenAfterSetup(config, instanceConfigRepository);
 	let registrationAccess: RegistrationAccess;
-	if (setupTokenVerified) {
+	if (setupBootstrapRegistration) {
 		registrationAccess = {pendingApproval: false, registrationUrl: null};
 	} else {
 		registrationAccess = await resolveRegistrationAccess(
@@ -450,6 +452,7 @@ async function createAccountUnlocked(
 			});
 		}
 		const grantBootstrapAdmin = bootstrapAdminEligible && (await instanceConfigRepository.claimAdminBootstrap(userId));
+		if (setupBootstrapRegistration && !grantBootstrapAdmin) throw new RegistrationClosedError();
 		creationAttempt = grantBootstrapAdmin ? 'bootstrap_admin' : 'ordinary_account';
 		user = await users.create(grantBootstrapAdmin ? {...userRow, acls: new Set([AdminACLs.WILDCARD])} : userRow);
 	} catch (error) {

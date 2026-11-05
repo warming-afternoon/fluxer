@@ -5,13 +5,14 @@
 -module(gateway_nsfw_preferences).
 
 -export([
-    init/0, scope/0, seed_scope/1, from_startup/1, import/2, attach/2, detach/0, connect_allowed/3,
+    init/0, scope/0, seed_scope/1, from_startup/1, import/2, attach/2, attach/3, detach/0, register_socket/3, socket_pids/0, forget_socket/1, connect_allowed/3,
     current/2, allowed/3, channel_allowed/3, channel_sensitive/2, apply_permissions/4,
     sync_local/1, sync_cluster/1, begin_local/1, begin_local_with_read/2, begin_cluster/1, fenced/2, requires_identify/1, stale_session/1, cache_key/2, note_nodes/1, sync_nodes/0
 ]).
 
 -define(PREFS, gateway_nsfw_preferences).
 -define(SESSIONS, gateway_nsfw_sessions).
+-define(SOCKETS, gateway_nsfw_sockets).
 
 init() ->
     %% Keep revocation watermarks if the shared table owner restarts. The top
@@ -23,6 +24,8 @@ init() ->
     ok = guild_ets_utils:ensure_table(?PREFS,
         [named_table, public, set, {read_concurrency, true} | Heir]),
     ok = guild_ets_utils:ensure_table(?SESSIONS,
+        [named_table, public, bag, {read_concurrency, true} | Heir]),
+    ok = guild_ets_utils:ensure_table(?SOCKETS,
         [named_table, public, bag, {read_concurrency, true} | Heir]),
     case os:getenv("INTEGRATION_GUILD_ID") of
         false -> ok;
@@ -70,6 +73,37 @@ import(UserId, #{guild_id := GuildId} = Preference) when is_integer(GuildId) ->
         false -> {false, 0}
     end;
 import(_UserId, _Preference) -> {false, 0}.
+
+%% Socket evidence must outlive the session: session termination/normal DOWN
+%% does not mean Cowboy has processed its already queued dispatches.
+attach(UserId, Preference, SocketPid) ->
+    ok = register_socket(UserId, Preference, SocketPid),
+    try attach(UserId, Preference)
+    catch Class:Reason:Stack ->
+        case is_pid(SocketPid) of true -> SocketPid ! nsfw_preference_revoked; false -> ok end,
+        erlang:raise(Class, Reason, Stack)
+    end.
+
+register_socket(UserId, #{guild_id := GuildId} = Preference, SocketPid)
+    when is_integer(GuildId), is_pid(SocketPid) ->
+    ok = seed_scope(GuildId),
+    case GuildId =:= scope() of
+        true ->
+            true = ets:insert(?SOCKETS, {{GuildId, UserId}, SocketPid, normalized(Preference)}),
+            gen_server:cast(guild_ets_owner, {watch_nsfw_socket, SocketPid}),
+            ok;
+        false -> ok
+    end;
+register_socket(_UserId, _Preference, _SocketPid) -> ok.
+
+socket_pids() ->
+    try lists:usort([Pid || {_, Pid, _} <- ets:tab2list(?SOCKETS)])
+    catch error:badarg -> [] end.
+
+%% Called only after a monitor proved the socket dead (not noconnection).
+forget_socket(Pid) ->
+    try ets:match_delete(?SOCKETS, {'_', Pid, '_'}) of _ -> ok
+    catch error:badarg -> ok end.
 
 %% Insert before checking the watermark, closing the update/registration race.
 attach(UserId, Preference0) ->
@@ -301,7 +335,9 @@ sync_local(Params) ->
         true -> case fenced(GuildId, UserId) of true -> revoke(Pid); false -> true end;
         false -> revoke(Pid)
     end || {_, Pid, Snapshot} <- Sessions],
-    lists:all(fun(Result) -> Result =:= true end, Results) andalso not fenced(GuildId, UserId).
+    SocketResult = revoke_sockets(GuildId, UserId, Current),
+    lists:all(fun(Result) -> Result =:= true end, Results) andalso SocketResult andalso
+        not fenced(GuildId, UserId).
 
 begin_local(Params) ->
     begin_local_with_read(Params, fun(UserId, GuildId) ->
@@ -335,7 +371,8 @@ begin_local_with_read(Params, Read) ->
                 false -> true;
                 true ->
                     Results = [revoke(Pid) || {_, Pid, _} <- ets:lookup(?SESSIONS, {GuildId, UserId})],
-                    lists:all(fun(Result) -> Result =:= true end, Results)
+                    SocketResult = revoke_sockets(GuildId, UserId, all),
+                    lists:all(fun(Result) -> Result =:= true end, Results) andalso SocketResult
             end
     end.
 
@@ -344,6 +381,16 @@ fenced(GuildId, UserId) ->
         [{{GuildId, UserId}, _, _, Fence}] -> Fence > 0;
         _ -> false
     catch error:badarg -> true end.
+
+revoke_sockets(GuildId, UserId, Current) ->
+    %% Run even if the session already detached, vanished or exited normally.
+    Sockets = ets:lookup(?SOCKETS, {GuildId, UserId}),
+    Results = [begin
+        Pid ! nsfw_preference_revoked,
+        wait_socket(Pid)
+    end || {_, Pid, Snapshot} <- Sockets,
+        Current =:= all orelse Snapshot =/= Current orelse fenced(GuildId, UserId)],
+    lists:all(fun(Result) -> Result =:= true end, Results).
 
 revoke(Pid) ->
     Ref = erlang:monitor(process, Pid),
@@ -360,7 +407,10 @@ wait_down(Ref, Pid) ->
 
 wait_socket(Pid) when is_pid(Pid) ->
     Ref = erlang:monitor(process, Pid),
-    Result = wait_down(Ref, Pid),
+    Result = receive
+        {'DOWN', Ref, process, Pid, noconnection} -> false;
+        {'DOWN', Ref, process, Pid, _} -> forget_socket(Pid), true
+    after 5000 -> false end,
     erlang:demonitor(Ref, [flush]),
     Result;
 wait_socket(_) -> true.

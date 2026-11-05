@@ -8,6 +8,7 @@ setup() ->
     ok = gateway_nsfw_preferences:init(),
     ets:delete_all_objects(gateway_nsfw_preferences),
     ets:delete_all_objects(gateway_nsfw_sessions),
+    ets:delete_all_objects(gateway_nsfw_sockets),
     ok = gateway_nsfw_preferences:seed_scope(1).
 
 with_test(Fun) ->
@@ -157,7 +158,8 @@ unrelated_guild_startup_and_age_update_do_not_register_or_logout_test() -> with_
             <<"nsfw_version">> => 1}]},
     Preference = gateway_nsfw_preferences:from_startup(Data),
     ?assertEqual(undefined, maps:get(guild_id, Preference)),
-    ?assertEqual(Preference, gateway_nsfw_preferences:attach(10, Preference)),
+    ?assertEqual(Preference, gateway_nsfw_preferences:attach(10, Preference, self())),
+    ?assertEqual([], ets:lookup(gateway_nsfw_sockets, {1, 10})),
     ?assertEqual([], ets:lookup(gateway_nsfw_sessions, {1, 10})),
     State = #{user_id => 10, forum_nsfw_preference => Preference, guilds => #{2 => undefined},
         seq => 0, buffer => [], socket_pid => undefined},
@@ -213,8 +215,8 @@ synchronous_fence_stops_all_devices_including_disconnected_test() -> with_test(f
 end).
 
 registered_session(Parent, Kind) ->
-    Preference = gateway_nsfw_preferences:attach(10, pref(true, 1)),
     Socket = case Kind of live -> spawn(fun() -> receive nsfw_preference_revoked -> ok end end); disconnected -> undefined end,
+    Preference = gateway_nsfw_preferences:attach(10, pref(true, 1), Socket),
     State = #{user_id => 10, socket_pid => Socket, forum_nsfw_preference => Preference,
         buffer => [#{seq => 1, data => secret}], seq => 1},
     Parent ! {ready, self()},
@@ -223,6 +225,117 @@ registered_session(Parent, Kind) ->
         gen_server:reply(From, Reply),
         gateway_nsfw_preferences:detach()
     end.
+
+normal_session_exit_waits_for_independent_socket_proof_test() -> with_test(fun() ->
+    Parent = self(),
+    Socket = spawn(fun() -> receive nsfw_preference_revoked ->
+        Parent ! {socket_closing, self()}, receive release -> ok end
+    end end),
+    Session = spawn(fun() ->
+        gateway_nsfw_preferences:attach(10, pref(true, 1), Socket),
+        Parent ! {registered, self()},
+        receive {'$gen_call', _From, nsfw_preference_revoke} ->
+            gateway_nsfw_preferences:detach(), exit(normal)
+        end
+    end),
+    receive {registered, Session} -> ok end,
+    Worker = spawn(fun() -> Parent ! {fence_result, self(), begin_local_test(begin_wire(1))} end),
+    receive {socket_closing, Socket} -> ok after 1000 -> error(socket_not_closed) end,
+    ?assertNot(is_process_alive(Session)),
+    ?assert(is_process_alive(Socket)),
+    receive {fence_result, Worker, _} -> error(ack_before_socket_down) after 20 -> ok end,
+    Socket ! release,
+    receive {fence_result, Worker, Result} -> ?assert(Result) after 1000 -> error(fence_timeout) end,
+    ?assertNot(is_process_alive(Socket)),
+    ?assertEqual([], ets:lookup(gateway_nsfw_sockets, {1, 10}))
+end).
+
+socket_evidence_survives_session_detach_before_enumeration_test() -> with_test(fun() ->
+    Parent = self(),
+    Socket = spawn(fun() -> receive nsfw_preference_revoked -> ok end end),
+    Session = spawn(fun() ->
+        gateway_nsfw_preferences:attach(10, pref(true, 1), Socket),
+        gateway_nsfw_preferences:detach(), Parent ! detached
+    end),
+    Ref = monitor(process, Session),
+    receive detached -> ok end,
+    receive {'DOWN', Ref, process, Session, _} -> ok end,
+    ?assertEqual([], ets:lookup(gateway_nsfw_sessions, {1, 10})),
+    ?assertMatch([_], ets:lookup(gateway_nsfw_sockets, {1, 10})),
+    ?assert(begin_local_test(begin_wire(1))),
+    ?assertNot(is_process_alive(Socket))
+end).
+
+noproc_session_still_requires_recorded_socket_shutdown_test() -> with_test(fun() ->
+    Parent = self(),
+    Socket = spawn(fun() -> receive nsfw_preference_revoked -> ok end end),
+    Session = spawn(fun() ->
+        gateway_nsfw_preferences:attach(10, pref(true, 1), Socket),
+        Parent ! registered_without_detach
+    end),
+    Ref = monitor(process, Session),
+    receive registered_without_detach -> ok end,
+    receive {'DOWN', Ref, process, Session, _} -> ok end,
+    ?assertMatch([_], ets:lookup(gateway_nsfw_sessions, {1, 10})),
+    ?assert(is_process_alive(Socket)),
+    ?assert(begin_local_test(begin_wire(1))),
+    ?assertNot(is_process_alive(Socket)),
+    ?assertEqual([], ets:lookup(gateway_nsfw_sockets, {1, 10}))
+end).
+
+socket_close_timeout_keeps_evidence_for_retry_test_() ->
+    {timeout, 15, fun() -> with_test(fun() ->
+        Parent = self(),
+        Socket = spawn(fun Loop() -> receive
+            nsfw_preference_revoked -> Parent ! close_requested, Loop();
+            stop -> ok
+        end end),
+        gateway_nsfw_preferences:import(10, pref(true, 1)),
+        gateway_nsfw_preferences:register_socket(10, pref(true, 1), Socket),
+        ?assertNot(begin_local_test(begin_wire(1))),
+        ?assert(gateway_nsfw_preferences:fenced(1, 10)),
+        ?assertMatch([_], ets:lookup(gateway_nsfw_sockets, {1, 10})),
+        ?assert(is_process_alive(Socket)),
+        Ref = monitor(process, Socket), Socket ! stop,
+        receive {'DOWN', Ref, process, Socket, _} -> ok end,
+        ?assert(begin_local_test(begin_wire(1))),
+        ?assertEqual([], ets:lookup(gateway_nsfw_sockets, {1, 10})),
+        receive close_requested -> ok end
+    end) end}.
+
+resume_and_rejected_startup_register_before_accepting_replay_test() -> with_test(fun() ->
+    gateway_nsfw_preferences:import(10, pref(false, 2)),
+    Parent = self(),
+    [begin
+        Socket = spawn(fun() -> receive nsfw_preference_revoked -> Parent ! {closed, self()} end end),
+        case Kind of
+            identify -> ?assertError(stale_nsfw_bootstrap,
+                gateway_nsfw_preferences:attach(10, pref(true, 1), Socket));
+            resume -> ?assertMatch({stop, normal, {error, invalid_session}, _},
+                session:handle_call({resume, 0, Socket}, {self(), make_ref()},
+                    #{user_id => 10, forum_nsfw_preference => pref(true, 1), buffer => [secret]}))
+        end,
+        receive {closed, Socket} -> ok after 1000 -> error(socket_not_closed) end,
+        ?assert(lists:any(fun({_, Pid, _}) -> Pid =:= Socket end,
+            ets:lookup(gateway_nsfw_sockets, {1, 10})))
+    end || Kind <- [identify, resume]],
+    ?assert(gateway_nsfw_preferences:sync_local(wire(false, 2))),
+    ?assertEqual([], ets:lookup(gateway_nsfw_sockets, {1, 10}))
+end).
+
+socket_owner_cleanup_requires_actual_down_not_disconnect_test() -> with_test(fun() ->
+    Socket = spawn(fun() -> receive stop -> ok end end),
+    gateway_nsfw_preferences:register_socket(10, pref(true, 1), Socket),
+    {noreply, Watching} = guild_ets_owner:handle_cast({watch_nsfw_socket, Socket}, #{}),
+    [{Ref, Socket}] = maps:to_list(maps:get(nsfw_socket_refs, Watching)),
+    {noreply, _} = guild_ets_owner:handle_info({'DOWN', Ref, process, Socket, noconnection}, Watching),
+    ?assertMatch([_], ets:lookup(gateway_nsfw_sockets, {1, 10})),
+    Socket ! stop,
+    receive Down = {'DOWN', Ref, process, Socket, _} ->
+        guild_ets_owner:handle_info(Down, Watching)
+    end,
+    ?assertEqual([], ets:lookup(gateway_nsfw_sockets, {1, 10}))
+end).
 
 connect_state() ->
     (fixture())#{member_presence => ets:new(nsfw_member_presence, [set, public]),

@@ -27,7 +27,7 @@ The stand-alone compile reports `behaviour cowboy_websocket undefined`, because
 this offline invocation does not load the Cowboy dependency. It is not a complete
 `rebar3` release build, dependency validation, Dialyzer or Eqwalizer run.
 
-The final local run on 2026-11-05 passed **45 tests**: 26 new NSFW tests plus
+The final local run on 2026-11-05 passed **51 tests**: 32 new NSFW tests plus
 19 existing tests. `git diff --check -- fluxer_gateway` also passed.
 
 The test suites are:
@@ -60,7 +60,7 @@ production deployment.
 
 ## Timing and query-count measurement
 
-The final 45-test local run measured p50=82 microseconds and p95=260 microseconds;
+The final local run reports p50 and p95 below;
 these machine-dependent values vary across runs. The last test runs 200 events, each selecting 200 device sessions from the actual
 `guild_sessions:filter_sessions_for_channel/4` cached-channel path. It reports p50
 and p95 microseconds for one 200-device fanout. Erlang call tracing on `rpc_client`,
@@ -91,8 +91,20 @@ An already newer native winner is synchronized instead of resurrecting a fence.
 Preference/version/fence share one atomic ETS row. Old begins cannot overtake a
 new local committed version. Startup imports cannot clear an unfinished fence.
 Only `guild.sync_nsfw_preference` at or above the fence generation can clear it.
-Both RPCs use the complete node set and wait for local session and socket shutdown,
+Both RPCs use the complete node set and wait for session and socket shutdown,
 including sessions whose socket is already disconnected but whose replay remains.
+A separate socket registry is populated before identify can emit READY and before
+resume can emit replay. It survives session detach and uses the same ETS heir as
+the preference watermarks. After revoking sessions, begin/sync directly closes each
+affected registered socket and waits for its process DOWN. Session `normal` exit or
+`noproc` is not a substitute for that independent socket confirmation. A socket
+close timeout or remote `noconnection` fails confirmation and retains its record
+for retry. The ETS owner monitors sockets, cleans records only on proven death,
+and restores monitoring from the table after restart; disconnected nodes are retried
+by its existing sweep. Tests cover normal exit without a reply, dead session PIDs,
+detach before enumeration, close timeout/retry, and stale identify/resume sockets.
+Already transmitted network bytes cannot be recalled; confirmation guarantees the
+affected Gateway socket process has stopped, including its queued dispatch work.
 A successful preference update requires successful fanout; failed fanout is not
 confirmation. Native storage and the durable recovery intent remain API-owned.
 

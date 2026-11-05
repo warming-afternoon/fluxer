@@ -254,3 +254,21 @@ export function toggleAllCategoriesCollapsed(guildId: string | null, categoryIds
 		channel_overrides: newChannelOverrides,
 	});
 }
+
+/** NSFW visibility is confirmed separately, never coalesced with notification writes. */
+export async function updateNsfwVisibility(guildId: string, show: boolean, expectedVersion: number): Promise<void> {
+	const response = await http.patch<GatewayGuildSettings>(settingsEndpoint(guildId), {
+		body: {show_nsfw: show, nsfw_version: expectedVersion},
+	});
+	const result = response.body;
+	if (
+		!result ||
+		result.guild_id !== guildId ||
+		result.show_nsfw !== show ||
+		!Number.isSafeInteger(result.nsfw_version) ||
+		result.nsfw_version !== expectedVersion + 1
+	) {
+		throw new Error('NSFW preference acknowledgement is invalid');
+	}
+	UserGuildSettings.handleUserGuildSettingsUpdate(result);
+}

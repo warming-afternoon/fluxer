@@ -379,6 +379,12 @@ memo_session_can_view_channel(true, SessionData, ChannelId, State, Memo) ->
     {boolean(), view_memo()}.
 memo_session_can_view_channel_by_permissions(SessionData, ChannelId, State, Memo) ->
     UserId = maps:get(user_id, SessionData, undefined),
+    case gateway_nsfw_preferences:allowed(UserId, ChannelId, State) of
+        false -> {false, Memo};
+        true -> memo_session_channel_allowed(SessionData, ChannelId, State, Memo, UserId)
+    end.
+
+memo_session_channel_allowed(SessionData, ChannelId, State, Memo, UserId) ->
     case {UserId, maps:get(viewable_channels, SessionData, undefined)} of
         {Uid, ViewableChannels} when
             is_integer(Uid), is_map(ViewableChannels), is_map_key(ChannelId, ViewableChannels)

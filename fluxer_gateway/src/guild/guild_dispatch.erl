@@ -100,6 +100,7 @@ process_regular_dispatch(Event, EventData, State) ->
     FinalData0 = guild_dispatch_decorate:decorate_member_data(Event, DecoratedData, State),
     UpdatedState0 = guild_state:update_state(Event, FinalData0, State),
     UpdatedState = guild_state_threads:after_regular_event(Event, FinalData0, UpdatedState0),
+    ok = session_nsfw_backstop:publish_changes(Event, State, UpdatedState),
     FilterState = filter_state_for_event(Event, State, UpdatedState),
     Sessions = maps:get(sessions, UpdatedState),
     FilteredSessions = filter_dispatch_sessions(

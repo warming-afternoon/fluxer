@@ -101,6 +101,7 @@ spawn_guild_connect_worker(
 ) ->
     Inflight = Inflight0#{GuildId => Attempt},
     Ctx = Request#{
+        forum_nsfw_preference => maps:get(forum_nsfw_preference, State, #{}),
         visit => session_visits:connect_fields(GuildId, State),
         session_pid => self(),
         initial_guild_id => maps:get(initial_guild_id, State, undefined),
@@ -434,7 +435,8 @@ log_connect_failed(Msg, GuildId, Attempt, Reason, State) ->
     ).
 
 -spec finalize_guild_connection(guild_id(), pid(), session_state(), map()) -> session_result().
-finalize_guild_connection(GuildId, GuildPid, State, GuildState) ->
+finalize_guild_connection(GuildId, GuildPid, State0, GuildState0) ->
+    {GuildState, State} = session_nsfw_backstop:consume_snapshot(GuildState0, State0),
     Guilds0 = maps:get(guilds, State),
     case maps:find(GuildId, Guilds0) of
         {ok, {Pid, _}} when is_pid(Pid) -> {noreply, State};

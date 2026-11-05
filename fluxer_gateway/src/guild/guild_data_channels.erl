@@ -74,25 +74,26 @@ derive_member_view(_UserId, undefined, _State, _Channels) ->
 derive_member_view(UserId, Member, State, Channels) ->
     Filtered = filter_viewable_channels(UserId, Member, State, Channels),
     JoinedAt = maps:get(<<"joined_at">>, Member, null),
-    {with_missing_parents(Filtered, Channels), JoinedAt}.
+    {visible_with_parents(UserId, State, Filtered, Channels), JoinedAt}.
 
 -spec member_view(user_id(), guild_member(), guild_state(), channel_list()) ->
     {channel_list(), guild_state()}.
 member_view(UserId, Member, State, Channels) ->
     #{exceptions := Exceptions, views := Views} = Cache = member_view_cache(State),
-    RolesKey = maps:get(<<"roles">>, Member, []),
+    RolesKey = {maps:get(<<"roles">>, Member, []),
+        gateway_nsfw_preferences:cache_key(UserId, State)},
     case {sets:is_element(UserId, Exceptions), maps:find(RolesKey, Views)} of
         {true, _} ->
             {Viewable, _JoinedAt} = derive_member_view(UserId, Member, State, Channels),
             {Viewable, State#{member_view_cache => Cache}};
         {false, {ok, ViewableIds}} ->
             Filtered = [C || C <- Channels, maps:is_key(channel_id(C), ViewableIds)],
-            {with_missing_parents(Filtered, Channels), State#{member_view_cache => Cache}};
+            {visible_with_parents(UserId, State, Filtered, Channels), State#{member_view_cache => Cache}};
         {false, error} ->
             Filtered = filter_viewable_channels(UserId, Member, State, Channels),
             ViewableIds = maps:from_keys(channel_ids(Filtered), true),
             NewCache = Cache#{views := put_member_view(RolesKey, ViewableIds, Views)},
-            {with_missing_parents(Filtered, Channels), State#{member_view_cache => NewCache}}
+            {visible_with_parents(UserId, State, Filtered, Channels), State#{member_view_cache => NewCache}}
     end.
 
 -spec member_view_cache(guild_state()) -> member_view_cache().
@@ -144,6 +145,10 @@ put_member_view(RolesKey, ViewableIds, Views) when
     #{RolesKey => ViewableIds};
 put_member_view(RolesKey, ViewableIds, Views) ->
     Views#{RolesKey => ViewableIds}.
+
+visible_with_parents(UserId, State, Filtered, Channels) ->
+    [C || C <- with_missing_parents(Filtered, Channels),
+        gateway_nsfw_preferences:channel_allowed(UserId, C, State)].
 
 -spec with_missing_parents(channel_list(), channel_list()) -> channel_list().
 with_missing_parents(Filtered, Channels) ->

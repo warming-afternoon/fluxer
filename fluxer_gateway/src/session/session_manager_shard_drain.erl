@@ -149,6 +149,7 @@ build_session_data(Data, IdentifyData, Version, SocketPid, SessionId, UserDataMa
     Shard = maps:get(shard, IdentifyData, undefined),
     DetachedCustomStatus = detach_custom_status(resolve_custom_status(Data, Presence)),
     BaseFields = #{
+        forum_nsfw_preference => gateway_nsfw_preferences:from_startup(Data),
         id => SessionId,
         user_id => UserId,
         version => Version,

@@ -64,6 +64,15 @@ member_request(Request) ->
     {ok, map(), guild_data:guild_state()}
     | {rejected, disabled | age_restricted | unavailable | busy, guild_data:guild_state()}.
 admit(Request, Pid, State0) ->
+    case gateway_nsfw_preferences:connect_allowed(Request, Pid, State0) of
+        false -> reject(unavailable, State0);
+        true -> admit_registered(Request, Pid, State0)
+    end.
+
+admit_registered(Request, Pid, State0) ->
+    _ = gateway_nsfw_preferences:import(
+        maps:get(user_id, Request), maps:get(forum_nsfw_preference, Request, #{})
+    ),
     #{session_id := SessionId, user_id := UserId} = Request,
     State = remove_session(SessionId, State0),
     Adult = type_conv:is_true(maps:get(adult_content_allowed, Request, false)),
@@ -174,7 +183,8 @@ add_session(
     #{thread_capable := Capable, thread_viewer := Viewer} = guild_thread_gate:session_fields(
         Request, UserId, State
     ),
-    Visibility = #{adult => maps:get(adult, Candidate), thread_viewer => Viewer},
+    Visibility = #{adult => maps:get(adult, Candidate), thread_viewer => Viewer,
+        user_id => maps:get(user_id, Candidate)},
     {View, State1} = guild_visitor_snapshot:view(Visibility, State),
     MRef = monitor(process, Pid),
     Session = (maps:remove(request, Candidate))#{

@@ -192,7 +192,8 @@ is_gated_channel_id(ChannelId, State) ->
 
 -spec channel_visible(map(), term(), map()) -> boolean().
 channel_visible(Session, ChannelId, State) when is_integer(ChannelId) ->
-    session_viewer(Session) orelse non_viewer_visible(Session, ChannelId, State);
+    gateway_nsfw_preferences:allowed(maps:get(user_id, Session, undefined), ChannelId, State)
+        andalso (session_viewer(Session) orelse non_viewer_visible(Session, ChannelId, State));
 channel_visible(_Session, _ChannelId, _State) ->
     true.
 
@@ -559,9 +560,14 @@ thread_view_access(Session, Thread, State, Memo) ->
 
 -spec thread_access(map() | false, thread_ctx(), access_memo()) -> {boolean(), access_memo()}.
 thread_access(#{user_id := UserId} = Session, Ctx, Memo) when is_integer(UserId) ->
-    case parent_viewable(Session, Ctx) of
-        true -> {true, Memo};
-        false -> memo_thread_access(UserId, Ctx, Memo)
+    {Thread, _Parent, _Message, State} = Ctx,
+    case gateway_nsfw_preferences:channel_allowed(UserId, Thread, State) of
+        false -> {false, Memo};
+        true ->
+            case parent_viewable(Session, Ctx) of
+                true -> {true, Memo};
+                false -> memo_thread_access(UserId, Ctx, Memo)
+            end
     end;
 thread_access(_Session, _Ctx, Memo) ->
     {false, Memo}.

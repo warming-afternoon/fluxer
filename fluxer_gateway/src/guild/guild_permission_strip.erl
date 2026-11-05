@@ -8,8 +8,8 @@
 -spec guild(map() | term()) -> map().
 guild(Guild) when is_map(Guild) ->
     case snowflake_id:parse_optional(maps:get(<<"owner_id">>, Guild, undefined)) of
-        undefined -> #{};
-        OwnerId -> #{<<"owner_id">> => OwnerId}
+        undefined -> maps:with([<<"nsfw">>, <<"nsfw_level">>], Guild);
+        OwnerId -> (maps:with([<<"nsfw">>, <<"nsfw_level">>], Guild))#{<<"owner_id">> => OwnerId}
     end;
 guild(_) ->
     #{}.
@@ -33,7 +33,8 @@ channels(_) ->
 
 -spec strip_channel(map()) -> map().
 strip_channel(Channel) ->
-    Keep = [<<"id">>, <<"name">>, <<"type">>, <<"parent_id">>, <<"permission_overwrites">>],
+    Keep = [<<"id">>, <<"name">>, <<"type">>, <<"parent_id">>, <<"permission_overwrites">>,
+        <<"nsfw">>, <<"nsfw_override">>],
     maps:with(Keep, normalize_channel(Channel)).
 
 -spec channel_index(map() | term()) -> map().

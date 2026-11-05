@@ -131,9 +131,19 @@ guild_call_can_manage(Pid, Msg) ->
     integer(), integer(), integer() | undefined
 ) -> {ok, integer()} | {error, guild_not_found} | error.
 get_permissions_cached_or_rpc(GuildId, UserId, ChannelId) ->
-    case guild_permission_cache:get_permissions(GuildId, UserId, ChannelId) of
+    case native_cached_permissions(GuildId, UserId, ChannelId) of
         {ok, Perms} -> {ok, Perms};
         {error, not_found} -> get_permissions_via_rpc(GuildId, UserId, ChannelId)
+    end.
+
+native_cached_permissions(GuildId, UserId, ChannelId) ->
+    case guild_permission_cache:get_snapshot(GuildId) of
+        {ok, Snapshot} ->
+            try guild_permissions:get_member_permissions(UserId, ChannelId,
+                Snapshot#{api_native_permissions => true}) of
+                Permissions -> {ok, Permissions}
+            catch error:badarg -> {error, not_found} end;
+        Missing -> Missing
     end.
 
 -spec get_permissions_via_rpc(
@@ -142,7 +152,8 @@ get_permissions_cached_or_rpc(GuildId, UserId, ChannelId) ->
 get_permissions_via_rpc(GuildId, UserId, ChannelId) ->
     case gateway_rpc_guild_infra:ensure_guild_pid(GuildId) of
         {ok, Pid} ->
-            Msg = {get_user_permissions, #{user_id => UserId, channel_id => ChannelId}},
+            Msg = {get_user_permissions, #{user_id => UserId, channel_id => ChannelId,
+                api_native_permissions => true}},
             get_perms_from_guild(GuildId, Pid, Msg);
         error ->
             {error, guild_not_found}

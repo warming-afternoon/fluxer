@@ -45,9 +45,10 @@
 -spec can_view_channel(user_id(), channel_id(), maybe_member(), guild_state()) -> boolean().
 can_view_channel(UserId, ChannelId, Member, State) ->
     Base = guild_permissions:member_base_permissions(UserId, Member, State),
-    guild_virtual_channel_access:has_virtual_access(UserId, ChannelId, State) orelse
-        base_has_view(Base, UserId, ChannelId, State) orelse
-        is_category_with_viewable_child(UserId, ChannelId, Base, State).
+    gateway_nsfw_preferences:allowed(UserId, ChannelId, State) andalso
+        (guild_virtual_channel_access:has_virtual_access(UserId, ChannelId, State) orelse
+            base_has_view(Base, UserId, ChannelId, State) orelse
+            is_category_with_viewable_child(UserId, ChannelId, Base, State)).
 
 -spec viewable_channel_ids(
     user_id(), guild_permissions:base_permissions(), [map()], guild_state()
@@ -66,7 +67,8 @@ viewable_channel_ids(UserId, Base, Channels, State) ->
             Id => true
          || Id <- Undecided, maps:is_key(Id, ViewableParents) andalso is_category(Id, State)
         },
-    maps:merge(Viewable, ViewableCategories).
+    maps:filter(fun(Id, _) -> gateway_nsfw_preferences:allowed(UserId, Id, State) end,
+        maps:merge(Viewable, ViewableCategories)).
 
 -spec classify_channel(
     map(),

@@ -298,7 +298,8 @@ handle_visitor_connect(GuildId, Attempt, Request, Msg, State) ->
 -spec admit_visitor(map(), pid(), guild_state()) -> {term(), guild_state()}.
 admit_visitor(Request, SessionPid, State) ->
     case guild_visitors:admit(Request, SessionPid, State) of
-        {ok, GuildState, S1} -> {{ok, self(), GuildState}, S1};
+        {ok, GuildState, S1} ->
+            {{ok, self(), session_nsfw_backstop:attach_snapshot(GuildState, S1)}, S1};
         {rejected, Reason, S1} -> {{error, {visit_rejected, Reason}}, S1}
     end.
 

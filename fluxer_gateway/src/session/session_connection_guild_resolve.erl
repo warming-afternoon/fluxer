@@ -199,6 +199,7 @@ do_start_connect_async(GuildPid, Ctx) ->
             InitialGuildId, GuildId
         ),
     Request0 = #{
+        forum_nsfw_preference => maps:get(forum_nsfw_preference, Ctx, #{}),
         session_id => SessionId,
         user_id => UserId,
         session_pid => SessionPid,

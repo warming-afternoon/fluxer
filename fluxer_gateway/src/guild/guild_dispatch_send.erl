@@ -185,7 +185,10 @@ filter_permitted_for_session(SessionData, IndexedChannels, UpdatedState) ->
                 Ch
              || {ChId, Ch} <- IndexedChannels,
                 is_integer(ChId),
-                maps:is_key(ChId, ViewableMap)
+                maps:is_key(ChId, ViewableMap),
+                gateway_nsfw_preferences:channel_allowed(
+                    maps:get(user_id, SessionData), Ch, UpdatedState
+                )
             ];
         _ ->
             UserId = maps:get(user_id, SessionData),

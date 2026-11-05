@@ -55,7 +55,10 @@ memo_key(MemberId, Exceptions, State) ->
         true ->
             bypass;
         false ->
-            member_roles_key(guild_permissions_check:find_member_by_user_id(MemberId, State))
+            case member_roles_key(guild_permissions_check:find_member_by_user_id(MemberId, State)) of
+                {ok, Roles} -> {ok, {Roles, gateway_nsfw_preferences:cache_key(MemberId, State)}};
+                bypass -> bypass
+            end
     end.
 
 -spec member_roles_key(map() | undefined) -> {ok, term()} | bypass.

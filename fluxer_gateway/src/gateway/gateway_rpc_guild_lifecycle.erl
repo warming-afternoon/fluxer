@@ -169,7 +169,8 @@ get_data_from_guild(GuildId, UserId) ->
     end.
 
 -spec read_guild(integer(), {atom(), map()}) -> term().
-read_guild(GuildId, Request) ->
+read_guild(GuildId, {Tag, Params}) ->
+    Request = {Tag, Params#{api_native_permissions => true}},
     case guild_read_model:query(GuildId, Request) of
         {ok, Reply} ->
             Reply;

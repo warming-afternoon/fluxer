@@ -26,6 +26,18 @@ call(GuildPid, {Tag, Request}, Timeout) ->
 -spec handle_call(term(), gen_server:from(), guild_state()) ->
     {reply, term(), guild_state()}
     | {noreply, guild_state()}.
+handle_call({Tag, #{api_native_permissions := true} = Request}, From, State) when
+    Tag =:= get_user_permissions; Tag =:= get_viewable_channels;
+    Tag =:= get_guild_data; Tag =:= get_guild_auth_context;
+    Tag =:= get_guild_channel_authorization
+->
+    %% API applies the persisted display/age gate itself, independently of sessions.
+    %% Discard every transient cache/state change, preventing a WS bypass.
+    NativeState = State#{api_native_permissions => true},
+    case handle_call({Tag, maps:remove(api_native_permissions, Request)}, From, NativeState) of
+        {reply, Reply, _Transient} -> {reply, Reply, State};
+        {noreply, _Transient} -> {noreply, State}
+    end;
 handle_call(Msg, From, State) ->
     case is_expired(Msg, From) of
         true -> {noreply, State};

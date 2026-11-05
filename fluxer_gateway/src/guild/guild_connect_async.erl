@@ -46,6 +46,18 @@ ensure_session_connect_queue(Value) ->
 
 -spec enqueue_session_connect_async(integer(), non_neg_integer(), map(), map(), map()) -> map().
 enqueue_session_connect_async(GuildId, Attempt, Request, Msg, State) ->
+    Pid = maps:get(session_pid, Request),
+    case gateway_nsfw_preferences:connect_allowed(Request, Pid, State) of
+        false ->
+            guild_connect_result:send_result(GuildId, Attempt, {error, not_member}, Pid),
+            State;
+        true -> enqueue_registered_session_connect(GuildId, Attempt, Request, Msg, State)
+    end.
+
+enqueue_registered_session_connect(GuildId, Attempt, Request, Msg, State) ->
+    _ = gateway_nsfw_preferences:import(
+        maps:get(user_id, Request), maps:get(forum_nsfw_preference, Request, #{})
+    ),
     SessionId = maps:get(session_id, Request, undefined),
     enqueue_session_connect_async_for_session(GuildId, Attempt, Request, Msg, SessionId, State).
 
@@ -171,8 +183,19 @@ finalize_resolved(
 finalize_resolved(
     GuildId, SessionId, Attempt, Result0, Computed, Request, SessionPid, State, Joined
 ) ->
-    Acc = upsert_session(SessionId, SessionPid, Request, Computed, State, Joined),
-    guild_connect_result:send_result(GuildId, Attempt, Result0, SessionPid),
+    %% The worker's guild snapshot can become stale without a preference update:
+    %% channel/category/guild classification and role or age eligibility may change.
+    %% Only the scoped guild pays this final actor-local recomputation cost. Delivery
+    %% and unscoped connects keep their existing path and perform no external reads.
+    Fresh = case GuildId =:= gateway_nsfw_preferences:scope() of
+        false -> Computed;
+        true -> maps:merge(Computed, guild_connect_result:compute_session_connect(GuildId, Request, State))
+    end,
+    Acc = upsert_session(SessionId, SessionPid, Request, Fresh, State, Joined),
+    FreshResult = case Fresh =:= Computed of
+        true -> Result0; false -> guild_connect_result:computed_result(Fresh)
+    end,
+    guild_connect_result:send_result(GuildId, Attempt, FreshResult, SessionPid),
     Acc.
 
 -spec finish_joined_users(joined(), map(), map()) -> map().

@@ -316,6 +316,7 @@ pin_route(Request) ->
         _ ->
             Request
     end.
+readonly_type(<<"get_nsfw_display_preference">>) -> true;
 readonly_type(Type) ->
     lists:member(Type, [
         <<"get_read_state">>,

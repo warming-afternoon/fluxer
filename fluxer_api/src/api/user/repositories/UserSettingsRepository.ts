@@ -9,6 +9,7 @@ import {Logger} from '@app/api/Logger';
 import {UserGuildSettings} from '@app/api/models/UserGuildSettings';
 import {UserSettings} from '@app/api/models/UserSettings';
 import {UserGuildSettings as UserGuildSettingsTable, UserSettings as UserSettingsTable} from '@app/api/Tables';
+import {forumNsfwGuildId} from '@app/api/user/NsfwDisplayScope';
 
 const FETCH_USER_SETTINGS_CQL = UserSettingsTable.selectCql({
 	where: UserSettingsTable.where.eq('user_id'),
@@ -50,10 +51,14 @@ export class UserSettingsRepository {
 	}
 
 	async findGuildSettings(userId: UserID, guildId: GuildID | null): Promise<UserGuildSettings | null> {
-		const settings = await fetchOne<UserGuildSettingsRow>(FETCH_USER_GUILD_SETTINGS_CQL, {
-			user_id: userId,
-			guild_id: guildId ? guildId : 0n,
-		});
+		const [settings] = await fetchMany<UserGuildSettingsRow>(
+			FETCH_USER_GUILD_SETTINGS_CQL,
+			{
+				user_id: userId,
+				guild_id: guildId ? guildId : 0n,
+			},
+			guildId?.toString() === forumNsfwGuildId() ? {consistency: 'serial'} : undefined,
+		);
 		return settings ? new UserGuildSettings(settings) : null;
 	}
 
@@ -78,9 +83,7 @@ export class UserSettingsRepository {
 	}
 
 	async findAllGuildSettings(userId: UserID): Promise<Array<UserGuildSettings>> {
-		const rows = await fetchMany<UserGuildSettingsRow>(FETCH_ALL_USER_GUILD_SETTINGS_CQL, {
-			user_id: userId,
-		});
+		const rows = await fetchMany<UserGuildSettingsRow>(FETCH_ALL_USER_GUILD_SETTINGS_CQL, {user_id: userId});
 		return rows.map((row) => new UserGuildSettings(row));
 	}
 
@@ -105,7 +108,12 @@ export class UserSettingsRepository {
 					}),
 			(current) => ({
 				pk: {user_id: userId, guild_id: guildId},
-				patch: buildPatchFromData(settings, current, USER_GUILD_SETTINGS_COLUMNS, ['user_id', 'guild_id']),
+				patch: buildPatchFromData(
+					settings,
+					current,
+					USER_GUILD_SETTINGS_COLUMNS.filter((column) => column !== 'show_nsfw' && column !== 'nsfw_version'),
+					['user_id', 'guild_id'],
+				),
 			}),
 			UserGuildSettingsTable,
 		);

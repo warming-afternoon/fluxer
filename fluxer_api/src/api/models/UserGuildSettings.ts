@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {ChannelID, GuildID, UserID} from '@app/api/BrandedTypes';
+import {readSafeIntegerVersion} from '@app/api/database/CassandraVersion';
 import type {ChannelOverride, UserGuildSettingsRow} from '@app/api/database/types/UserTypes';
 import {GuildChannelOverride} from '@app/api/models/GuildChannelOverride';
 import {MuteConfiguration} from '@app/api/models/MuteConfiguration';
 import type {ChannelMessageNotifications} from '@fluxer/constants/src/NotificationConstants';
 
 export class UserGuildSettings {
+	readonly showNsfw: boolean | null;
+	readonly nsfwVersion: number;
 	readonly userId: UserID;
 	readonly guildId: GuildID;
 	readonly messageNotifications: ChannelMessageNotifications | null;
@@ -21,6 +24,9 @@ export class UserGuildSettings {
 	readonly version: number;
 
 	constructor(row: UserGuildSettingsRow) {
+		this.nsfwVersion = readSafeIntegerVersion(row.nsfw_version ?? 0, 0);
+		this.showNsfw = typeof row.show_nsfw === 'boolean' ? row.show_nsfw : null;
+		if (this.nsfwVersion === 0 && this.showNsfw === true) this.showNsfw = false;
 		this.userId = row.user_id;
 		this.guildId = row.guild_id;
 		this.messageNotifications = (row.message_notifications ?? null) as ChannelMessageNotifications | null;
@@ -48,6 +54,8 @@ export class UserGuildSettings {
 					)
 				: null;
 		return {
+			show_nsfw: this.showNsfw,
+			nsfw_version: this.nsfwVersion === 0 ? null : BigInt(this.nsfwVersion),
 			user_id: this.userId,
 			guild_id: this.guildId,
 			message_notifications: this.messageNotifications,

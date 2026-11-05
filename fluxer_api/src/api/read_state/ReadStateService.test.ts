@@ -3,6 +3,7 @@
 import {
 	type ChannelID,
 	createChannelID,
+	createGuildID,
 	createMessageID,
 	createUserID,
 	type MessageID,
@@ -13,6 +14,7 @@ import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import {ReadState} from '@app/api/models/ReadState';
 import type {ReadStateRepository} from '@app/api/read_state/ReadStateRepository';
 import {ReadStateService} from '@app/api/read_state/ReadStateService';
+import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
 import {BadGatewayError} from '@fluxer/errors/src/domains/core/BadGatewayError';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
@@ -353,5 +355,66 @@ describe('combined read-state gateway RPC', () => {
 		} finally {
 			Config.readState!.combinedGatewayRpcEnabled = previous;
 		}
+	});
+});
+
+describe('read-state internal visibility scope', () => {
+	it.each([false, true])(
+		'passes an existing channel guild hint without metadata queries (combined=%s)',
+		async (combined) => {
+			Config.readState!.combinedGatewayRpcEnabled = combined;
+			const guildId = createGuildID(88n);
+			const repository = {
+				upsertReadState: vi.fn(async () => ({readState: makeReadState(CHANNEL_ID, MESSAGE_ID), previous: null})),
+			} as unknown as ReadStateRepository;
+			const dispatch = vi.fn(async () => {});
+			const acknowledge = vi.fn(async () => {});
+			const service = new ReadStateService(repository, {
+				dispatchPresence: dispatch,
+				acknowledgeReadState: acknowledge,
+				clearPushChannelNotifications: vi.fn(async () => {}),
+			} as unknown as IGatewayService);
+			await service.ackMessage({
+				userId: USER_ID,
+				channelId: CHANNEL_ID,
+				messageId: MESSAGE_ID,
+				mentionCount: 0,
+				channel: {type: ChannelTypes.GUILD_TEXT, guildId},
+			});
+			expect(combined ? acknowledge : dispatch).toHaveBeenCalledWith(
+				expect.objectContaining({data: expect.objectContaining({__guild_id: '88'})}),
+			);
+		},
+	);
+	it('carries persisted thread guild scope even when a bulk ACK has no channel hint', async () => {
+		const state = new ReadState({
+			...makeReadState(CHANNEL_ID, MESSAGE_ID).toRow(),
+			guild_id: createGuildID(88n),
+			flags: 3,
+		});
+		const repository = {bulkAckMessages: vi.fn(async () => [state])} as unknown as ReadStateRepository;
+		const dispatch = vi.fn(async () => {});
+		const service = new ReadStateService(repository, {
+			dispatchPresence: dispatch,
+			clearPushChannelNotifications: vi.fn(async () => {}),
+		} as unknown as IGatewayService);
+		await service.bulkAckMessages({userId: USER_ID, readStates: [{channelId: CHANNEL_ID, messageId: MESSAGE_ID}]});
+		expect(dispatch).toHaveBeenCalledWith(
+			expect.objectContaining({data: expect.objectContaining({__guild_id: '88', __thread_scoped: '88'})}),
+		);
+	});
+	it('passes the existing guild hint with pin acknowledgements', async () => {
+		const dispatch = vi.fn(async () => {});
+		const service = new ReadStateService(
+			{upsertPinAck: vi.fn(async () => {})} as unknown as ReadStateRepository,
+			{dispatchPresence: dispatch} as unknown as IGatewayService,
+		);
+		await service.ackPins({
+			userId: USER_ID,
+			channelId: CHANNEL_ID,
+			timestamp: new Date(),
+			channel: {type: ChannelTypes.GUILD_TEXT, guildId: createGuildID(88n)},
+		});
+		expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({data: expect.objectContaining({__guild_id: '88'})}));
 	});
 });

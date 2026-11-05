@@ -5,10 +5,15 @@ import type {ApiContext} from '@app/api/ApiContext';
 import * as AuthSession from '@app/api/auth/AuthSession';
 import {revokeAuthSessions} from '@app/api/auth/AuthSessionRevocation';
 import {generateAuthToken} from '@app/api/auth/AuthUtility';
-import {createUserID, type UserID} from '@app/api/BrandedTypes';
+import {createGuildID, createUserID, type UserID} from '@app/api/BrandedTypes';
+import {getGuildRepository} from '@app/api/middleware/ServiceSingletons';
 import type {User} from '@app/api/models/User';
+import {NsfwDisplayPreferenceService} from '@app/api/user/NsfwDisplayPreferenceService';
+import {forumNsfwGuildId} from '@app/api/user/NsfwDisplayScope';
 import {AuthSessionRepository} from '@app/api/user/repositories/auth/AuthSessionRepository';
+import {UserGuildNsfwRepository} from '@app/api/user/repositories/UserGuildNsfwRepository';
 import {isAccountClosed, isTemporarilyBanned} from '@app/api/user/UserHelpers';
+import {canUserAccessNsfwContent} from '@app/api/utils/AgeUtils';
 import {DiscordAccountService} from '@app/integration/DiscordAccountService';
 import {issueDiscordPasswordProof} from '@app/integration/DiscordPasswordProof';
 import {IdentityRebindService} from '@app/integration/IdentityRebindService';
@@ -94,6 +99,34 @@ export class IntegrationService {
 	async dispatch(subject: string, input: unknown): Promise<unknown> {
 		if (subject.startsWith('rpc.content.')) return new IntegrationContentService(this.context).dispatch(subject, input);
 		switch (subject) {
+			case 'rpc.preferences.v1.get_service':
+			case 'rpc.preferences.v1.update_service': {
+				const update =
+					subject === 'rpc.preferences.v1.update_service' ? IntegrationSchemas[subject].parse(input) : null;
+				const request = update ?? IntegrationSchemas['rpc.preferences.v1.get_service'].parse(input);
+				if (request.guild_id !== forumNsfwGuildId())
+					throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Guild is not the configured Forum guild');
+				const actor = createUserID(BigInt(request.actor_user_id));
+				const guildId = createGuildID(BigInt(request.guild_id));
+				const actorUser = await this.availableUser(actor);
+				if (!(await getGuildRepository().getMember(guildId, actor)))
+					throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Current guild membership is required');
+				const settings = update
+					? await new NsfwDisplayPreferenceService(this.context.services.gateway).update(
+							actor,
+							guildId,
+							update.show_nsfw,
+							update.expected_version,
+						)
+					: await new UserGuildNsfwRepository().get(actor, guildId);
+				return {
+					guild_id: request.guild_id,
+					show_nsfw: settings.showNsfw === true,
+					nsfw_eligible: canUserAccessNsfwContent(actorUser),
+					version: settings.nsfwVersion,
+				};
+			}
+
 			case 'rpc.identity.v1.rebind_service':
 				return new IdentityRebindService(this.context).rebind(IntegrationSchemas[subject].parse(input));
 			case 'rpc.integration.v1.service_info': {

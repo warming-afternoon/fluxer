@@ -97,7 +97,10 @@ export async function recoverIntegrationEventsPage(): Promise<void> {
 	const {projectIntegrationContent} = await import('@app/integration/IntegrationContentEvents');
 	for (const entry of tracked) {
 		try {
-			if (entry.key.startsWith('d:user:')) {
+			if (entry.key.startsWith('d:nsfw:')) {
+				const {reconcileNsfwPreference} = await import('@app/api/user/NsfwDisplayPreferenceService');
+				await reconcileNsfwPreference(JSON.parse(entry.payload), entry.key.slice(2));
+			} else if (entry.key.startsWith('d:user:')) {
 				const {projectIntegrationUser} = await import('@app/integration/IntegrationAuthEvents');
 				await projectIntegrationUser(String(JSON.parse(entry.payload).user_id));
 			} else await projectIntegrationContent(JSON.parse(entry.payload));

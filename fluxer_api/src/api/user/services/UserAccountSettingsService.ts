@@ -20,6 +20,7 @@ import type {GuildChannelOverride} from '@app/api/models/GuildChannelOverride';
 import type {User} from '@app/api/models/User';
 import type {UserGuildSettings} from '@app/api/models/UserGuildSettings';
 import type {UserSettings} from '@app/api/models/UserSettings';
+import {NsfwDisplayPreferenceService} from '@app/api/user/NsfwDisplayPreferenceService';
 import type {UserRepository} from '@app/api/user/repositories/UserRepository';
 import {CustomStatusValidator} from '@app/api/user/services/CustomStatusValidator';
 import type {UserAccountUpdatePropagator} from '@app/api/user/services/UserAccountUpdatePropagator';
@@ -27,6 +28,7 @@ import {controlUserGuildSettingsView} from '@app/api/user/UserGuildSettingsThrea
 import {dispatchUserUpdate, mapRelationshipToResponse} from '@app/api/user/UserMappers';
 import {dedupeGuildFolders} from '@app/api/user/utils/GuildFolderUtils';
 import {canUserAccessNsfwContent} from '@app/api/utils/AgeUtils';
+import {IntegrationError} from '@app/integration/IntegrationError';
 import {CHANNEL_OVERRIDE_FLAG_MASK} from '@fluxer/constants/src/ThreadConstants';
 import {
 	DEFAULT_GUILD_FOLDER_ICON,
@@ -43,6 +45,7 @@ import {ValidationErrorCodes} from '@fluxer/constants/src/ValidationErrorCodes';
 import {InputValidationError} from '@fluxer/errors/src/domains/core/InputValidationError';
 import {SyncedPreferencesConflictError} from '@fluxer/errors/src/domains/user/SyncedPreferencesConflictError';
 import {UnknownUserError} from '@fluxer/errors/src/domains/user/UnknownUserError';
+import {FluxerError} from '@fluxer/errors/src/FluxerError';
 import {ValidationError} from '@fluxer/errors/src/ValidationError';
 import {
 	decodeSyncedPreferences,
@@ -304,6 +307,45 @@ export class UserAccountSettingsService {
 		viewer?: ThreadViewer;
 	}): Promise<UserGuildSettings> {
 		const {userId, guildId, data} = params;
+		if (data.show_nsfw !== undefined || data.nsfw_version !== undefined) {
+			if (
+				guildId === null ||
+				data.show_nsfw === undefined ||
+				data.nsfw_version === undefined ||
+				Object.keys(data).some((key) => key !== 'show_nsfw' && key !== 'nsfw_version')
+			)
+				throw new FluxerError({
+					status: 400,
+					code: 'INVALID_REQUEST',
+					message: 'Save NSFW visibility separately with its current version',
+				});
+			if (!(await this.deps.guildRepository.getMember(guildId, userId)))
+				throw new FluxerError({
+					status: 403,
+					code: 'RESOURCE_NOT_ALLOWED',
+					message: 'Current guild membership is required',
+				});
+			try {
+				return await new NsfwDisplayPreferenceService(this.deps.gatewayService).update(
+					userId,
+					guildId,
+					data.show_nsfw,
+					data.nsfw_version,
+				);
+			} catch (error) {
+				if (error instanceof IntegrationError)
+					throw new FluxerError({
+						status: statusForNsfwPreferenceError(error.code),
+						code: error.code,
+						message: error.message,
+					});
+				throw new FluxerError({
+					status: 503,
+					code: 'UNAVAILABLE',
+					message: 'Preference synchronization could not be confirmed',
+				});
+			}
+		}
 		const currentSettings = await this.deps.userAccountRepository.findGuildSettings(userId, guildId);
 		const resolvedGuildId = guildId ?? createGuildID(0n);
 		const baseRow: UserGuildSettingsRow = currentSettings
@@ -540,4 +582,11 @@ function normalizeSyncedPreferencesSnapshot(value: string | null | undefined): s
 	}
 	const canonical = encodeSyncedPreferences(decoded);
 	return canonical === '' ? null : canonical;
+}
+
+function statusForNsfwPreferenceError(code: string): 400 | 403 | 409 | 503 {
+	if (code === 'STALE_VERSION') return 409;
+	if (code === 'RESOURCE_NOT_ALLOWED') return 403;
+	if (code === 'INVALID_REQUEST') return 400;
+	return 503;
 }

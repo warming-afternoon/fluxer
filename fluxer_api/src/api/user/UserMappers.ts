@@ -21,6 +21,7 @@ import {
 	isInteractionTierEnforced,
 } from '@app/api/user/AccountTier';
 import {isDateOfBirthMissing} from '@app/api/user/DateOfBirth';
+import {forumNsfwGuildId} from '@app/api/user/NsfwDisplayScope';
 import {hiddenUserPartial, isProfileHidden} from '@app/api/user/ProfileVisibility';
 import {deprecatedBadgeHideFields} from '@app/api/user/profile_badges/HiddenProfileBadges';
 import {canUserAccessNsfwContent} from '@app/api/utils/AgeUtils';
@@ -445,6 +446,8 @@ export function mapUserGuildSettingsToResponse(
 		: Array.from(settings.channelOverrides.entries());
 	return {
 		guild_id: settings.guildId === createGuildID(0n) ? null : settings.guildId.toString(),
+		show_nsfw: settings.guildId.toString() === forumNsfwGuildId() ? settings.showNsfw === true : null,
+		nsfw_version: settings.nsfwVersion,
 		message_notifications: settings.messageNotifications ?? 0,
 		muted: settings.muted,
 		mute_config: mapMuteConfigToResponse(settings.muteConfig),

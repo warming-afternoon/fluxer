@@ -320,6 +320,9 @@ export interface ChannelOverride {
 }
 
 export interface UserGuildSettingsRow {
+	/** Independent Forum-guild display preference; never an age attestation. */
+	show_nsfw?: boolean | null;
+	nsfw_version?: number | bigint | null;
 	user_id: UserID;
 	guild_id: GuildID;
 	message_notifications: number | null;
@@ -538,6 +541,8 @@ export const USER_GUILD_SETTINGS_COLUMNS = [
 	'suppress_everyone',
 	'suppress_roles',
 	'hide_muted_channels',
+	'show_nsfw',
+	'nsfw_version',
 	'channel_overrides',
 	'unread_badges',
 	'version',

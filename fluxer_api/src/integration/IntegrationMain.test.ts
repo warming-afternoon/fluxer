@@ -2,6 +2,7 @@
 
 import {Config} from '@app/api/Config';
 import * as ServiceRegistry from '@app/api/middleware/ServiceRegistry';
+import {UserGuildNsfwRepository} from '@app/api/user/repositories/UserGuildNsfwRepository';
 import {IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
 import {startIntegrationMain} from '@app/integration/IntegrationMain';
 import * as CassandraClient from '@pkgs/cassandra/src/Client';
@@ -24,6 +25,7 @@ describe('Integration startup cleanup', () => {
 		const close = vi.spyOn(CassandraClient, 'shutdownCassandra').mockResolvedValue();
 		const kvClose = vi.spyOn(ServiceRegistry, 'closeOwnedKVClient').mockImplementation(() => {});
 		vi.spyOn(IntegrationIdentityRepository.prototype, 'checkHealth').mockResolvedValue();
+		vi.spyOn(UserGuildNsfwRepository.prototype, 'checkHealth').mockResolvedValue();
 		const shutdown = vi.fn().mockResolvedValue(undefined);
 		vi.spyOn(ServiceRegistry, 'createSnowflakeService').mockReturnValue({
 			initialize: vi.fn().mockRejectedValue(new Error('snowflake unavailable')),

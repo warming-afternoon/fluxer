@@ -70,6 +70,7 @@ const ThreadGateRpcResponse = z.object({
 });
 
 export const RpcRequest = z.discriminatedUnion('type', [
+	z.object({type: z.literal('get_nsfw_display_preference'), user_id: SnowflakeType, guild_id: SnowflakeType}),
 	z.object({
 		type: z.literal('session').describe('Request type for session initialization'),
 		token: createStringType().describe('Authentication token for the session'),
@@ -363,6 +364,7 @@ export const RpcResponseSessionData = z.object({
 	auth_session_id_hash: z.string().nullish().describe('Hash of the authentication session ID'),
 	user: UserPrivateResponse.describe('Private user data for the authenticated user'),
 	user_settings: UserSettingsResponse.nullish().describe('User settings configuration'),
+	forum_nsfw_guild_id: SnowflakeStringType.nullable().optional().describe('Configured Forum NSFW display scope'),
 	user_guild_settings: z.array(UserGuildSettingsResponse).describe('Per-guild settings for the user'),
 	notes: z.record(SnowflakeStringType, z.string()).describe('User notes keyed by user ID'),
 	read_states: z.array(ReadStateResponse).describe('Read state for each channel'),
@@ -400,7 +402,9 @@ export type RpcResponseSessionData = z.infer<typeof RpcResponseSessionData>;
 
 export const RpcResponseGuildCollectionData = z.object({
 	collection: RpcGuildCollectionType.describe('Guild collection returned in this response'),
-	guild: GuildResponse.nullish().describe('Guild information'),
+	guild: GuildResponse.extend({forum_nsfw_guild_id: SnowflakeStringType.nullable().optional()})
+		.nullish()
+		.describe('Guild information'),
 	roles: z.array(GuildRoleResponse).nullish().describe('List of roles in the guild'),
 	channels: z.array(ChannelResponse).nullish().describe('List of channels in the guild'),
 	emojis: z.array(GuildEmojiResponse).nullish().describe('List of custom emojis in the guild'),
@@ -432,6 +436,14 @@ const RpcResponseValidateCustomStatus = z.object({
 });
 
 export const RpcResponse = z.discriminatedUnion('type', [
+	z.object({
+		type: z.literal('get_nsfw_display_preference'),
+		data: z.object({
+			guild_id: SnowflakeStringType,
+			show_nsfw: z.boolean(),
+			nsfw_version: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+		}),
+	}),
 	z.object({
 		type: z.literal('session').describe('Response type for session initialization'),
 		data: RpcResponseSessionData.describe('Session initialization data'),

@@ -16,6 +16,7 @@ import {
 	scheduleDeletedChannelFollowerRemoval,
 } from '@app/api/channel/services/ChannelFollowers';
 import type {ChannelService} from '@app/api/channel/services/ChannelService';
+import {isNsfwVisibilityGuild, NsfwVisibility} from '@app/api/channel/utils/NsfwVisibility';
 import {getContentMessage} from '@app/api/content_i18n/ContentI18n';
 import {BatchBuilder} from '@app/api/database/CassandraQueryExecution';
 import {Db, type DbOp} from '@app/api/database/CassandraTypes';
@@ -233,7 +234,16 @@ export class GuildOperationsService {
 	) {}
 
 	async getGuild(params: {userId: UserID; guildId: GuildID}): Promise<GuildResponse> {
-		return this.helpers.getGuildData(params);
+		const guild = await this.helpers.getGuildData(params);
+		if (!isNsfwVisibilityGuild(params.guildId) || !guild.channels?.length) return guild;
+		const channels = await this.channelRepository.channelData.listChannels(
+			guild.channels.map((channel) => createChannelID(BigInt(channel.id))),
+		);
+		const visible = await new NsfwVisibility(params.userId, this.channelRepository, this.guildRepository).filter(
+			channels,
+		);
+		const visibleIds = new Set(visible.map((channel) => channel.id.toString()));
+		return {...guild, channels: guild.channels.filter((channel) => visibleIds.has(channel.id))};
 	}
 
 	async getUserGuilds(

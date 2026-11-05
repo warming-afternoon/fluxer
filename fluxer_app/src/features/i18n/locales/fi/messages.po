@@ -21158,8 +21158,8 @@ msgid "Lets you sign in to this account with {providerName}."
 msgstr "Voit kirjautua tähän tiliin palvelun {providerName} kautta."
 
 #: src/features/ui/components/form/UsernameValidationRules.tsx
-msgid "Letters (a-z, A-Z), numbers (0-9), and underscores (_) only"
-msgstr "Vain kirjaimet (a-z, A-Z), numerot (0-9) ja alaviivat (_)"
+msgid "Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only"
+msgstr "Vain kirjaimet (a-z, A-Z), numerot (0-9), alaviivat (_) ja pisteet (.)"
 
 #. Error modal body shown when entrance sound library quota is reached.
 #: src/features/user/components/modals/tabs/hooks/useEntranceSound.ts
@@ -25527,8 +25527,8 @@ msgstr "Vain kaverit voivat soittaa sinulle (suositeltu)"
 
 #. Short label in the authentication auth register form core. Keep the tone plain and specific.
 #: src/features/auth/flow/AuthRegisterFormCore.tsx
-msgid "Only letters, numbers, and underscores"
-msgstr "Vain kirjaimia, numeroita ja alaviivoja"
+msgid "Only letters, numbers, underscores, and dots"
+msgstr "Vain kirjaimia, numeroita, alaviivoja ja pisteitä"
 
 #: src/features/guild/components/modals/guild_tabs/CloneAllowedToggle.tsx
 msgid "Only members with the \"{manageCommunityPermissionLabel}\" permission can change this."
@@ -40741,8 +40741,8 @@ msgstr "Käyttäjänimi on jo varattu"
 
 #. Label in the bot profile section.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
-msgid "Username can only contain letters, numbers, and underscores"
-msgstr "Käyttäjänimi voi sisältää vain kirjaimia, numeroita ja alaviivoja"
+msgid "Username can only contain letters, numbers, underscores, and dots"
+msgstr "Käyttäjänimi voi sisältää vain kirjaimia, numeroita, alaviivoja ja pisteitä"
 
 #. Short label in the bot profile section. Keep it concise.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
@@ -40780,8 +40780,8 @@ msgid "Usernames"
 msgstr "Käyttäjätunnukset"
 
 #: src/features/user/components/modals/FluxerTagChangeModal.tsx
-msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are case-insensitive."
-msgstr "Käyttäjänimet voivat sisältää vain kirjaimia (a-z, A-Z), numeroita (0-9) ja alaviivoja. Käyttäjänimissä ei huomioida kirjainkokoa."
+msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are case-insensitive."
+msgstr "Käyttäjänimet voivat sisältää vain kirjaimia (a-z, A-Z), numeroita (0-9), alaviivoja ja pisteitä. Käyttäjänimissä ei huomioida kirjainkokoa."
 
 #. Section header in the message search popout listing matching users for from: / mentions: filters. Title Case.
 #. Section heading in the channel and chat autocomplete for user suggestions.

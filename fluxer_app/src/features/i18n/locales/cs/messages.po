@@ -21158,8 +21158,8 @@ msgid "Lets you sign in to this account with {providerName}."
 msgstr "Umožní ti přihlásit se k tomuto účtu přes {providerName}."
 
 #: src/features/ui/components/form/UsernameValidationRules.tsx
-msgid "Letters (a-z, A-Z), numbers (0-9), and underscores (_) only"
-msgstr "Pouze písmena (a-z, A-Z), čísla (0-9) a podtržítka (_)"
+msgid "Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only"
+msgstr "Pouze písmena (a-z, A-Z), čísla (0-9), podtržítka (_) a tečky (.)"
 
 #. Error modal body shown when entrance sound library quota is reached.
 #: src/features/user/components/modals/tabs/hooks/useEntranceSound.ts
@@ -25527,8 +25527,8 @@ msgstr "Pouze přátelé vám mohou volat (doporučeno)"
 
 #. Short label in the authentication auth register form core. Keep the tone plain and specific.
 #: src/features/auth/flow/AuthRegisterFormCore.tsx
-msgid "Only letters, numbers, and underscores"
-msgstr "Pouze písmena, čísla a podtržítka"
+msgid "Only letters, numbers, underscores, and dots"
+msgstr "Pouze písmena, čísla, podtržítka a tečky"
 
 #: src/features/guild/components/modals/guild_tabs/CloneAllowedToggle.tsx
 msgid "Only members with the \"{manageCommunityPermissionLabel}\" permission can change this."
@@ -40741,8 +40741,8 @@ msgstr "Uživatelské jméno je již obsazeno"
 
 #. Label in the bot profile section.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
-msgid "Username can only contain letters, numbers, and underscores"
-msgstr "Uživatelské jméno může obsahovat pouze písmena, čísla a podtržítka"
+msgid "Username can only contain letters, numbers, underscores, and dots"
+msgstr "Uživatelské jméno může obsahovat pouze písmena, čísla, podtržítka a tečky"
 
 #. Short label in the bot profile section. Keep it concise.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
@@ -40780,8 +40780,8 @@ msgid "Usernames"
 msgstr "Uživatelská jména"
 
 #: src/features/user/components/modals/FluxerTagChangeModal.tsx
-msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are case-insensitive."
-msgstr "Uživatelská jména mohou obsahovat pouze písmena (a-z, A-Z), číslice (0-9) a podtržítka. Na velikosti písmen nezáleží."
+msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are case-insensitive."
+msgstr "Uživatelská jména mohou obsahovat pouze písmena (a-z, A-Z), číslice (0-9), podtržítka a tečky. Na velikosti písmen nezáleží."
 
 #. Section header in the message search popout listing matching users for from: / mentions: filters. Title Case.
 #. Section heading in the channel and chat autocomplete for user suggestions.

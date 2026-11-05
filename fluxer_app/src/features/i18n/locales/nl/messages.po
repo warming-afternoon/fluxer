@@ -21158,8 +21158,8 @@ msgid "Lets you sign in to this account with {providerName}."
 msgstr "Hiermee kun je met {providerName} inloggen op dit account."
 
 #: src/features/ui/components/form/UsernameValidationRules.tsx
-msgid "Letters (a-z, A-Z), numbers (0-9), and underscores (_) only"
-msgstr "Alleen letters (a-z, A-Z), cijfers (0-9) en underscores (_)"
+msgid "Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only"
+msgstr "Alleen letters (a-z, A-Z), cijfers (0-9), underscores (_) en punten (.)"
 
 #. Error modal body shown when entrance sound library quota is reached.
 #: src/features/user/components/modals/tabs/hooks/useEntranceSound.ts
@@ -25527,8 +25527,8 @@ msgstr "Alleen vrienden kunnen je bellen (aanbevolen)"
 
 #. Short label in the authentication auth register form core. Keep the tone plain and specific.
 #: src/features/auth/flow/AuthRegisterFormCore.tsx
-msgid "Only letters, numbers, and underscores"
-msgstr "Alleen letters, cijfers en underscores"
+msgid "Only letters, numbers, underscores, and dots"
+msgstr "Alleen letters, cijfers, underscores en punten"
 
 #: src/features/guild/components/modals/guild_tabs/CloneAllowedToggle.tsx
 msgid "Only members with the \"{manageCommunityPermissionLabel}\" permission can change this."
@@ -40741,8 +40741,8 @@ msgstr "Gebruikersnaam is al in gebruik"
 
 #. Label in the bot profile section.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
-msgid "Username can only contain letters, numbers, and underscores"
-msgstr "Gebruikersnaam mag alleen letters, cijfers en underscores bevatten"
+msgid "Username can only contain letters, numbers, underscores, and dots"
+msgstr "Gebruikersnaam mag alleen letters, cijfers, underscores en punten bevatten"
 
 #. Short label in the bot profile section. Keep it concise.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
@@ -40780,8 +40780,8 @@ msgid "Usernames"
 msgstr "Gebruikersnamen"
 
 #: src/features/user/components/modals/FluxerTagChangeModal.tsx
-msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are case-insensitive."
-msgstr "Gebruikersnamen mogen alleen letters (a-z, A-Z), cijfers (0-9) en underscores bevatten. Gebruikersnamen zijn niet hoofdlettergevoelig."
+msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are case-insensitive."
+msgstr "Gebruikersnamen mogen alleen letters (a-z, A-Z), cijfers (0-9), underscores en punten bevatten. Gebruikersnamen zijn niet hoofdlettergevoelig."
 
 #. Section header in the message search popout listing matching users for from: / mentions: filters. Title Case.
 #. Section heading in the channel and chat autocomplete for user suggestions.

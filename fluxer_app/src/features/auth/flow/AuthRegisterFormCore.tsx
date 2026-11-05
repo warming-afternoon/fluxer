@@ -63,7 +63,7 @@ export const USERNAME_MUST_BE_CHARACTERS_OR_LESS_DESCRIPTOR = msg({
 	comment: 'Registration form validation error when the username exceeds the maximum length. Limit is interpolated.',
 });
 export const ONLY_LETTERS_NUMBERS_AND_UNDERSCORES_DESCRIPTOR = msg({
-	message: 'Only letters, numbers, and underscores',
+	message: 'Only letters, numbers, underscores, and dots',
 	comment: 'Short label in the authentication auth register form core. Keep the tone plain and specific.',
 });
 const USERNAME_OPTIONAL_DESCRIPTOR = msg({
@@ -87,7 +87,7 @@ export const USERNAME_AVAILABLE_DESCRIPTOR = msg({
 	comment: 'Registration form message when the chosen username is free to use.',
 });
 export const MAX_USERNAME_LENGTH = 32;
-export const USERNAME_PATTERN = /^[a-zA-Z0-9_]+$/;
+export const USERNAME_PATTERN = /^[a-zA-Z0-9_.]+$/;
 
 interface AuthRegisterFormCoreProps {
 	fields?: RegisterFormFields;

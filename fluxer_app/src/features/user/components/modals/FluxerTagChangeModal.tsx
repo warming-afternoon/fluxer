@@ -377,7 +377,7 @@ export const FluxerTagChangeModal = observer(({user}: FluxerTagChangeModalProps)
 					<Modal.ContentLayout data-flx="user.fluxer-tag-change-modal.modal-content-layout">
 						<Modal.Description data-flx="user.fluxer-tag-change-modal.modal-description">
 							<Trans>
-								Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are
+								Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are
 								case-insensitive.
 							</Trans>
 						</Modal.Description>

@@ -45,6 +45,7 @@ import {VoiceP2pConnectionReportController} from '@app/api/voice/VoiceP2pConnect
 import {WebhookController} from '@app/api/webhook/WebhookController';
 import {DiscordPasswordController} from '@app/integration/DiscordPasswordController';
 
+/** 注册原生与集成 HTTP 控制器，沿用统一中间件。 */
 export function registerControllers(routes: HonoApp, config: APIConfig): void {
 	InternalRpcController(routes);
 	OperatorPassInternalController(routes);

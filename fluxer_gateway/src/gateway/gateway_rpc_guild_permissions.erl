@@ -127,6 +127,7 @@ guild_call_can_manage(Pid, Msg) ->
             gateway_rpc_error:raise(<<"role_management_check_error">>)
     end.
 
+%% 优先读取原生权限快照，缺失时回退 RPC。
 -spec get_permissions_cached_or_rpc(
     integer(), integer(), integer() | undefined
 ) -> {ok, integer()} | {error, guild_not_found} | error.
@@ -136,6 +137,9 @@ get_permissions_cached_or_rpc(GuildId, UserId, ChannelId) ->
         {error, not_found} -> get_permissions_via_rpc(GuildId, UserId, ChannelId)
     end.
 
+%% 从缓存快照计算 API 原生权限。
+-spec native_cached_permissions(integer(), integer(), integer() | undefined) ->
+    {ok, integer()} | {error, not_found}.
 native_cached_permissions(GuildId, UserId, ChannelId) ->
     case guild_permission_cache:get_snapshot(GuildId) of
         {ok, Snapshot} ->
@@ -146,6 +150,7 @@ native_cached_permissions(GuildId, UserId, ChannelId) ->
         Missing -> Missing
     end.
 
+%% 通过社区进程获取 API 原生权限。
 -spec get_permissions_via_rpc(
     integer(), integer(), integer() | undefined
 ) -> {ok, integer()} | {error, guild_not_found} | error.

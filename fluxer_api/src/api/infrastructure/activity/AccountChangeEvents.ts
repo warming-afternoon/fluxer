@@ -20,6 +20,7 @@ function isRelevantChange(previous: UserRow, updated: UserRow): boolean {
 	);
 }
 
+/** 检测影响账号可用性的字段变化并发布身份失效事件。 */
 export async function emitAccountChangedIfRelevant(
 	previous: UserRow | null,
 	updated: UserRow,

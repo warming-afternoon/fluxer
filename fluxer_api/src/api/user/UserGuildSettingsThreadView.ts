@@ -63,6 +63,7 @@ export async function mapUserGuildSettingsForViewer(
 	return mapUserGuildSettingsToResponse(settings, await resolveUserGuildSettingsView(settings, viewer));
 }
 
+/** 向用户会话同步服务器设置与显示偏好版本。 */
 export async function dispatchUserGuildSettingsUpdate(
 	gatewayService: IGatewayService,
 	userId: UserID,

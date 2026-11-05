@@ -23,7 +23,7 @@ export function visibleReadStates(
 	return readStates.filter((readState) => readState.guildId === null || viewerActive(threadViewer, readState.guildId));
 }
 
-/** Filter both marked threads and legacy unmarked channel read states using authoritative channel data. */
+/** 按权威频道分类过滤帖子及历史频道的已读状态。 */
 export async function filterNsfwReadStates(
 	readStates: Array<ReadState>,
 	userId: UserID,
@@ -48,7 +48,7 @@ export async function filterNsfwReadStates(
 	const known = new Set(channels.map((channel) => channel.id));
 	return readStates.filter((state) => {
 		if (known.has(state.channelId)) return allowed.has(state.channelId);
-		// Legacy unscoped metadata cannot prove that a missing channel is outside the target.
+		// 无作用域的历史元数据不能证明缺失频道位于目标服务器之外。
 		return state.guildId !== null && !isNsfwVisibilityGuild(state.guildId);
 	});
 }

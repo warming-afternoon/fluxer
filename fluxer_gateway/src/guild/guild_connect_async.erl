@@ -44,6 +44,7 @@ ensure_session_connect_queue(Value) ->
         Queue -> Queue
     end.
 
+%% 校验会话偏好登记后排队连接社区。
 -spec enqueue_session_connect_async(integer(), non_neg_integer(), map(), map(), map()) -> map().
 enqueue_session_connect_async(GuildId, Attempt, Request, Msg, State) ->
     Pid = maps:get(session_pid, Request),
@@ -54,6 +55,9 @@ enqueue_session_connect_async(GuildId, Attempt, Request, Msg, State) ->
         true -> enqueue_registered_session_connect(GuildId, Attempt, Request, Msg, State)
     end.
 
+%% 导入已登记会话的偏好并加入连接队列。
+-spec enqueue_registered_session_connect(integer(), non_neg_integer(), map(), map(), map()) ->
+    map().
 enqueue_registered_session_connect(GuildId, Attempt, Request, Msg, State) ->
     _ = gateway_nsfw_preferences:import(
         maps:get(user_id, Request), maps:get(forum_nsfw_preference, Request, #{})
@@ -163,6 +167,7 @@ finalize_with_pid(SessionId, Attempt, Result0, Computed, Request, SessionPid, St
             {State, Joined}
     end.
 
+%% 完成连接前刷新目标社区的权限和分类快照。
 -spec finalize_resolved(
     integer(), session_id(), non_neg_integer(), term(), map(), map(), pid(), map(), joined()
 ) -> {map(), joined()}.

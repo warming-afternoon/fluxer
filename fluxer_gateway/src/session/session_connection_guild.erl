@@ -94,6 +94,7 @@ try_acquire_and_spawn(GuildId, Attempt, SessionId, UserId, Inflight0, State) ->
             spawn_guild_connect_worker(Request, Inflight0, State)
     end.
 
+%% 将会话偏好随连接上下文传入工作进程。
 -spec spawn_guild_connect_worker(connect_worker_request(), map(), session_state()) ->
     {noreply, session_state()}.
 spawn_guild_connect_worker(
@@ -434,6 +435,7 @@ log_connect_failed(Msg, GuildId, Attempt, Reason, State) ->
         [GuildId, UserId, Attempt, Reason]
     ).
 
+%% 接收内部频道分类快照后完成社区连接。
 -spec finalize_guild_connection(guild_id(), pid(), session_state(), map()) -> session_result().
 finalize_guild_connection(GuildId, GuildPid, State0, GuildState0) ->
     {GuildState, State} = session_nsfw_backstop:consume_snapshot(GuildState0, State0),

@@ -42,12 +42,16 @@ interface ServiceRequest {
 export class IntegrationContentService {
 	/** 内容操作只通过独立受信 Forum subject 调用，不开放任意服务方法 */
 	constructor(
+		// 提供原生业务服务、缓存及标识生成能力。
 		private readonly context: ApiContext,
+
+		// 保存内容操作计划、资源锁和完成结果。
 		private readonly operations = new IntegrationOperationRepository(),
 	) {}
 
 	/** 校验固定论坛边界，跨服务器和非允许论坛一律拒绝 */
 	private allowed(guildId: string, channelId: string): void {
+		// 允许范围必须明确配置为四个唯一论坛频道，不接受隐式扩大。
 		const forums = (process.env.INTEGRATION_FORUM_CHANNEL_IDS ?? '').split(',').filter(Boolean);
 		if (process.env.INTEGRATION_GUILD_ID !== guildId || new Set(forums).size !== 4 || !forums.includes(channelId))
 			throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Resource is outside configured Forum scope');
@@ -55,6 +59,7 @@ export class IntegrationContentService {
 
 	/** 所有服务操作重新读取原生账号和成员状态，Forum 无权代已停用用户操作 */
 	private async actor(request: ServiceRequest) {
+		// 每次操作重新验证账户资格及社区成员身份，不依赖外部授权缓存。
 		const id = createUserID(BigInt(request.actor_user_id));
 		const user = await this.context.services.users.findUnique(id);
 		if (
@@ -80,6 +85,7 @@ export class IntegrationContentService {
 		prepare: () => Promise<P>,
 		apply: (plan: P) => Promise<R>,
 	): Promise<R> {
+		// 传输请求标识不参与指纹，同一业务操作的重试必须匹配原始内容。
 		const fingerprint = createHash('sha256')
 			.update(JSON.stringify({subject, ...request, request_id: undefined}))
 			.digest('hex');
@@ -93,6 +99,7 @@ export class IntegrationContentService {
 			let record = await this.operations.find(request.operation_id);
 			if (record && (record.fingerprint !== fingerprint || record.actor_id !== BigInt(request.actor_user_id)))
 				throw new IntegrationError('OPERATION_CONFLICT', 'Operation belongs to another immutable request');
+			// 已完成请求仅恢复收尾并返回原结果，不重复执行原生业务副作用。
 			if (record?.result) {
 				resultPersisted = true;
 				await this.operations.releaseResource(resource, request.operation_id);
@@ -103,6 +110,7 @@ export class IntegrationContentService {
 				await this.operations.releaseResource(resource, request.operation_id);
 				return result as R;
 			}
+			// 先占用资源并持久化不可变计划，再执行可恢复的原生业务步骤。
 			await this.operations.lockResource(resource, request.operation_id);
 			if (!record)
 				record = await this.operations.allocate({
@@ -132,6 +140,7 @@ export class IntegrationContentService {
 			} else if (error instanceof FluxerError && error.status >= 400 && error.status < 500 && error.status !== 429) {
 				terminal = new IntegrationError(error.code, error.code);
 			}
+			// 只将明确不可重试的失败永久化；暂态失败保留计划供后续恢复。
 			if (hasPersistedPlan && terminal && !resultPersisted) {
 				if (subject === 'rpc.content.v1.thread.create_service') {
 					const threadId = (preparedPlan as {thread_id?: string} | null)?.thread_id;
@@ -164,6 +173,7 @@ export class IntegrationContentService {
 			(request as ServiceRequest & {defer_open?: boolean}).defer_open
 		)
 			return;
+		// 完成结果确认后只解除本次创建的初始化锁，不影响其他策略来源。
 		const threadId = (result as {thread_id?: string}).thread_id;
 		if (!threadId) throw new IntegrationError('OPERATION_CONFLICT', 'Completed creation has no native thread');
 		await new ThreadPolicyRepository().set(createChannelID(BigInt(threadId)), 0n, {
@@ -178,9 +188,11 @@ export class IntegrationContentService {
 
 	/** 将明确枚举的内容 RPC 适配到原生业务层 */
 	async dispatch(subject: string, input: unknown): Promise<unknown> {
+		// 使用原生请求级服务执行白名单操作，共享本次请求的读取缓存。
 		const cache = createRequestCache();
 		const services = new RequestServices(this.context, null, cache);
 		switch (subject) {
+			// 更新仅适配委托字段，鉴权与状态变更继续使用原生主题服务。
 			case 'rpc.content.v1.thread.update_service': {
 				const request = IntegrationSchemas[subject].parse(input);
 				const user = await this.actor(request);
@@ -225,6 +237,7 @@ export class IntegrationContentService {
 					},
 				);
 			}
+			// 持久保存原位置，重试仍以最初授权的来源频道执行移动。
 			case 'rpc.content.v1.thread.move_service': {
 				const request = IntegrationSchemas[subject].parse(input);
 				const user = await this.actor(request);
@@ -265,6 +278,7 @@ export class IntegrationContentService {
 					},
 				);
 			}
+			// 预分配稳定主题标识，策略、附件与首帖创建共用持久操作计划。
 			case 'rpc.content.v1.thread.create_service': {
 				const request = IntegrationSchemas[subject].parse(input);
 				const user = await this.actor(request);
@@ -378,6 +392,7 @@ export class IntegrationContentService {
 					},
 				);
 			}
+			// 策略按来源与版本写入，主题锁变更再投影到原生状态。
 			case 'rpc.content.v1.thread.policy_service': {
 				const request = IntegrationSchemas[subject].parse(input);
 				await this.actor(request);
@@ -432,6 +447,7 @@ export class IntegrationContentService {
 					},
 				);
 			}
+			// 固定首帖版本及允许保留的附件，避免覆盖并发编辑或引用他人附件。
 			case 'rpc.content.v1.starter.edit_service': {
 				const request = IntegrationSchemas[subject].parse(input);
 				const user = await this.actor(request);
@@ -467,6 +483,7 @@ export class IntegrationContentService {
 							createMessageID(BigInt(request.thread_id)),
 						);
 						if (!current) throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Starter message is unavailable');
+						// 版本变化时只有正文与完整附件目标均已生效才视为幂等重试。
 						if (current.version !== plan.message_version) {
 							const prepared = request.attachments?.some((attachment) => 'upload_filename' in attachment)
 								? await new IntegrationAttachmentManifest().result(
@@ -536,6 +553,7 @@ export class IntegrationContentService {
 					},
 				);
 			}
+			// 读取仍经过原生消息权限检查，不因受信服务调用而绕过用户边界。
 			case 'rpc.content.v1.thread.read_service': {
 				const request = IntegrationSchemas[subject].parse(input);
 				const user = await this.actor(request);

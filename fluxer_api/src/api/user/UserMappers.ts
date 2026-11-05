@@ -436,6 +436,7 @@ export interface UserGuildSettingsThreadView {
 	hiddenChannelIds?: ReadonlySet<string>;
 }
 
+/** 映射服务器设置与显示偏好字段，保留响应版本语义。 */
 export function mapUserGuildSettingsToResponse(
 	settings: UserGuildSettings,
 	threadView?: UserGuildSettingsThreadView,

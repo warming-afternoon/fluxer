@@ -6,6 +6,7 @@ import {IntegrationError} from '@app/integration/IntegrationError';
 import {INTEGRATION_QUERY_OPTIONS} from '@app/integration/IntegrationIdentityRepository';
 import {getClient} from '@pkgs/cassandra/src/Client';
 
+/** 绑定请求身份的持久交换记录及短期加密结果 */
 export interface ExchangeRecord {
 	/** 请求指纹 */
 	fingerprint: string;
@@ -23,6 +24,7 @@ export interface ExchangeRecord {
 	expires_at: Date;
 }
 
+/** 通过条件更新保证交换幂等，并加密保存可恢复的会话凭据 */
 export class IntegrationExchangeRepository {
 	/** 验证持久化结果加密密钥 */
 	constructor(private readonly key: Buffer) {
@@ -97,6 +99,7 @@ export class IntegrationExchangeRepository {
 			[id],
 			INTEGRATION_QUERY_OPTIONS,
 		);
+		// 条件提交未获胜时重读权威结果，仅接受仍有效的已完成交换。
 		if (!result.wasApplied()) {
 			const record = await this.read(id);
 			if (record.state !== 'complete' || record.expires_at.getTime() <= Date.now()) {

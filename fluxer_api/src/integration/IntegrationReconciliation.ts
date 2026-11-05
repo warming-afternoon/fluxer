@@ -8,11 +8,21 @@ import {IntegrationEventJournal} from '@app/integration/IntegrationEventJournal'
 import {INTEGRATION_QUERY_OPTIONS} from '@app/integration/IntegrationIdentityRepository';
 import {getClient} from '@pkgs/cassandra/src/Client';
 
+/** 有界扫描论坛和关联身份，补齐未被新写入触发的历史资源投影 */
 export class IntegrationReconciliation {
+	/** 当前轮次待扫描的论坛索引 */
 	private parent = 0;
+
+	/** 当前论坛已处理的最后一个子频道 */
 	private after: ChannelID | undefined;
+
+	/** 下一轮完整论坛扫描的最早时间 */
 	private nextForumPass = 0;
+
+	/** 下一页身份扫描的最早时间 */
 	private nextIdentityPage = 0;
+
+	/** 权威身份索引的 Cassandra 分页游标 */
 	private identityCursor: string | undefined;
 
 	/** 启动扫描和每十分钟的一轮论坛对账按页推进，历史资源不会只靠新写入才被跟踪 */
@@ -30,6 +40,7 @@ export class IntegrationReconciliation {
 				await prepareIntegrationContentChange(id, resource);
 				await projectIntegrationContent(resource);
 			}
+			// 页满时继续当前论坛，末页才前进到下一个论坛。
 			this.after = ids.length === 20 ? ids[ids.length - 1] : undefined;
 			if (ids.length < 20) this.parent++;
 			if (this.parent === 4) {

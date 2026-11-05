@@ -295,6 +295,7 @@ handle_visitor_connect(GuildId, Attempt, Request, Msg, State) ->
             )
     end.
 
+%% 接纳访客并附加会话所需的频道分类快照。
 -spec admit_visitor(map(), pid(), guild_state()) -> {term(), guild_state()}.
 admit_visitor(Request, SessionPid, State) ->
     case guild_visitors:admit(Request, SessionPid, State) of

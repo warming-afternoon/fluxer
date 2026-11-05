@@ -105,6 +105,7 @@ async function acquireReservationLock(cache: ICacheService, key: string): Promis
 	return null;
 }
 
+/** 预留用户名并区分真实占用、锁竞争与存储故障。 */
 export async function reserveUsername(
 	deps: UniqueUsernameDeps,
 	username: string,

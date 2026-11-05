@@ -300,6 +300,7 @@ export class UserAccountSettingsService {
 		return updatedSettings;
 	}
 
+	/** 保存服务器设置，并独立协调显示偏好的版本化更新。 */
 	async updateGuildSettings(params: {
 		userId: UserID;
 		guildId: GuildID | null;
@@ -583,7 +584,7 @@ function normalizeSyncedPreferencesSnapshot(value: string | null | undefined): s
 	const canonical = encodeSyncedPreferences(decoded);
 	return canonical === '' ? null : canonical;
 }
-
+/** 将偏好更新错误映射为明确的 HTTP 状态码。 */
 function statusForNsfwPreferenceError(code: string): 400 | 403 | 409 | 503 {
 	if (code === 'STALE_VERSION') return 409;
 	if (code === 'RESOURCE_NOT_ALLOWED') return 403;

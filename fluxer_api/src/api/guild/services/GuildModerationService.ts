@@ -46,13 +46,28 @@ interface GuildBanOptions {
 }
 
 type ApplyGuildBanParams = GuildBanOptions & {
+	/** 被封禁的用户标识。 */
 	targetId: UserID;
+
+	/** 执行封禁的服务器标识。 */
 	guildId: GuildID;
+
+	/** 执行操作的用户标识。 */
 	actorId: UserID;
+
+	/** 封禁来源及操作者类型。 */
 	by: BanBy;
+
+	/** 被封禁用户的当前账号数据。 */
 	targetUser: User;
+
+	/** 目标用户的当前成员记录。 */
 	targetMember: GuildMember | null;
+
+	/** 当前服务器数据。 */
 	guild: Guild | null;
+
+	/** 记录到审计日志的操作原因。 */
 	guildAuditLogReason: string | null;
 };
 
@@ -129,7 +144,7 @@ export class GuildModerationService {
 			guildAuditLogReason: params.reason || null,
 		});
 	}
-
+	/** 持有服务器成员租约后读取最新成员并执行封禁。 */
 	private async applyBan(params: ApplyGuildBanParams): Promise<void> {
 		return withGuildMembershipLock(params.guildId, async (assertHeld) => {
 			await assertHeld();
@@ -142,7 +157,7 @@ export class GuildModerationService {
 			);
 		});
 	}
-
+	/** 在租约持续有效时写入封禁、移除成员并同步网关状态。 */
 	private async applyBanLocked(params: ApplyGuildBanParams, assertHeld: () => Promise<void>): Promise<void> {
 		const {
 			actorId,

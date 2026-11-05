@@ -106,6 +106,7 @@ export function threadMemberUpdateEvent(member: ThreadMember): ThreadDispatchEve
 	};
 }
 
+/** 分发讨论区事件，并同步集成内容状态。 */
 export async function dispatchThreadEvents(
 	gatewayService: IGatewayService,
 	guildId: GuildID,

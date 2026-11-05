@@ -324,6 +324,7 @@ export class RpcService {
 		return this.voiceService;
 	}
 
+	/** 校验内部 RPC 类型并分派对应业务处理。 */
 	async handleRpcRequest({request, requestCache}: HandleRpcRequestParams): Promise<RpcResponse> {
 		switch (request.type) {
 			case 'session':
@@ -930,6 +931,7 @@ export class RpcService {
 			});
 	}
 
+	/** 构造网关会话初始化所需的权威账号与设置数据。 */
 	private async handleSessionRequest({
 		token,
 		version,
@@ -1377,6 +1379,7 @@ export class RpcService {
 		return Math.min(limit, GUILD_COLLECTION_MAX_LIMIT);
 	}
 
+	/** 读取服务器集合及当前成员的有效设置。 */
 	private async handleGuildCollectionGuildRequest({
 		guildId,
 	}: {

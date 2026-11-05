@@ -50,6 +50,7 @@ export class UserSettingsRepository {
 		await deleteOneOrMany(UserSettingsTable.deleteByPk({user_id: userId}));
 	}
 
+	/** 读取用户在指定服务器的设置与偏好版本。 */
 	async findGuildSettings(userId: UserID, guildId: GuildID | null): Promise<UserGuildSettings | null> {
 		const [settings] = await fetchMany<UserGuildSettingsRow>(
 			FETCH_USER_GUILD_SETTINGS_CQL,
@@ -82,6 +83,7 @@ export class UserSettingsRepository {
 		return userIds.map((userId) => settingsByUser.get(userId) ?? null);
 	}
 
+	/** 加载用户各服务器设置，目标作用域另行读取权威显示偏好。 */
 	async findAllGuildSettings(userId: UserID): Promise<Array<UserGuildSettings>> {
 		const rows = await fetchMany<UserGuildSettingsRow>(FETCH_ALL_USER_GUILD_SETTINGS_CQL, {user_id: userId});
 		return rows.map((row) => new UserGuildSettings(row));
@@ -92,6 +94,7 @@ export class UserSettingsRepository {
 		return settings ? new UserSettings(settings) : null;
 	}
 
+	/** 保存普通服务器设置，避免覆盖独立显示偏好及其版本。 */
 	async upsertGuildSettings(settings: UserGuildSettingsRow): Promise<UserGuildSettings> {
 		const userId = settings.user_id;
 		const guildId = settings.guild_id;

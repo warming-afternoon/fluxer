@@ -255,7 +255,7 @@ export function toggleAllCategoriesCollapsed(guildId: string | null, categoryIds
 	});
 }
 
-/** NSFW visibility is confirmed separately, never coalesced with notification writes. */
+/** 以当前版本单独保存显示偏好，等待权威结果后更新状态。 */
 export async function updateNsfwVisibility(guildId: string, show: boolean, expectedVersion: number): Promise<void> {
 	const response = await http.patch<GatewayGuildSettings>(settingsEndpoint(guildId), {
 		body: {show_nsfw: show, nsfw_version: expectedVersion},

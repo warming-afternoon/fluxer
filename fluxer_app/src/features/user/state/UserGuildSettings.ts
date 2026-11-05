@@ -29,8 +29,12 @@ export interface ChannelOverride {
 }
 
 interface StoredGuildSettings {
+	/** 目标服务器原始 NSFW 显示偏好。 */
 	show_nsfw?: boolean | null;
+
+	/** 与显示偏好关联的单调权威版本。 */
 	nsfw_version?: number;
+
 	guild_id: string;
 	suppress_everyone: boolean;
 	suppress_roles: boolean;
@@ -49,8 +53,12 @@ interface StoredGuildSettings {
 }
 
 export interface GatewayGuildSettings {
+	/** 目标服务器原始 NSFW 显示偏好。 */
 	show_nsfw?: boolean | null;
+
+	/** 与显示偏好关联的单调权威版本。 */
 	nsfw_version?: number;
+
 	guild_id: string;
 	suppress_everyone?: boolean;
 	suppress_roles?: boolean;
@@ -314,9 +322,11 @@ class UserGuildSettings {
 		return changed ? {...settings, channel_overrides: overrides as Record<ChannelId, ChannelOverride>} : settings;
 	}
 
+	/** 应用权威服务器设置事件，忽略较旧的显示偏好版本。 */
 	updateGuildSettings(guildId: string | null, updates: Partial<GatewayGuildSettings>): void {
 		const key = this.storageKeyFor(guildId);
 		const existing = this.ensureGuildSettings(key);
+		// 保留较新的偏好，并防止同版本事件重新打开已经关闭的显示。
 		if (
 			typeof updates.nsfw_version === 'number' &&
 			(updates.nsfw_version < (existing.nsfw_version ?? 0) ||

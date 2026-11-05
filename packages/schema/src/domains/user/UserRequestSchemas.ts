@@ -476,8 +476,12 @@ const ChannelOverrideSchema = z.object({
 });
 export const UserGuildSettingsUpdateRequest = z
 	.object({
+		/** 要保存的显示偏好，与版本字段一同提交。 */
 		show_nsfw: z.boolean().optional(),
+
+		/** 客户端读取到的偏好版本，用于条件更新。 */
 		nsfw_version: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+
 		message_notifications: withFieldDescription(UserNotificationSettingsSchema, 'Default guild notification level'),
 		muted: z.boolean().describe('Guild muted'),
 		mute_config: MuteConfigSchema.describe('Guild mute configuration'),

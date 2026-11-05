@@ -252,6 +252,7 @@ export class MessageSendService {
 		return {canEmbedLinks, canMentionEveryone, canAttachFiles};
 	}
 
+	/** 检查讨论区成员、原生权限及附加发言限制。 */
 	private assertThreadSendAllowed(authChannel: AuthenticatedChannel, forumStarter = false): void {
 		if (authChannel.thread) {
 			const {state, actor} = authChannel.thread;
@@ -329,6 +330,7 @@ export class MessageSendService {
 		}
 	}
 
+	/** 核对消息所引用的附件是否已完整保存。 */
 	private async ensureAttachmentsExist({
 		attachments,
 		user,
@@ -620,6 +622,7 @@ export class MessageSendService {
 		};
 	}
 
+	/** 校验原生发送权限并保存消息、附件及分发结果。 */
 	async sendMessage({
 		user,
 		viewer,

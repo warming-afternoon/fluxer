@@ -316,6 +316,8 @@ pin_route(Request) ->
         _ ->
             Request
     end.
+%% 识别可安全重试的只读请求类型。
+-spec readonly_type(binary()) -> boolean().
 readonly_type(<<"get_nsfw_display_preference">>) -> true;
 readonly_type(Type) ->
     lists:member(Type, [

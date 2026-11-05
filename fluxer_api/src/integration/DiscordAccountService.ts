@@ -29,11 +29,19 @@ export class DiscordAccountService {
 			{eventId: `${binding.operation_id}:binding:${userId}:${version}`},
 		);
 	}
+
 	/** 注入可替换仓储以验证并发和恢复路径 */
 	constructor(
+		// 原生账户服务与请求级依赖。
 		private readonly context: ApiContext,
+
+		// 维护 Discord 与原生账户的唯一绑定。
 		private readonly identities = new IntegrationIdentityRepository(),
+
+		// 恢复原生账户的初始化步骤。
 		private readonly native = new NativeAccountRepository(context),
+
+		// 处理 Forum 首次认领时的入群。
 		private readonly membership = new IntegrationGuildMembershipService(context),
 	) {}
 

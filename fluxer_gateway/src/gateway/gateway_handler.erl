@@ -144,6 +144,7 @@ websocket_info(Msg, State) ->
             end
     end.
 
+%% 处理套接字消息，偏好撤销时要求客户端重新鉴权。
 -spec handle_message(term(), state()) -> ws_info_result().
 handle_message(nsfw_preference_revoked, State) ->
     gateway_handler_encode:close_with_reason(

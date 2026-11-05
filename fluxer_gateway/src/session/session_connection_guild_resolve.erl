@@ -182,6 +182,7 @@ start_connect_async(GuildPid, Ctx) ->
             do_start_connect_async(GuildPid, Ctx)
     end.
 
+%% 携带会话偏好向社区发起异步连接。
 -spec do_start_connect_async(pid(), connect_ctx()) -> pending | {error, term()}.
 do_start_connect_async(GuildPid, Ctx) ->
     #{

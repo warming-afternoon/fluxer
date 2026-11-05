@@ -373,6 +373,7 @@ memo_session_can_view_channel(true, SessionData, ChannelId, State, Memo) ->
             {false, Memo}
     end.
 
+%% 先检查显示偏好，再复用会话可见性结果。
 -spec memo_session_can_view_channel_by_permissions(
     session_data(), channel_id(), guild_state(), view_memo()
 ) ->
@@ -384,6 +385,11 @@ memo_session_can_view_channel_by_permissions(SessionData, ChannelId, State, Memo
         true -> memo_session_channel_allowed(SessionData, ChannelId, State, Memo, UserId)
     end.
 
+%% 复用已通过显示偏好检查的频道权限结果。
+-spec memo_session_channel_allowed(
+    session_data(), integer(), guild_state(), view_memo(), integer() | undefined
+) ->
+    {boolean(), view_memo()}.
 memo_session_channel_allowed(SessionData, ChannelId, State, Memo, UserId) ->
     case {UserId, maps:get(viewable_channels, SessionData, undefined)} of
         {Uid, ViewableChannels} when

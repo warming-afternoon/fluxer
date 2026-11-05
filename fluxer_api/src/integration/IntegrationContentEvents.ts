@@ -33,6 +33,7 @@ export async function prepareIntegrationContentChange(
 	deleting = false,
 ): Promise<void> {
 	if (!process.env.INTEGRATION_NATS_URL) return;
+	// 优先使用调用方明确提供的资源，否则从原生主题状态确定范围。
 	const state = explicit ? null : await new ChannelRepository().threads.getState(threadId);
 	const resource =
 		explicit ??
@@ -59,6 +60,7 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 	const forums = (process.env.INTEGRATION_FORUM_CHANNEL_IDS ?? '').split(',');
 	if (resource.guild_id !== process.env.INTEGRATION_GUILD_ID || !forums.includes(resource.channel_id)) return;
 	const cache = getCacheService();
+	// 同一主题的投影共用租约，避免并发快照发布顺序交错。
 	const lockKey = `integration:projection:${resource.thread_id}`;
 	const lease = await cache.acquireLock(lockKey, 60);
 	if (!lease) return;
@@ -68,6 +70,7 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 		if (intent?.creation_failed === true) return;
 		const deletingIntent = !!resource.deleting || intent?.deleting === true;
 		const creationOperationId = resource.creation_operation_id ?? intent?.creation_operation_id ?? null;
+		// 创建操作必须持久完成后才发布，失败创建不投影为正常内容。
 		if (typeof creationOperationId === 'string') {
 			const status = await new IntegrationCreationEventGate().status(creationOperationId, resource.thread_id);
 			if (status === 'pending') return;
@@ -90,6 +93,7 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 			? await repository.messageInteractions.listMessageReactions(threadId, channelIdToMessageId(threadId))
 			: [];
 		const reactions = new Map<string, {emoji: {id: string | null; name: string; animated: boolean}; count: number}>();
+		// 在内存中按表情聚合原生反应行，不逐个反应追加数据库读取。
 		for (const row of rows) {
 			const key = `${row.emojiId}:${row.emojiName}`;
 			const previous = reactions.get(key);
@@ -162,6 +166,7 @@ export async function projectIntegrationContent(resource: ContentResource): Prom
 export async function finishIntegrationContentChange(threadId: ChannelID): Promise<void> {
 	if (!process.env.INTEGRATION_NATS_URL) return;
 	try {
+		// 立即投影失败只记录告警，写前持久意图保留给恢复循环。
 		const tracked = await new IntegrationEventJournal().resource(`thread:${threadId}`);
 		if (tracked) await projectIntegrationContent(tracked as unknown as ContentResource);
 	} catch (error) {

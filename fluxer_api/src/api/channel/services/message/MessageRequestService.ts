@@ -290,6 +290,7 @@ export class MessageRequestService {
 		});
 	}
 
+	/** 校验消息编辑权限并保存正文及附件变更。 */
 	async editMessage(params: {
 		userId: UserID;
 		viewer: ThreadViewer;

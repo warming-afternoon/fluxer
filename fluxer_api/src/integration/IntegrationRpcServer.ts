@@ -7,19 +7,38 @@ import {FluxerError} from '@fluxer/errors/src/FluxerError';
 import type {Msg, NatsConnection, Subscription} from '@nats-io/transport-node';
 import {ZodError} from 'zod';
 
+/** 隔离集成 RPC 的订阅、并发、回复命名空间及错误边界 */
 export class IntegrationRpcServer {
+	/** 停止时需要取消的队列订阅 */
 	private readonly subscriptions: Array<Subscription> = [];
+
+	/** 已接受但尚未结束的请求任务 */
 	private readonly pending = new Set<Promise<void>>();
+
+	/** 禁止停止后继续接受新请求 */
 	private stopped = false;
+
+	/** 记录订阅错误并阻止就绪状态 */
 	private subscriptionFailed = false;
+
+	/** 全部订阅完成刷新后才标记启动成功 */
 	private started = false;
 
 	/** 限制并发和返回主题，避免敏感凭据被任意路由 */
 	constructor(
+		/** 专用于外部集成 RPC 的连接 */
 		private readonly connection: NatsConnection,
+
+		/** 执行鉴权与业务分派的服务 */
 		private readonly service: IntegrationService,
+
+		/** 允许同时接受的请求上限 */
 		private readonly maxInflight: number,
+
+		/** 允许返回响应的客户端收件箱前缀 */
 		private readonly replyPrefixes: Array<string>,
+
+		/** 仅可信 Forum 可使用的凭据与内容操作响应前缀 */
 		private readonly forumReplyPrefix = '_INBOX.forum.',
 	) {
 		if (!Number.isInteger(maxInflight) || maxInflight < 1 || maxInflight > 256)
@@ -82,6 +101,7 @@ export class IntegrationRpcServer {
 		try {
 			if (this.pending.size >= this.maxInflight)
 				throw new IntegrationError('BUSY', 'Integration concurrency limit reached', true);
+			// 只有携带正文的创建与编辑接口使用较大的载荷上限。
 			const maxRequestBytes = ['rpc.content.v1.thread.create_service', 'rpc.content.v1.starter.edit_service'].includes(
 				message.subject,
 			)

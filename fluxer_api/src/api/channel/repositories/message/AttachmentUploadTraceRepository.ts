@@ -93,6 +93,7 @@ export class AttachmentUploadTraceRepository {
 		return updated;
 	}
 
+	/** 记录附件与消息的绑定关系，并保留集成恢复所需轨迹。 */
 	async bindAttachment(
 		uploadKey: string,
 		attachmentId: AttachmentID,

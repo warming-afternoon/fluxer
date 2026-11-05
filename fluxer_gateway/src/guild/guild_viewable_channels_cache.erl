@@ -10,6 +10,7 @@
 -type guild_state() :: #{viewable_channels_cache => ets:tid(), term() => term()}.
 -type user_id() :: integer().
 
+%% 按用户、角色和偏好版本查找可见频道缓存。
 -spec get(
     integer(), [integer()], #{viewable_channels_cache => ets:tid(), term() => term()}
 ) -> map().
@@ -19,6 +20,7 @@ get(UserId, UserRoles, State) ->
     CacheTab = viewable_channels_cache_table(State),
     lookup_or_compute_viewable(UserId, CacheKey, CacheTab, State).
 
+%% 缓存未命中时计算视图，并限制目标社区缓存增长。
 -spec lookup_or_compute_viewable(
     user_id(), tuple(), ets:tid() | undefined, guild_state()
 ) -> map().
@@ -38,6 +40,7 @@ lookup_or_compute_viewable(UserId, CacheKey, CacheTab, State) ->
 %% Keep the full generation key: an old asynchronous computation must never
 %% populate the same cache key after a false/true/false preference transition.
 %% This is a cache-size trigger, not a strict quota under concurrent writers.
+%% 达到阈值时清理目标社区缓存，保留完整版本键以隔离旧计算。
 -spec trim_scoped_cache(ets:tid(), guild_state()) -> ok.
 trim_scoped_cache(CacheTab, State) ->
     GuildId = maps:get(id, State, undefined),

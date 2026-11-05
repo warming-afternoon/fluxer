@@ -228,6 +228,7 @@ export class ThreadCreationService {
 		return mapThreadToResponse(view);
 	}
 
+	/** 校验论坛及主帖请求并创建原生作品讨论区。 */
 	async createForumPost(params: {
 		viewer: ThreadViewer;
 		user: User;
@@ -428,6 +429,7 @@ export class ThreadCreationService {
 		return this.authorizeAuthenticatedParent(parentAuth, user, kind);
 	}
 
+	/** 校验已认证用户对目标父频道的访问与创建权限。 */
 	private async authorizeAuthenticatedParent(
 		parentAuth: AuthenticatedChannel,
 		user: User,
@@ -461,6 +463,7 @@ export class ThreadCreationService {
 		}
 	}
 
+	/** 创建原生讨论区并建立生命周期、成员及目录状态。 */
 	private async create(params: NewThread): Promise<{view: ThreadView; members: Array<ThreadMember>}> {
 		const {parent, creator} = params;
 		const guildId = parent.guildId;

@@ -25,6 +25,7 @@
 -type user_id() :: integer().
 -type channel_id() :: integer().
 
+%% 列出原生权限与显示偏好共同允许的频道。
 -spec get_user_viewable_channels(user_id(), guild_state()) -> [channel_id()].
 get_user_viewable_channels(UserId, State) ->
     Data = map_utils:ensure_map(map_utils:get_safe(State, data, #{})),

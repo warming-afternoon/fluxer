@@ -49,6 +49,7 @@ cached_channel_map(MemberId, RawRoles, State, Cache, Memo) ->
             {Viewable, Memo#{cache := Cache#{RawRoles => Viewable}}}
     end.
 
+%% 将偏好版本和屏障纳入本次投递的复用键。
 -spec memo_key(user_id(), sets:set(user_id()), guild_state()) -> {ok, term()} | bypass.
 memo_key(MemberId, Exceptions, State) ->
     case sets:is_element(MemberId, Exceptions) of

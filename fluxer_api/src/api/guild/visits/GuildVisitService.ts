@@ -386,6 +386,7 @@ export class GuildVisitService {
 		return this.visitorChannels(access, params);
 	}
 
+	/** 按浏览资格和显示偏好筛选访客可见频道。 */
 	private async visitorChannels(
 		access: GuildVisitorAccess,
 		params: {userId: UserID; guildId: GuildID; viewer: ThreadViewer; requestCache: RequestCache},

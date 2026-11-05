@@ -33,6 +33,7 @@ export class GatewayRpcClient {
 		return client;
 	}
 
+	/** 清理共享 RPC 客户端状态，隔离调用方的验证实例。 */
 	static async resetForTests(): Promise<void> {
 		await GatewayRpcClient.shutdown();
 	}

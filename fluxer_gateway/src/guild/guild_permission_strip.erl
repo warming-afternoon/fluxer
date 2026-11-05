@@ -5,6 +5,7 @@
 
 -export([guild/1, roles/1, channels/1, channel_index/1]).
 
+%% 按用户权限及显示偏好裁剪社区频道。
 -spec guild(map() | term()) -> map().
 guild(Guild) when is_map(Guild) ->
     case snowflake_id:parse_optional(maps:get(<<"owner_id">>, Guild, undefined)) of
@@ -31,6 +32,7 @@ channels(Channels) when is_list(Channels) ->
 channels(_) ->
     [].
 
+%% 仅保留用户有权查看且偏好允许的频道。
 -spec strip_channel(map()) -> map().
 strip_channel(Channel) ->
     Keep = [<<"id">>, <<"name">>, <<"type">>, <<"parent_id">>, <<"permission_overwrites">>,

@@ -37,6 +37,7 @@ export class ReadStateRequestService {
 		});
 	}
 
+	/** 校验已读确认请求并过滤用户不可见频道的结果。 */
 	async ackReadStates({userId, data, capable}: ReadStateAckParams): Promise<ReadStateAckResponse> {
 		const readStates = await this.readStateService.ackReadStates({
 			userId,

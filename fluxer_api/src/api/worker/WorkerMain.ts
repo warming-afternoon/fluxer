@@ -326,6 +326,7 @@ export async function startWorkerRuntime(options: WorkerRuntimeOptions): Promise
 	}
 }
 
+/** 启动工作进程及其依赖服务，并返回有序停机入口。 */
 export async function startWorkerMain(): Promise<void> {
 	Logger.info('Starting worker backend...');
 	const host = sizeProcessForHost(Logger);

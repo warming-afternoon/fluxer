@@ -62,6 +62,7 @@ interface MessageEditServiceDeps {
 export class MessageEditService {
 	constructor(private readonly deps: MessageEditServiceDeps) {}
 
+	/** 校验消息编辑权限并保存正文及附件变更。 */
 	async editMessage({
 		userId,
 		viewer,

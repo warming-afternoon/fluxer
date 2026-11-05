@@ -294,6 +294,7 @@ export class ThreadRepository {
 		await this.channelData.adjustThreadStats(threadId, delta, 0);
 	}
 
+	/** 创建原生讨论区并建立生命周期、成员及目录状态。 */
 	async create(params: CreateThreadParams): Promise<ThreadState> {
 		const uniqueMembers = [...new Map(params.members.map((member) => [member.userId, member])).values()];
 		if (uniqueMembers.length > MAX_THREAD_MEMBERS) throw new MaxThreadMembersError(MAX_THREAD_MEMBERS);
@@ -418,6 +419,7 @@ export class ThreadRepository {
 		};
 	}
 
+	/** 更新讨论区状态并同步原生锁定与归档基态。 */
 	async updateState(
 		threadId: ChannelID,
 		mutate: (current: ThreadState) => ThreadStatePatch | null,
@@ -453,6 +455,7 @@ export class ThreadRepository {
 		return this.updateState(threadId, () => ({external_locked: active}));
 	}
 
+	/** 按讨论区当前状态及有效锁应用归档规则。 */
 	private withArchiveRules(current: ThreadState, requested: ThreadStatePatch): ThreadStatePatch {
 		const desired: ThreadStatePatch = {...requested};
 		const external = requested.external_locked ?? current.externalLocked;
@@ -763,6 +766,7 @@ export class ThreadRepository {
 		return rows.map((row) => new ThreadMember(row));
 	}
 
+	/** 保存讨论区成员及反向索引，并修复并发变化留下的侧键。 */
 	async addMembers(threadId: ChannelID, members: Array<CreateThreadMember>): Promise<ThreadMemberAddResult | null> {
 		const unique = [...new Map(members.map((member) => [member.userId, member])).values()];
 		const joinTimestamp = new Date();
@@ -1253,6 +1257,7 @@ export class ThreadRepository {
 		if (!applied) throw new ServiceUnavailableError();
 	}
 
+	/** 在删除状态确认后清理讨论区数据及目录索引。 */
 	async purgeThread(threadId: ChannelID): Promise<void> {
 		const state = await this.getState(threadId);
 		await prepareIntegrationContentChange(threadId, undefined, true);

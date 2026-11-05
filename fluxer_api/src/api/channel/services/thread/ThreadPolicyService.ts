@@ -15,6 +15,7 @@ export class ThreadPolicyService {
 		action: 'send' | 'create' | 'edit',
 		{initializingStarter = false}: {initializingStarter?: boolean} = {},
 	): Promise<void> {
+		// 未启用外部策略时保持原生行为，启用后仅应用尚未过期的限制。
 		if (process.env.FLUXER_THREAD_POLICY_ENABLED !== 'true') return;
 		const policies = await this.repository.list(channelId, userId);
 		const now = Date.now();

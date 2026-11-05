@@ -198,6 +198,7 @@ function scheduleSearchInitRetry(
 	}, delay);
 }
 
+/** 构造 API 初始化流程，并按服务依赖顺序建立后台任务与资源。 */
 export function createInitializer(
 	config: APIConfig,
 	logger: LoggerInterface,
@@ -403,6 +404,7 @@ export function createInitializer(
 	};
 }
 
+/** 构造停机流程，停止后台任务并释放服务资源。 */
 export function createShutdown(config: APIConfig, logger: LoggerInterface): () => Promise<void> {
 	return async (): Promise<void> => {
 		stopAPIReadiness();

@@ -396,6 +396,7 @@ export class MessagePersistenceService {
 		return enqueueDeferredEmbeds;
 	}
 
+	/** 持久保存消息编辑结果及关联投影。 */
 	async updateMessage(params: {
 		message: Message;
 		messageId: MessageID;

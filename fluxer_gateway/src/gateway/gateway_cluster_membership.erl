@@ -225,6 +225,7 @@ update_members(NewMembers, #{members := OldMembers, members_by_role := OldRoleMe
             do_update_members(NewMembers, NewRoleMembers, State)
     end.
 
+%% 更新集群成员，并保留偏好同步所需的历史节点。
 -spec do_update_members([node()], #{atom() => [node()]}, state()) -> state().
 do_update_members(NewMembers, NewRoleMembers, State) ->
     OldMembers = maps:get(members, State, []),

@@ -8,6 +8,7 @@
 
 -define(REMOTE_EXECUTE_TIMEOUT, 15000).
 
+%% 分派社区 RPC，并对偏好更新执行集群同步。
 -spec execute_method(binary(), map()) -> term().
 execute_method(<<"guild.begin_nsfw_preference_update">>, Params) ->
     gateway_nsfw_preferences:begin_cluster(Params);

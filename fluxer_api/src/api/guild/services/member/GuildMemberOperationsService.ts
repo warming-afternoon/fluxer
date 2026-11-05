@@ -159,20 +159,46 @@ function joinSourceName(type: JoinSourceType): JoinSource {
 }
 
 export interface GuildJoinParams {
+	/** 加入服务器的用户标识。 */
 	userId: UserID;
+
+	/** 目标服务器标识。 */
 	guildId: GuildID;
+
+	/** 是否发送原生入群通知。 */
 	sendJoinMessage?: boolean;
+
+	/** 是否跳过用户服务器数量限制；恢复操作禁止跳过。 */
 	skipGuildLimitCheck?: boolean;
+
+	/** 是否跳过封禁检查；恢复操作禁止跳过。 */
 	skipBanCheck?: boolean;
+
+	/** 是否跳过账号限制；恢复操作禁止跳过。 */
 	skipAccountLimitCheck?: boolean;
+
+	/** 是否创建临时成员。 */
 	isTemporary?: boolean;
+
+	/** 入群来源类型。 */
 	joinSourceType?: JoinSourceType;
+
+	/** 触发入群的邀请码。 */
 	sourceInviteCode?: InviteCode;
+
+	/** 邀请者标识。 */
 	inviterId?: UserID;
+
+	/** 当前请求共享的缓存。 */
 	requestCache: RequestCache;
+
+	/** 触发入群操作的主体标识。 */
 	initiatorId?: UserID;
+
+	/** 账号等级限制上下文。 */
 	tierContext?: TierContext;
-	/** Stable creation identity and leave snapshot for a durable initialization. */
+
+	/** 用于恢复的稳定加入时间及离开状态快照。 */
 	recovery?: {joinedAt: Date; lastLeftAt: string | null};
 }
 
@@ -417,7 +443,7 @@ export class GuildMemberOperationsService {
 		if (guild.ownerId === targetId) throw new MissingPermissionsError();
 		await this.deleteKickedMember(targetMember, SYSTEM_USER_ID);
 	}
-
+	/** 获取成员租约并重新核对被踢成员的当前状态。 */
 	private async deleteKickedMember(targetMember: GuildMember, actorId: UserID): Promise<void> {
 		return withGuildMembershipLock(targetMember.guildId, async (assertHeld) => {
 			await assertHeld();
@@ -426,7 +452,7 @@ export class GuildMemberOperationsService {
 			await this.deleteKickedMemberLocked(current, actorId, assertHeld);
 		});
 	}
-
+	/** 在有效租约内保存离开状态并移除成员与网关会话。 */
 	private async deleteKickedMemberLocked(
 		targetMember: GuildMember,
 		actorId: UserID,
@@ -449,13 +475,13 @@ export class GuildMemberOperationsService {
 		await this.gatewayService.leaveGuild({userId: targetId, guildId});
 		await emitGuildMemberRemoved({guildId, userId: targetId, actorId, kind: 'kicked'});
 	}
-
+	/** 串行化同服务器的成员变更，避免初始化与离开操作交错。 */
 	async addUserToGuild(params: GuildJoinParams, eventService: GuildMemberEventService): Promise<GuildMember> {
 		return withGuildMembershipLock(params.guildId, (assertHeld) =>
 			this.addUserToGuildLocked(params, eventService, assertHeld),
 		);
 	}
-
+	/** 校验当前入群资格并恢复成员资料、索引和事件投影。 */
 	private async addUserToGuildLocked(
 		params: GuildJoinParams,
 		eventService: GuildMemberEventService,
@@ -559,7 +585,7 @@ export class GuildMemberOperationsService {
 			throw new GuildJoinStateChangedError('Another join created this membership');
 		await assertHeld();
 		await this.guildRepository.ensureMemberUserIndex(guildId, userId);
-		// Recovery cannot infer whether an earlier increment committed. Reconcile from authority under the membership lock.
+		// 恢复时无法判断之前的计数更新是否提交，因此在成员租约内按权威成员重新计数。
 		const memberCount =
 			!creation.inserted && params.recovery ? await this.guildRepository.countMembers(guildId) : guild.memberCount + 1;
 		await assertHeld();
@@ -613,14 +639,14 @@ export class GuildMemberOperationsService {
 		}
 		return guildMember;
 	}
-
+	/** 在成员租约内执行退群并防止旧初始化重新加入。 */
 	async leaveGuild(params: {userId: UserID; guildId: GuildID}): Promise<void> {
 		return withGuildMembershipLock(params.guildId, async (assertHeld) => {
 			await assertHeld();
 			await this.leaveGuildLocked(params, assertHeld);
 		});
 	}
-
+	/** 保存成员离开代际并更新服务器与网关成员投影。 */
 	private async leaveGuildLocked(
 		params: {userId: UserID; guildId: GuildID},
 		assertHeld: () => Promise<void>,
@@ -733,7 +759,7 @@ export class GuildMemberOperationsService {
 		);
 		if (currentGuildCount >= maxGuilds) throw new MaxGuildsError(maxGuilds);
 	}
-
+	/** 初始化用户服务器设置，恢复时保留用户已有偏好。 */
 	private async applyJoinUserSettings(params: {
 		userId: UserID;
 		guildId: GuildID;
@@ -1086,7 +1112,7 @@ export class GuildMemberOperationsService {
 		}
 		await Promise.all(rollbackPromises);
 	}
-
+	/** 记录首次加入时间与单调离开时间，供初始化恢复核对。 */
 	private async snapshotMembershipMetadata(member: GuildMember, assertHeld: () => Promise<void>): Promise<void> {
 		const existingMetadata = await this.guildRepository.getMembershipMetadata(member.guildId, member.userId);
 		await assertHeld();

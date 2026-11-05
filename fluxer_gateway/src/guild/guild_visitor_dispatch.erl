@@ -320,6 +320,7 @@ mask_for(_Session, Event, Payload, State) ->
         false -> Payload
     end.
 
+%% 结合会话权限和显示偏好判断频道是否可投递。
 -spec channel_visible(guild_visitors:visitor_session(), integer(), map()) -> boolean().
 channel_visible(#{viewable_channels := View} = Session, ChannelId, State) ->
     gateway_nsfw_preferences:allowed(maps:get(user_id, Session), ChannelId, State) andalso
@@ -329,6 +330,7 @@ channel_visible(#{viewable_channels := View} = Session, ChannelId, State) ->
                 _ -> false
             end).
 
+%% 检查访客子频道权限及显示偏好。
 -spec thread_visible(session(), map(), guild_state()) -> boolean().
 thread_visible(#{viewable_channels := View} = Session, Thread, State) ->
     Viewer = maps:get(thread_viewer, Session, false) orelse not guild_thread_gate:active(State),

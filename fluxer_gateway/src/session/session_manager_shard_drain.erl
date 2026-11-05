@@ -133,6 +133,7 @@ handoff_count(TargetNode, SessionId, Pid, #{attempted := Attempted, handed_off :
         {error, _Reason} -> #{attempted => Attempted + 1, handed_off => HandedOff}
     end.
 
+%% 从权威启动数据提取偏好并构造会话数据。
 -spec build_session_data(
     map(),
     identify_data(),

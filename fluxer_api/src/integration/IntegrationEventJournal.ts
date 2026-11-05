@@ -111,7 +111,7 @@ export class IntegrationEventJournal {
 		);
 	}
 
-	/** Each preference attempt owns its own durable intent; remove only that completed attempt. */
+	/** 只完成指定偏好写入意图，保留其他并发操作的恢复记录。 */
 	async completePreferenceIntent(resource: string): Promise<void> {
 		if (!resource.startsWith('nsfw:')) throw new Error('Not a preference intent');
 		const shard = createHash('sha256').update(resource).digest()[0]! % 16;

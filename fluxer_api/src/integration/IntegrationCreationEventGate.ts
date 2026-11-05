@@ -5,11 +5,13 @@ import {IntegrationOperationRepository} from '@app/integration/IntegrationOperat
 export class IntegrationCreationEventGate {
 	/** 只有已持久完成的原生创建能够成为可见内容，暂态回滚不产生删除作品事件 */
 	async status(operationId: string, threadId: string): Promise<'pending' | 'ready' | 'failed'> {
+		// 缺少完成结果表示仍在创建；明确业务失败阻止内容对外可见。
 		const operation = await new IntegrationOperationRepository().find(operationId);
 		if (!operation?.result) return 'pending';
 		const result = JSON.parse(operation.result) as Record<string, unknown>;
 		if (result.__integration_error) return 'failed';
 		const saved = JSON.parse(operation.payload) as {operation_plan?: {thread_id?: string}; thread_id?: string};
+		// 计划、主题和首帖标识必须一致，禁止将其他操作的完成结果用于放行。
 		const plannedId = saved.operation_plan?.thread_id ?? saved.thread_id;
 		if (plannedId !== threadId || result.thread_id !== threadId || result.message_id !== threadId) {
 			throw new Error('Completed integration creation does not match the tracked native thread');

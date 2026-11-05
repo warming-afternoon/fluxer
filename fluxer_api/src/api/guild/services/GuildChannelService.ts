@@ -26,6 +26,7 @@ import type {ICacheService} from '@pkgs/cache/src/ICacheService';
 export class GuildChannelService {
 	private readonly channelOps: ChannelOperationsService;
 
+	/** 保存服务依赖并初始化实例状态。 */
 	constructor(
 		private readonly channelRepository: ChannelRepository,
 		private readonly guildRepository: GuildRepository,
@@ -49,6 +50,7 @@ export class GuildChannelService {
 		);
 	}
 
+	/** 获取服务器频道并过滤用户不可见的结果。 */
 	async getChannels(params: {
 		userId: UserID;
 		guildId: GuildID;

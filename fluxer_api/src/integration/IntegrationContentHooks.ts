@@ -10,6 +10,7 @@ export async function prepareIntegrationContentChange(
 	deleting = false,
 ): Promise<void> {
 	if (!process.env.INTEGRATION_NATS_URL) return;
+	// 确认集成已启用后才加载事件实现，避免影响普通实例启动。
 	const events = await import('@app/integration/IntegrationContentEvents');
 	await events.prepareIntegrationContentChange(threadId, resource, deleting);
 }
@@ -17,6 +18,7 @@ export async function prepareIntegrationContentChange(
 /** 成功写入后读取快照，恢复循环会继续处理未完成资源 */
 export async function finishIntegrationContentChange(threadId: ChannelID): Promise<void> {
 	if (!process.env.INTEGRATION_NATS_URL) return;
+	// 确认集成已启用后才加载事件实现，避免影响普通实例启动。
 	const events = await import('@app/integration/IntegrationContentEvents');
 	await events.finishIntegrationContentChange(threadId);
 }

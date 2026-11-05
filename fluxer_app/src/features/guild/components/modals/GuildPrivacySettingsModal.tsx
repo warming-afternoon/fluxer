@@ -29,6 +29,7 @@ const ALLOW_BOTS_FROM_THIS_COMMUNITY_TO_SEND_YOU_DESCRIPTOR = msg({
 	message: 'Let bots in this community DM you',
 	comment: 'Toggle label in the community privacy modal: allow DMs from bots that are in this community.',
 });
+/** 编辑服务器隐私设置，并等待显示偏好的权威确认。 */
 export const GuildPrivacySettingsModal = observer(({guildId}: {guildId: string}) => {
 	const {i18n} = useLingui();
 	const guild = Guilds.getGuild(guildId);
@@ -63,7 +64,9 @@ export const GuildPrivacySettingsModal = observer(({guildId}: {guildId: string})
 			botRestrictedGuilds: newRestrictedGuilds,
 		});
 	};
+	/** 防止重复提交显示偏好，并将未确认的更新反馈给用户。 */
 	const handleToggleNsfw = async (value: boolean) => {
+		// 同一次交互只允许一个更新在途，避免旧响应覆盖新选择。
 		if (nsfwInFlight.current) return;
 		nsfwInFlight.current = true;
 		setSavingNsfw(true);

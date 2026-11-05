@@ -54,6 +54,7 @@ export class MessageRepository {
 		return this.dataRepo.getMessage(channelId, messageId);
 	}
 
+	/** 保存原生消息及关联索引，通知集成内容变更。 */
 	async upsertMessage(data: MessageRow, oldData?: MessageRow | null, opts?: UpsertMessageOptions): Promise<Message> {
 		await prepareIntegrationContentChange(data.channel_id);
 		const message =
@@ -70,6 +71,7 @@ export class MessageRepository {
 		return message;
 	}
 
+	/** 删除原生消息并同步关联内容状态。 */
 	async deleteMessage(
 		channelId: ChannelID,
 		messageId: MessageID,
@@ -81,6 +83,7 @@ export class MessageRepository {
 		await finishIntegrationContentChange(channelId);
 	}
 
+	/** 批量删除指定消息并同步关联内容状态。 */
 	async bulkDeleteMessages(channelId: ChannelID, messageIds: Array<MessageID>): Promise<void> {
 		await prepareIntegrationContentChange(
 			channelId,
@@ -91,6 +94,7 @@ export class MessageRepository {
 		await finishIntegrationContentChange(channelId);
 	}
 
+	/** 删除频道内消息并同步集成内容状态。 */
 	async deleteAllChannelMessages(channelId: ChannelID): Promise<void> {
 		await prepareIntegrationContentChange(channelId, undefined, true);
 		await this.deletionRepo.deleteAllChannelMessages(channelId);
@@ -110,6 +114,7 @@ export class MessageRepository {
 		return this.authorRepo.listMessagesByAuthor(authorId, limit, lastMessageId);
 	}
 
+	/** 匿名化消息作者信息并同步内容变更。 */
 	async anonymizeMessage(channelId: ChannelID, messageId: MessageID, newAuthorId: UserID): Promise<void> {
 		await prepareIntegrationContentChange(channelId);
 		await this.authorRepo.anonymizeMessage(channelId, messageId, newAuthorId);
@@ -129,6 +134,7 @@ export class MessageRepository {
 		return result ? result.message_id : null;
 	}
 
+	/** 更新消息嵌入内容并同步内容变更。 */
 	async updateEmbeds(message: Message): Promise<void> {
 		await prepareIntegrationContentChange(message.channelId);
 		await this.dataRepo.updateEmbeds(message);

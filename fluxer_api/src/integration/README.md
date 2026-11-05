@@ -58,7 +58,7 @@ Bot 预建与 Forum 外部登录共用 `ensureDiscordAccount`。每个 Discord �
 
 ## Forum 新账号自动加入
 
-只有 `rpc.auth.v1.external.exchange` 在**首次占用**身份时标记 `creation_source=forum`，并持久固定当时的 `creation_guild_id`。必须显式配置有效且存在的 `INTEGRATION_GUILD_ID`；未配置时新 Forum 建号失败关闭，不猜测唯一 guild。若实例启用了单社区模式，其 `single_community_guild_id` 必须与此配置一致。正式和隔离测试分别配置各自的目标，代码没有测试环境特例。
+只有 `rpc.auth.v1.external.exchange` 在**首次占用**身份时标记 `creation_source=forum`，并持久固定当时的 `creation_guild_id`。必须显式配置有效且存在的 `INTEGRATION_GUILD_ID`；未配置时新 Forum 建号失败关闭，不猜测唯一 guild。若实例启用了单社区模式，其 `single_community_guild_id` 必须与此配置一致。各部署环境分别显式配置自己的目标服务器。
 
 自动加入是账号初始化阶段，在绑定变为 ready 和签发新会话之前完成。普通 Bot `ensure_discord`、管理员 rebind、历史空来源、已有 ready 账号的后续登录均不获得新的入群资格；Bot 不能代为完成尚未结束的 Forum 初始化。Bot 已预建的 ready 账号如需加入，必须由单独授权的迁移/成员操作处理。已完成入群后主动退群、被踢或被封不会因普通登录被拉回。
 
@@ -66,7 +66,7 @@ Bot 预建与 Forum 外部登录共用 `ensureDiscordAccount`。每个 Discord �
 
 初始化先把稳定 joined_at、已有成员状态及 last_left_at 快照写入永久操作日志。重试保留原生成员昵称、角色、timeout 和显式 guild 设置，只补反向索引、必要默认设置及原生 ADD/presence 状态。成员创建使用条件写入。主成员服务的 join/leave/kick/ban 共用有界等待的缓存租约并在副作用前续租；退群/踢出/封禁修改后的恢复计划失败关闭。恢复模式禁止 skip 校验，超过成员离开元数据保留期的旧计划需重新审核。
 
-网关 ADD 与 presence join 可重放状态，但事件交付是至少一次，不承诺仅广播一次。自动加入不发欢迎消息；真正的中断恢复会扫描权威成员数以消除增量是否提交的不确定性，正常首次加入不扫描整 guild。大型 guild 恢复可能较慢。租约不是跨数据库/网关的 fencing 事务；后台直接删除和启动时计数修复并未全部纳入此锁，原生 member_count 仍是可修复投影。必须独立验证真实 Cassandra/缓存/消息代理/网关故障恢复。
+网关 ADD 与 presence join 可重放状态，但事件交付是至少一次，不承诺仅广播一次。自动加入不发欢迎消息；真正的中断恢复会扫描权威成员数以消除增量是否提交的不确定性，正常首次加入不扫描整 guild。大型 guild 恢复可能较慢。租约不是跨数据库/网关的 fencing 事务；后台直接删除和启动时计数修复并未全部纳入此锁，原生 member_count 仍是可修复投影。
 
 已有部署先备份并升级列，排空并替换全部旧 integration 副本，再开放新 Forum 创建。不要混跑会忽略新来源字段的旧集成进程。既有保留用户补入是另一项审核迁移：必须覆盖用户名 noop 用户，保留 ready 绑定，不伪造来源字段；先审目标 guild、精确保留清单、现有成员与禁封状态，再使用不跳校验的成员操作。
 
@@ -135,6 +135,6 @@ API、worker 和 integration 进程启动时恢复日志。每秒推进一个分
 
 ## 独立 NSFW 显示偏好
 
-本地候选增加原生 `user_guild_settings.show_nsfw/nsfw_version`，仅明确的 `INTEGRATION_GUILD_ID` 生效；它不是年龄证明。现有库须在新 API 启动前执行一次 `fluxer_api/src/integration/upgrade-v5-nsfw-display.cql`（全新目标 schema 已含列），不可只运行 CREATE TABLE IF NOT EXISTS。同步更新先关闭并确认旧 Gateway 会话/重放，再写原生 CAS；故障可能保持关闭，使用同一版本安全重试，不承诺跨库回滚。Forum 只调用明确列出的 preferences RPC，Bot 无权调用。
+原生 `user_guild_settings.show_nsfw/nsfw_version`，仅明确的 `INTEGRATION_GUILD_ID` 生效；它不是年龄证明。现有库须在新 API 启动前执行一次 `fluxer_api/src/integration/upgrade-v5-nsfw-display.cql`（全新目标 schema 已含列），不可只运行 CREATE TABLE IF NOT EXISTS。同步更新先关闭并确认旧 Gateway 会话/重放，再写原生 CAS；故障可能保持关闭，使用同一版本安全重试，不承诺跨库回滚。Forum 只调用明确列出的 preferences RPC，Bot 无权调用。
 
 部署顺序、离线授权、集群预期节点、故障恢复及已签发媒体 URL 的边界见 `docs/maintenance/forum-nsfw-display-preference.md`。必须先排空/替换旧 Gateway，再开放新偏好写入。多节点集群须配置实现要求的预期节点列表，失联不得当作撤销完成。

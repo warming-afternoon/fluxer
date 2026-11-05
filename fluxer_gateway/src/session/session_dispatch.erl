@@ -19,6 +19,7 @@
 -type session_state() :: session:session_state().
 -type event() :: atom() | binary().
 
+%% 更新分类快照并拒绝过期会话或隐藏频道的事件。
 -spec handle_dispatch(event(), map() | list() | {pre_encoded, binary()}, session_state()) ->
     {noreply, session_state()}.
 handle_dispatch(Event, Data0, State0) ->
@@ -35,6 +36,11 @@ handle_dispatch(Event, Data0, State0) ->
             end
     end.
 
+%% 对已通过显示检查的事件执行现有投递过滤。
+-spec handle_current_dispatch(
+    event(), map() | list() | {pre_encoded, binary()}, session_state()
+) ->
+    {noreply, session_state()}.
 handle_current_dispatch(Event, {pre_encoded, _} = Data, State) ->
     case skip_pre_encoded(Event, Data, State) of
         true -> {noreply, State};

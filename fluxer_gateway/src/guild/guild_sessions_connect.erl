@@ -36,6 +36,7 @@
 
 -define(MAX_SESSIONS_PER_USER_PER_GUILD, 100).
 
+%% 验证偏好登记后连接成员会话。
 -spec handle_session_connect(map(), pid(), #{
     sessions => #{binary() => map()},
     guild_session_refs => #{reference() => binary()},
@@ -55,6 +56,9 @@ handle_session_connect(Request, Pid, State) ->
         true -> handle_registered_session_connect(Request, Pid, State)
     end.
 
+%% 导入会话偏好并复用或注册社区连接。
+-spec handle_registered_session_connect(map(), pid(), guild_state()) ->
+    {reply, connect_reply(), guild_state()}.
 handle_registered_session_connect(Request, Pid, State) ->
     _ = gateway_nsfw_preferences:import(
         maps:get(user_id, Request), maps:get(forum_nsfw_preference, Request, #{})

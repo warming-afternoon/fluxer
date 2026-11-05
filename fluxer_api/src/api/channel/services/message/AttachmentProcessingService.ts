@@ -83,6 +83,7 @@ export class AttachmentProcessingService {
 		private snowflakeService: ISnowflakeService,
 	) {}
 
+	/** 解析并校验请求附件，生成可持久保存的附件列表。 */
 	async computeAttachments(params: {
 		message: Message;
 		attachments: Array<AttachmentToProcess>;
@@ -246,6 +247,7 @@ export class AttachmentProcessingService {
 		}
 	}
 
+	/** 处理单个附件的元数据和存储对象并验证可用性。 */
 	private async processAttachment(params: ProcessAttachmentParams): Promise<ProcessedAttachment> {
 		const {message, attachment, index, nsfwMode} = params;
 		const pendingUpload = await this.attachmentUploadTraceRepository.getPendingUpload({

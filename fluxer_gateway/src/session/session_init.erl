@@ -158,6 +158,7 @@ load_relationships(Ready) when is_map(Ready) ->
 load_relationships(_) ->
     #{}.
 
+%% 登记偏好与套接字后构建会话状态。
 -spec build_state(map()) -> session_state().
 build_state(SessionData) ->
     BuildStartedAt = gateway_timings:start(),

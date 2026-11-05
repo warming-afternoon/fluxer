@@ -21,6 +21,7 @@
 
 -export_type([guild_state/0]).
 
+%% 恢复社区状态，并要求目标社区的迁移会话重新鉴权。
 -spec init_base_state(map()) -> guild_state().
 init_base_state(GuildState) ->
     TransferSafe = guild_handoff:remonitor_transferred_sessions(GuildState),

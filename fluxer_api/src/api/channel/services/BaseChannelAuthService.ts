@@ -110,6 +110,7 @@ export abstract class BaseChannelAuthService {
 		});
 	}
 
+	/** 校验频道访问资格与显示偏好，返回授权后的频道上下文。 */
 	async getChannelAuthenticated({
 		userId,
 		channelId,

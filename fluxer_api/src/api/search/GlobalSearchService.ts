@@ -81,6 +81,7 @@ export class GlobalSearchService {
 		return this.runSearch(finalChannelIds, params.userId, params.viewer, params.searchParams, params.requestCache);
 	}
 
+	/** 在已授权的服务器和私信范围内汇总搜索结果。 */
 	async searchAcrossGuildsAndDms(params: {
 		userId: UserID;
 		viewer: ThreadViewer;

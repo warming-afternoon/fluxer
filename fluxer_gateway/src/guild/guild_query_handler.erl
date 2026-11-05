@@ -23,6 +23,7 @@ call(GuildPid, {Tag, Request}, Timeout) ->
         Timeout
     ).
 
+%% 处理同步请求，并维护 NSFW 偏好与会话边界。
 -spec handle_call(term(), gen_server:from(), guild_state()) ->
     {reply, term(), guild_state()}
     | {noreply, guild_state()}.

@@ -99,6 +99,7 @@ export class IntegrationService {
 	async dispatch(subject: string, input: unknown): Promise<unknown> {
 		if (subject.startsWith('rpc.content.')) return new IntegrationContentService(this.context).dispatch(subject, input);
 		switch (subject) {
+			// 显示偏好只面向配置服务器中的有效成员，年龄资格独立返回。
 			case 'rpc.preferences.v1.get_service':
 			case 'rpc.preferences.v1.update_service': {
 				const update =

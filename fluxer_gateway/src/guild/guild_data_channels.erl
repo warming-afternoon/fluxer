@@ -67,6 +67,7 @@ first_viewable_fold(Channel, GuildId, EveryonePerms, null) ->
 first_viewable_fold(_Channel, _GuildId, _EveryonePerms, Acc) ->
     Acc.
 
+%% 计算成员可见频道，并过滤隐藏的父分类。
 -spec derive_member_view(user_id(), guild_member() | undefined, guild_state(), channel_list()) ->
     {channel_list(), term()}.
 derive_member_view(_UserId, undefined, _State, _Channels) ->
@@ -76,6 +77,7 @@ derive_member_view(UserId, Member, State, Channels) ->
     JoinedAt = maps:get(<<"joined_at">>, Member, null),
     {visible_with_parents(UserId, State, Filtered, Channels), JoinedAt}.
 
+%% 按角色及偏好版本复用成员频道视图。
 -spec member_view(user_id(), guild_member(), guild_state(), channel_list()) ->
     {channel_list(), guild_state()}.
 member_view(UserId, Member, State, Channels) ->
@@ -146,6 +148,9 @@ put_member_view(RolesKey, ViewableIds, Views) when
 put_member_view(RolesKey, ViewableIds, Views) ->
     Views#{RolesKey => ViewableIds}.
 
+%% 补全父分类后再次应用显示偏好过滤。
+-spec visible_with_parents(user_id(), guild_state(), channel_list(), channel_list()) ->
+    channel_list().
 visible_with_parents(UserId, State, Filtered, Channels) ->
     [C || C <- with_missing_parents(Filtered, Channels),
         gateway_nsfw_preferences:channel_allowed(UserId, C, State)].

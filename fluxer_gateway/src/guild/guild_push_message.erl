@@ -60,6 +60,7 @@ thread_push_message_data(_MessageData, undefined, _UserIds, _Data) ->
 thread_push_message_data(MessageData, ChannelId, UserIds, Data) ->
     guild_thread_push:push_message_data(MessageData, ChannelId, UserIds, Data).
 
+%% 构造推送参数并附带内部敏感分类。
 -spec push_params(map()) -> map().
 push_params(#{
     message_data := MessageData,

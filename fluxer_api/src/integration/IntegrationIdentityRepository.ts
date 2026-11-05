@@ -14,8 +14,10 @@ export interface DiscordBinding {
 	/** 原生账户主键 */
 	user_id: UserID;
 
-	/** 首次占用时固定的来源与论坛入群目标；历史空值不授予入群资格。 */
+	/** 首次占用身份时固定的创建来源，历史空值不授予入群资格。 */
 	creation_source?: 'forum' | 'other' | null;
+
+	/** 首次创建时固定的论坛服务器标识。 */
 	creation_guild_id?: string | null;
 
 	/** 首次创建操作 */

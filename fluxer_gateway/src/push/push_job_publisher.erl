@@ -56,6 +56,7 @@ publish_message(
         message_id => MessageId
     }).
 
+%% 构造推送任务并保留重试所需的敏感分类。
 -spec message_job(
     map(),
     map(),
@@ -168,6 +169,7 @@ publish_ring(UserId, ChannelId, MessageId, StartedAtMs, ExpiresAtMs, Caller) ->
         message_id => MessageId
     }).
 
+%% 每次出站重试前重新过滤敏感消息接收者。
 -spec request(binary(), binary(), pos_integer()) -> ok | {error, term()}.
 request(<<"push.job.message">> = Subject, Body, Timeout) ->
     %% Recheck every outbox attempt, after any time spent queued or in backoff.
@@ -177,6 +179,8 @@ request(<<"push.job.message">> = Subject, Body, Timeout) ->
     catch _:_ -> {error, nsfw_visibility_unavailable} end;
 request(Subject, Body, Timeout) -> request_unfiltered(Subject, Body, Timeout).
 
+%% 过滤不允许接收敏感内容的用户并移除内部标记。
+-spec filter_nsfw_job(map()) -> drop | {ok, map()}.
 filter_nsfw_job(Job) ->
     GuildId = snowflake_id:parse_optional(maps:get(<<"guild_id">>, Job, undefined)),
     IsScoped = is_integer(GuildId) andalso GuildId =:= gateway_nsfw_preferences:scope(),
@@ -192,6 +196,8 @@ filter_nsfw_job(Job) ->
             case UserIds of [] -> drop; _ -> {ok, PublicJob#{<<"user_ids">> => UserIds}} end
     end.
 
+%% 向 NATS 发送已通过可见性检查的请求。
+-spec request_unfiltered(binary(), binary(), pos_integer()) -> ok | {error, term()}.
 request_unfiltered(Subject, Body, Timeout) ->
     case gateway_nats_pool_conn:get_pool_conn() of
         {ok, Conn} -> reply_result(nats:request(Conn, Subject, Body, #{timeout => Timeout}));

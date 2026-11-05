@@ -102,6 +102,7 @@ get_viewable_channels_cached_or_rpc(GuildId, UserId) ->
             get_viewable_channels_via_rpc(GuildId, UserId)
     end.
 
+%% 使用原生权限快照计算 API 可见频道。
 -spec get_viewable_channels_from_snapshot(integer(), integer(), map()) ->
     {ok, [integer()]} | error.
 get_viewable_channels_from_snapshot(GuildId, UserId, Snapshot0) ->
@@ -133,6 +134,7 @@ get_viewable_channels_via_rpc(GuildId, UserId) ->
             error
     end.
 
+%% 向社区进程请求 API 原生可见频道。
 -spec get_viewable_channels_from_pid(integer(), pid(), integer()) -> {ok, [integer()]} | error.
 get_viewable_channels_from_pid(GuildId, Pid, UserId) ->
     Request = {get_viewable_channels, #{user_id => UserId, api_native_permissions => true}},

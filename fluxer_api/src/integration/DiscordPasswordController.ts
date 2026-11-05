@@ -30,6 +30,7 @@ const DiscordPasswordRequest = UserPasswordUpdateRequest.extend({
 
 /** 为社区外部登录账号提供独立的首次密码设置入口，保留原生 SSO 规则 */
 export function DiscordPasswordController(app: HonoApp): void {
+	// 首次密码入口沿用原生限流、登录与敏感操作验证。
 	app.post(
 		'/users/@me/discord-password',
 		RateLimitMiddleware(RateLimitConfigs.USER_PASSWORD_UPDATE),
@@ -48,6 +49,7 @@ export function DiscordPasswordController(app: HonoApp): void {
 			description:
 				'Consumes a short-lived proof bound to this native session. Existing MFA is required. Rotates sessions.',
 		}),
+		/** 校验当前账户与一次性证明后设置初始密码并替换会话。 */
 		async (ctx) => {
 			const session = ctx.get('authSession');
 			const apiContext = ctx.get('apiContext');
@@ -56,6 +58,7 @@ export function DiscordPasswordController(app: HonoApp): void {
 			if (!session || !user.traits.has('discord_integration') || user.passwordHash !== null) {
 				throw InputValidationError.fromCode('proof', ValidationErrorCodes.INVALID_PROOF_TOKEN);
 			}
+			// 按用户串行化首次密码设置，锁内重新读取权威账户和会话。
 			const lockKey = `integration:initial-password:${user.id}`;
 			const cache = apiContext.services.cache;
 			const lock = await cache.acquireLock(lockKey, 120);
@@ -91,6 +94,7 @@ export function DiscordPasswordController(app: HonoApp): void {
 					}
 					throw error;
 				}
+				// 密码设置成功后清理旧恢复凭据，并替换当前会话。
 				const updated = await ctx.get('passwordChangeService').setPassword(freshUser, body.new_password);
 				await apiContext.services.users.deleteAllPasswordResetTokens(user.id);
 				await deleteRecoveryKit(user.id);

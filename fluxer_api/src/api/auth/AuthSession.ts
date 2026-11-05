@@ -86,6 +86,7 @@ export function resolveSessionOrigin(ctx: ApiContext, request: Request): Session
 	return {ip, userAgent, clientOs};
 }
 
+/** 根据账号与请求元数据创建原生认证会话。 */
 export async function createAuthSession(
 	ctx: ApiContext,
 	{user, origin, authMethod, signedInAt, preparedToken}: CreateAuthSessionParams,

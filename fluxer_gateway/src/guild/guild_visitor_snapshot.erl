@@ -10,6 +10,7 @@
 
 -type visibility() :: #{adult := boolean(), thread_viewer := boolean(), atom() => term()}.
 
+%% 按访客资格和偏好版本复用频道视图。
 -spec view(
     #{adult := boolean(), thread_viewer := boolean(), atom() => term()},
     guild_data:guild_state()
@@ -29,6 +30,7 @@ view(#{adult := Adult, thread_viewer := Viewer} = Visibility, State) ->
             {View, guild_visitor_state:put(Visitors#{views => BoundedViews#{Key => View}}, State)}
     end.
 
+%% 限制目标社区不同偏好版本的视图缓存增长。
 -spec trim_scoped_views(map(), guild_data:guild_state()) -> map().
 trim_scoped_views(Views, State) ->
     GuildId = maps:get(id, State, undefined),
@@ -38,6 +40,7 @@ trim_scoped_views(Views, State) ->
         false -> Views
     end.
 
+%% 计算访客可见频道并应用个人显示偏好。
 -spec compute_view(visibility(), guild_data:guild_state()) -> #{integer() => true}.
 compute_view(#{adult := Adult, thread_viewer := Viewer} = Visibility, State) ->
     UserId = maps:get(user_id, Visibility, undefined),
@@ -66,6 +69,7 @@ thread_only_channel(Channel) when is_map(Channel) ->
 thread_only_channel(_) ->
     false.
 
+%% 生成访客社区快照，过滤隐藏频道及父分类。
 -spec build(guild_visitors:visitor_session(), guild_data:guild_state()) -> map().
 build(Session, State) ->
     Data = guild_data_index:ensure_data_map(State),

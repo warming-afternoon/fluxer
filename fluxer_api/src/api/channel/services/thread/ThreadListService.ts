@@ -174,6 +174,7 @@ export class ThreadListService {
 		return new Map(members.flatMap((member) => (member ? [[member.threadId, member] as const] : [])));
 	}
 
+	/** 过滤当前用户不可见的讨论区并构造分页响应。 */
 	private async respond(
 		states: Array<ThreadState>,
 		memberships: Awaited<ReturnType<ThreadListService['memberships']>>,

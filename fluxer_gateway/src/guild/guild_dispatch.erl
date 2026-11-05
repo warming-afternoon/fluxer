@@ -91,6 +91,7 @@ maybe_self_heal(#{id := GuildId}) when is_integer(GuildId) ->
 maybe_self_heal(_State) ->
     ok.
 
+%% 更新社区状态并向会话同步频道分类变化。
 -spec process_regular_dispatch(event(), event_data(), guild_state()) ->
     {noreply, guild_state()}.
 process_regular_dispatch(Event, EventData, State) ->

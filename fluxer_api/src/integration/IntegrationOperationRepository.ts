@@ -4,6 +4,7 @@ import {IntegrationError} from '@app/integration/IntegrationError';
 import {INTEGRATION_QUERY_OPTIONS} from '@app/integration/IntegrationIdentityRepository';
 import {getClient} from '@pkgs/cassandra/src/Client';
 
+/** 绑定操作人及请求摘要的持久幂等记录 */
 export interface IntegrationOperation {
 	/** 永久占用的幂等操作标识 */
 	operation_id: string;
@@ -21,6 +22,7 @@ export interface IntegrationOperation {
 	result: string | null;
 }
 
+/** 保存恢复上下文、资源占用和已完成结果 */
 export class IntegrationOperationRepository {
 	/** 在共用日志中保留资源占用，失败只允许同一操作恢复 */
 	async lockResource(resource: string, operationId: string): Promise<void> {
@@ -30,6 +32,7 @@ export class IntegrationOperationRepository {
 			[operationId, id],
 			INTEGRATION_QUERY_OPTIONS,
 		);
+		// 重新读取资源持有者，使同一操作的重试可继续而竞争操作被拒绝。
 		const response = await getClient().execute(
 			'SELECT resource_owner FROM integration_operations WHERE operation_id = ?',
 			[id],
@@ -47,6 +50,7 @@ export class IntegrationOperationRepository {
 			INTEGRATION_QUERY_OPTIONS,
 		);
 	}
+
 	/** 按幂等标识读取恢复上下文 */
 	async find(id: string): Promise<IntegrationOperation | null> {
 		const response = await getClient().execute(
@@ -86,6 +90,7 @@ export class IntegrationOperationRepository {
 			[JSON.stringify(result), id],
 			INTEGRATION_QUERY_OPTIONS,
 		);
+		// 返回条件提交的最终获胜结果，不返回可能落败的本地候选值。
 		const stored = await this.find(id);
 		if (!stored?.result)
 			throw new IntegrationError('STORAGE_UNAVAILABLE', 'Prepared operation result is unavailable', true);

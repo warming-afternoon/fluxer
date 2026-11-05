@@ -320,9 +320,12 @@ export interface ChannelOverride {
 }
 
 export interface UserGuildSettingsRow {
-	/** Independent Forum-guild display preference; never an age attestation. */
+	/** 目标服务器的显示偏好，不代表年龄资格。 */
 	show_nsfw?: boolean | null;
+
+	/** 显示偏好独立的单调版本，用于条件更新。 */
 	nsfw_version?: number | bigint | null;
+
 	user_id: UserID;
 	guild_id: GuildID;
 	message_notifications: number | null;

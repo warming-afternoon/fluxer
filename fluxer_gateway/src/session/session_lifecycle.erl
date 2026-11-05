@@ -59,6 +59,7 @@ any_hash_matches(AuthHash, Hashes) ->
         Hashes
     ).
 
+%% 清理会话登记和资源，套接字由独立监控确认退出。
 -spec terminate(term(), session_state()) -> ok.
 terminate(_Reason, State) ->
     ok = gateway_nsfw_preferences:detach(),
@@ -608,6 +609,7 @@ serialize_state(State) ->
 serialize_transfer_state(State) ->
     maps:merge(serialize_transfer_identity(State), serialize_transfer_runtime(State)).
 
+%% 保留迁移会话的偏好和频道分类上下文。
 -spec serialize_transfer_identity(session_state()) -> map().
 serialize_transfer_identity(State) ->
     #{

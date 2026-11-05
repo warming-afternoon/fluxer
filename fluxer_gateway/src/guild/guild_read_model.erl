@@ -101,6 +101,7 @@ read_live(Owner, Request, Snapshot) ->
         false -> miss
     end.
 
+%% 读取社区模型，并为 API 请求隔离显示偏好状态。
 -spec read({atom(), map()}, map()) -> {ok, map()} | miss.
 read({Tag, Request}, Snapshot) ->
     BaseState = materialize_member(maps:get(user_id, Request, null), Snapshot),

@@ -60,6 +60,7 @@ is_visitor_request(Request) ->
 member_request(Request) ->
     maps:without([visitor, operator, adult_content_allowed, visitor_tier, ip_key], Request).
 
+%% 校验会话偏好登记后执行访客准入。
 -spec admit(map(), pid(), guild_data:guild_state()) ->
     {ok, map(), guild_data:guild_state()}
     | {rejected, disabled | age_restricted | unavailable | busy, guild_data:guild_state()}.
@@ -69,6 +70,10 @@ admit(Request, Pid, State0) ->
         true -> admit_registered(Request, Pid, State0)
     end.
 
+%% 导入已登记偏好，再检查访客准入条件。
+-spec admit_registered(map(), pid(), guild_data:guild_state()) ->
+    {ok, map(), guild_data:guild_state()}
+    | {rejected, disabled | age_restricted | unavailable | busy, guild_data:guild_state()}.
 admit_registered(Request, Pid, State0) ->
     _ = gateway_nsfw_preferences:import(
         maps:get(user_id, Request), maps:get(forum_nsfw_preference, Request, #{})
@@ -175,6 +180,7 @@ oldest_unverified(State) ->
         sessions(State)
     ).
 
+%% 登记访客会话，并将用户偏好纳入视图计算。
 -spec add_session(candidate(), guild_data:guild_state()) ->
     {ok, map(), guild_data:guild_state()}.
 add_session(

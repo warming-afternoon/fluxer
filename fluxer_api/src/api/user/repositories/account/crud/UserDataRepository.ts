@@ -112,6 +112,7 @@ export class UserDataRepository {
 		return users.map((user) => new User(user));
 	}
 
+	/** 保存账号数据并发布影响身份可用性的变更。 */
 	async upsertUserRow(
 		data: UserRow,
 		oldData?: UserRow | null,
@@ -140,6 +141,7 @@ export class UserDataRepository {
 		return {finalVersion: result.finalVersion, previousData: result.previousData, updatedData};
 	}
 
+	/** 更新指定账号字段并发布必要的身份失效事件。 */
 	async patchUser(
 		userId: UserID,
 		patch: UserPatch,
@@ -173,6 +175,7 @@ export class UserDataRepository {
 		return {finalVersion: result.finalVersion, previousData, updatedData};
 	}
 
+	/** 更新账号删除状态并通知身份缓存失效。 */
 	async patchDeletion(
 		user: User,
 		patch: UserPatch,
@@ -216,6 +219,7 @@ export class UserDataRepository {
 		return {finalVersion, previousData, updatedData};
 	}
 
+	/** 按当前标记条件更新账号标记并发布变更。 */
 	async compareAndSetFlags(user: User, flags: bigint): Promise<{previousData: UserRow; updatedData: UserRow} | null> {
 		assertWritableUserId(user.id);
 		await prepareIntegrationUserChange(user.id);
@@ -270,6 +274,7 @@ export class UserDataRepository {
 		return updatedData;
 	}
 
+	/** 开始账号删除流程并同步身份可用性变化。 */
 	async startDeletion(userId: UserID, pendingDeletionAt: Date): Promise<User | null> {
 		assertWritableUserId(userId);
 		await prepareIntegrationUserChange(userId);
@@ -294,6 +299,7 @@ export class UserDataRepository {
 		return new User({...user.toRow(), deletion_started_at: startedAt, version});
 	}
 
+	/** 更新账号最后活动时间并沿用账号变更通知规则。 */
 	async updateLastActiveAt(params: {userId: UserID; lastActiveAt: Date; lastActiveIp?: string}): Promise<{
 		previousData: {
 			last_active_at: Date | null;
@@ -334,6 +340,7 @@ export class UserDataRepository {
 		return result;
 	}
 
+	/** 更新订阅状态并同步有关账号变化。 */
 	async updateSubscriptionStatus(
 		userId: UserID,
 		updates: {

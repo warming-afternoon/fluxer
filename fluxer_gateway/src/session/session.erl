@@ -102,6 +102,7 @@ init(SessionData) ->
     ),
     {ok, gateway_timings:put_state(GwTimings, State0)}.
 
+%% 处理同步请求，并维护 NSFW 偏好与会话边界。
 -spec handle_call(term(), gen_server:from(), session_state()) ->
     {reply, term(), session_state()} | {stop, normal, term(), session_state()}.
 handle_call(nsfw_preference_revoke, _From, State) ->
@@ -149,6 +150,7 @@ handle_call(_, _From, State) ->
 handle_cast(Msg, State) ->
     hibernate_after_ready(State, handle_cast_message(Msg, State)).
 
+%% 处理会话异步消息，偏好变化时撤销旧会话。
 -spec handle_cast_message(term(), session_state()) ->
     {noreply, session_state()} | {stop, normal, session_state()}.
 handle_cast_message({nsfw_channel_classification, Channels}, State) when is_map(Channels) ->

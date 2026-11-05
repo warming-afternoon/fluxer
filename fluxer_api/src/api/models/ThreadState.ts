@@ -35,6 +35,7 @@ export class ThreadState {
 	readonly deletePreparedVersion: number | null;
 	readonly deleteDispatched: boolean;
 
+	/** 保存服务依赖并初始化实例状态。 */
 	constructor(row: ThreadStateRow) {
 		this.threadId = row.thread_id;
 		this.guildId = row.guild_id;
@@ -69,6 +70,7 @@ export class ThreadState {
 		return (this.flags & ChannelFlags.PINNED) !== 0;
 	}
 
+	/** 将领域模型转换为保留当前版本与设置字段的持久行。 */
 	toRow(): ThreadStateRow {
 		return {
 			thread_id: this.threadId,

@@ -326,7 +326,7 @@ export class GuildMemberService {
 			auditLogReason,
 		});
 	}
-
+	/** 通过原生成员服务执行受限入群并派发成员事件。 */
 	async addUserToGuild(params: GuildJoinParams): Promise<GuildMember> {
 		return this.operationsService.addUserToGuild(params, this.eventService);
 	}

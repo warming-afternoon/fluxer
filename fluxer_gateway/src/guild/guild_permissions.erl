@@ -39,6 +39,7 @@
 get_member_permissions(UserId, ChannelId, State) ->
     compute_member_permissions(UserId, ChannelId, undefined, State).
 
+%% 计算成员权限并叠加频道显示偏好限制。
 -spec compute_member_permissions(user_id(), maybe_channel_id(), maybe_member(), guild_state()) ->
     permission().
 compute_member_permissions(UserId, ChannelId, ProvidedMember, State) ->
@@ -47,6 +48,11 @@ compute_member_permissions(UserId, ChannelId, ProvidedMember, State) ->
         UserId, ChannelId, State
     ).
 
+%% 计算不含显示偏好的成员原生权限。
+-spec unfiltered_member_permissions(
+    user_id(), maybe_channel_id(), maybe_member(), guild_state()
+) ->
+    permission().
 unfiltered_member_permissions(UserId, ChannelId, ProvidedMember, State) ->
     case thread_for_channel(ChannelId, State) of
         undefined ->
@@ -68,6 +74,7 @@ member_base_permissions(UserId, ProvidedMember, State) when is_integer(UserId) -
 member_base_permissions(_, _, _) ->
     0.
 
+%% 在频道原生权限上应用显示偏好。
 -spec channel_permissions(base_permissions(), user_id(), maybe_channel_id(), guild_state()) ->
     permission().
 channel_permissions(Base, UserId, ChannelId, State) ->
@@ -76,6 +83,11 @@ channel_permissions(Base, UserId, ChannelId, State) ->
         UserId, ChannelId, State
     ).
 
+%% 解析子频道或普通频道的原生权限。
+-spec unfiltered_channel_permissions(
+    base_permissions(), user_id(), maybe_channel_id(), guild_state()
+) ->
+    permission().
 unfiltered_channel_permissions(Base, UserId, ChannelId, State) ->
     case thread_for_channel(ChannelId, State) of
         undefined ->

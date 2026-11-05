@@ -238,6 +238,7 @@ export class AuthSessionRepository {
 		return rows.map((row) => new AuthSessionTombstone(row));
 	}
 
+	/** 删除指定原生会话并发布对应凭证失效事件。 */
 	async deleteAuthSessions(userId: UserID, sessionIdHashes: Array<Buffer>): Promise<void> {
 		if (sessionIdHashes.length === 0) return;
 		await invalidateAuthSessionCache(sessionIdHashes);
@@ -281,6 +282,7 @@ export class AuthSessionRepository {
 		await invalidateAuthSessionCache(sessionIdHashes);
 	}
 
+	/** 撤销账号全部原生会话并发布凭证失效事件。 */
 	async deleteAllAuthSessions(userId: UserID): Promise<void> {
 		const sessionRefs = await fetchMany<{
 			session_id_hash: Buffer;

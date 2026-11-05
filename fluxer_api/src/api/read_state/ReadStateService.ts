@@ -13,6 +13,7 @@ import type {
 } from '@app/api/read_state/ReadStateRepository';
 import {visibleReadStates} from '@app/api/read_state/ReadStateVisibility';
 
+/** 从当前频道或持久已读状态中提取内部帖子作用域。 */
 function threadScope(
 	readState: ReadState | null | undefined,
 	channelGuildId?: GuildID | null,
@@ -51,6 +52,7 @@ export class ReadStateService {
 		return await this.repository.getReadState(userId, channelId);
 	}
 
+	/** 保存消息已读位置并向可见会话派发确认。 */
 	async ackMessage(params: {
 		userId: UserID;
 		channelId: ChannelID;
@@ -250,6 +252,7 @@ export class ReadStateService {
 		}
 	}
 
+	/** 保存置顶已读位置并向可见会话派发确认。 */
 	async ackPins(params: {
 		userId: UserID;
 		channelId: ChannelID;
@@ -301,6 +304,7 @@ export class ReadStateService {
 		}
 	}
 
+	/** 按当前可见性派发消息已读确认。 */
 	private async dispatchMessageAck(params: {
 		userId: UserID;
 		channelId: ChannelID;
@@ -341,6 +345,7 @@ export class ReadStateService {
 		});
 	}
 
+	/** 按当前可见性派发置顶已读确认。 */
 	private async dispatchPinsAck(params: {
 		userId: UserID;
 		channelId: ChannelID;

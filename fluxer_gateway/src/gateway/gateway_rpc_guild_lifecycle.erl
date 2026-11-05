@@ -168,6 +168,7 @@ get_data_from_guild(GuildId, UserId) ->
             gateway_rpc_error:raise(<<"guild_data_error">>)
     end.
 
+%% 以原生权限模式读取社区，避免混入会话显示偏好。
 -spec read_guild(integer(), {atom(), map()}) -> term().
 read_guild(GuildId, {Tag, Params}) ->
     Request = {Tag, Params#{api_native_permissions => true}},

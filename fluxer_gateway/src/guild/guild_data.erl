@@ -168,6 +168,7 @@ get_everyone_viewable_text_channel(State) ->
     ),
     {reply, #{channel_id => EveryoneChannelId}, State}.
 
+%% 构建社区状态并附加内部频道分类快照。
 -spec get_guild_state(integer(), guild_state()) -> map().
 get_guild_state(UserId, State) ->
     get_guild_state(UserId, State, #{}).

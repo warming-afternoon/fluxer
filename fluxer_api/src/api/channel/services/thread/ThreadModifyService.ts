@@ -101,6 +101,7 @@ export class ThreadModifyService {
 		return this.deps.channelRepository;
 	}
 
+	/** 校验讨论区修改权限并更新状态、索引及网关视图。 */
 	async updateThread({
 		authChannel,
 		userId,

@@ -35,6 +35,7 @@ export function withThreadContext(channel: Channel, data: unknown): unknown {
 	};
 }
 
+/** 向网关分发频道事件并通知集成内容变更。 */
 export async function dispatchChannelEvent({
 	gatewayService,
 	channel,

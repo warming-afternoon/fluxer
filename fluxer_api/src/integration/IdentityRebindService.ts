@@ -42,6 +42,7 @@ interface RebindPlan {
 export class IdentityRebindService {
 	/** 已完成操作重发稳定失效事件，关闭完成结果与发布之间的崩溃窗口 */
 	private async publishResult(plan: RebindPlan, operationId: string): Promise<void> {
+		// 稳定事件标识使完成结果的重试发布不会生成新的身份变更。
 		await publishIntegrationEvent(
 			'events.identity.v1.binding_changed',
 			{
@@ -57,6 +58,7 @@ export class IdentityRebindService {
 			},
 			{eventId: `${operationId}:binding`},
 		);
+		// 稳定事件标识使完成结果的重试发布不会生成新的身份变更。
 		for (const userId of [plan.user_id, ...(plan.merged_user_id ? [plan.merged_user_id] : [])])
 			await publishIntegrationEvent(
 				'events.auth.v1.user_invalidated',
@@ -64,16 +66,25 @@ export class IdentityRebindService {
 				{eventId: `${operationId}:user:${userId}`},
 			);
 	}
+
 	/** 注入原生账户依赖及可替换仓储以验证中断恢复 */
 	constructor(
+		// 提供账户状态、缓存及原生会话服务。
 		private readonly context: ApiContext,
+
+		// 维护当前身份、历史归属与持久换绑锁。
 		private readonly identities = new IntegrationIdentityRepository(),
+
+		// 保存不可变换绑计划与幂等完成结果。
 		private readonly operations = new IntegrationOperationRepository(),
+
+		// 确保目标 Discord 身份对应原生账户。
 		private readonly accounts = new DiscordAccountService(context),
 	) {}
 
 	/** 将新身份归入稳定账户，保留所有原生消息作者和密码 */
 	async rebind(request: RebindRequest): Promise<RebindPlan> {
+		// 同一操作使用共享租约串行执行，并在持久步骤前续租。
 		const key = `integration:operation:${request.operation_id}`;
 		const lease = await this.context.services.cache.acquireLock(key, 120);
 		if (!lease) throw new IntegrationError('BUSY', 'Operation is already running', true);

@@ -24,7 +24,7 @@ export class NativeAccountRepository {
 	/** 注入原生服务以复用账号索引和配置 */
 	constructor(private readonly context: ApiContext) {}
 
-	/** 在原生名字锁内确认可用；锁繁忙和依赖故障不能被当成真实重名。 */
+	/** 仅在确认真实重名后选择稳定后缀并预留初始用户名。 */
 	private async reserveInitialUsername(binding: DiscordBinding): Promise<UsernameReservation> {
 		const {users, cache} = this.context.services;
 		for (let attempt = 0; attempt < 20; attempt++) {
@@ -40,7 +40,7 @@ export class NativeAccountRepository {
 		throw new IntegrationError('BUSY', 'No available username candidate; retry account initialization', true);
 	}
 
-	/** 已存在的原生行不能因为恢复撞名而擅自改名或覆盖其他账号的索引。 */
+	/** 为已落库账号重新持有当前用户名预留，不覆盖冲突账号。 */
 	private async reserveExistingUsername(user: User): Promise<UsernameReservation> {
 		const {users, cache} = this.context.services;
 		try {

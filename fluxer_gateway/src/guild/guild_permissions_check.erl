@@ -42,6 +42,7 @@
 -type channel() :: map().
 -type maybe_member() :: member() | undefined.
 
+%% 联合显示偏好与原生权限判断频道可见性。
 -spec can_view_channel(user_id(), channel_id(), maybe_member(), guild_state()) -> boolean().
 can_view_channel(UserId, ChannelId, Member, State) ->
     Base = guild_permissions:member_base_permissions(UserId, Member, State),
@@ -50,6 +51,7 @@ can_view_channel(UserId, ChannelId, Member, State) ->
             base_has_view(Base, UserId, ChannelId, State) orelse
             is_category_with_viewable_child(UserId, ChannelId, Base, State)).
 
+%% 批量计算用户可见且未被偏好隐藏的频道。
 -spec viewable_channel_ids(
     user_id(), guild_permissions:base_permissions(), [map()], guild_state()
 ) -> #{channel_id() => true}.

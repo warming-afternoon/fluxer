@@ -190,6 +190,7 @@ is_gated_channel_id(ChannelId, State) ->
             Type -> is_gated_channel_type(Type)
         end.
 
+%% 结合会话权限和显示偏好判断频道是否可投递。
 -spec channel_visible(map(), term(), map()) -> boolean().
 channel_visible(Session, ChannelId, State) when is_integer(ChannelId) ->
     gateway_nsfw_preferences:allowed(maps:get(user_id, Session, undefined), ChannelId, State)
@@ -558,6 +559,7 @@ thread_view_access(Session, Thread, State, Memo) ->
         Session, {Thread, guild_thread_permissions:parent_id(Thread), undefined, State}, Memo
     ).
 
+%% 检查子频道访问资格及显示偏好。
 -spec thread_access(map() | false, thread_ctx(), access_memo()) -> {boolean(), access_memo()}.
 thread_access(#{user_id := UserId} = Session, Ctx, Memo) when is_integer(UserId) ->
     {Thread, _Parent, _Message, State} = Ctx,

@@ -65,6 +65,7 @@ init([]) ->
     schedule_cleanup(),
     {ok, #{}}.
 
+%% 处理同步请求，并维护 NSFW 偏好与会话边界。
 -spec handle_call(term(), gen_server:from(), store()) -> {reply, term(), store()}.
 handle_call({receive_state, SessionId, SessionState}, _From, Store) when
     is_binary(SessionId), is_map(SessionState)

@@ -165,6 +165,7 @@ export class MessageInteractionRepository {
 		return reactions.map((reaction) => new MessageReaction(reaction));
 	}
 
+	/** 保存消息反应并同步关联的内容变更记录。 */
 	async addReaction(
 		channelId: ChannelID,
 		messageId: MessageID,
@@ -192,6 +193,7 @@ export class MessageInteractionRepository {
 		return new MessageReaction(reactionData);
 	}
 
+	/** 移除指定用户的消息反应并同步内容变更记录。 */
 	async removeReaction(
 		channelId: ChannelID,
 		messageId: MessageID,
@@ -217,6 +219,7 @@ export class MessageInteractionRepository {
 		await finishIntegrationContentChange(channelId);
 	}
 
+	/** 清除消息全部反应并同步内容变更记录。 */
 	async removeAllReactions(channelId: ChannelID, messageId: MessageID): Promise<void> {
 		await prepareIntegrationContentChange(channelId);
 		const bucket = BucketUtils.makeBucket(messageId);
@@ -237,6 +240,7 @@ export class MessageInteractionRepository {
 		await finishIntegrationContentChange(channelId);
 	}
 
+	/** 清除消息指定表情的反应并同步内容变更记录。 */
 	async removeAllReactionsForEmoji(
 		channelId: ChannelID,
 		messageId: MessageID,

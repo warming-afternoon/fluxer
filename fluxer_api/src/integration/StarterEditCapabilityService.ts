@@ -12,11 +12,17 @@ import {currentIntegrationStarterEditScope} from '@app/integration/IntegrationSt
 import {UserFlags} from '@fluxer/constants/src/UserConstants';
 import {MissingPermissionsError} from '@fluxer/errors/src/domains/core/MissingPermissionsError';
 
+/** 在受信集成上下文中授予合并账号有限的主帖编辑能力并记录审计 */
 export class StarterEditCapabilityService {
 	/** 保留原作者，按合并关系向规范用户授予仅主帖正文的编辑能力 */
 	constructor(
+		/** 读取原作者状态及集成身份特征 */
 		private readonly users: UserRepository,
+
+		/** 解析原作者合并后的规范账号 */
 		private readonly identities = new IntegrationIdentityRepository(),
+
+		/** 在正文写入前后保存持久审计记录 */
 		private readonly operations = new IntegrationOperationRepository(),
 	) {}
 
@@ -35,6 +41,7 @@ export class StarterEditCapabilityService {
 			!auth.thread.parent.isThreadOnly()
 		)
 			return null;
+		// 能力必须同时匹配操作人、消息、频道和部署允许的论坛范围。
 		const scope = currentIntegrationStarterEditScope();
 		const forums = (process.env.INTEGRATION_FORUM_CHANNEL_IDS ?? '').split(',').filter(Boolean);
 		if (
@@ -49,6 +56,7 @@ export class StarterEditCapabilityService {
 			!forums.includes(auth.thread.parent.id.toString())
 		)
 			return null;
+		// 仅允许已停用的集成来源账号向其规范账号转交此受限编辑能力。
 		const original = await this.users.findUnique(message.authorId);
 		if (!original?.traits.has('discord_integration') || (original.flags & UserFlags.DISABLED) === 0n) return null;
 		if ((await this.identities.canonicalUserId(message.authorId)) !== actor) return null;
@@ -72,6 +80,7 @@ export class StarterEditCapabilityService {
 			})),
 			occurred_at: new Date().toISOString(),
 		});
+		// 审计上下文先持久化，原生写入成功后再单独标记完成。
 		await this.operations.allocate({
 			operation_id: operationId,
 			fingerprint: createHash('sha256').update(payload).digest('hex'),

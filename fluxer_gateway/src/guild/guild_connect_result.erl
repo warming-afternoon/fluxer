@@ -69,6 +69,7 @@ compute_session_connect(GuildId, #{user_id := UserId} = Request, State) when
 compute_session_connect(_GuildId, _Request, _State) ->
     #{}.
 
+%% 计算可用社区连接及其偏好版本快照。
 -spec compute_available_connect(integer(), integer(), map(), map()) -> map().
 compute_available_connect(GuildId, UserId, Request, State) ->
     case guild_permissions_check:find_member_by_user_id(UserId, State) of

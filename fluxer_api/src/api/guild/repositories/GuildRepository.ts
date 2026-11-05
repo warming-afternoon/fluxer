@@ -325,7 +325,7 @@ export class GuildRepository {
 		return new GuildMember({...data, version: result.finalVersion ?? 1});
 	}
 
-	/** Joining must not overwrite a concurrently-created member's roles, timeout or profile. */
+	/** 仅在成员缺失时创建，保留并发入群产生的角色与资料。 */
 	async createMemberIfAbsent(data: GuildMemberRow): Promise<{member: GuildMember; inserted: boolean}> {
 		const inserted = await executeConditional(GuildMembers.insertIfNotExists(data));
 		const member = await this.getMember(data.guild_id, data.user_id);
@@ -334,7 +334,7 @@ export class GuildRepository {
 		return {member, inserted};
 	}
 
-	/** Repair the user-to-guild projection without rewriting authoritative member metadata. */
+	/** 修复用户到服务器的反向索引，不覆盖权威成员元数据。 */
 	async ensureMemberUserIndex(guildId: GuildID, userId: UserID): Promise<void> {
 		await upsertOne(GuildMembersByUserId.insert({user_id: userId, guild_id: guildId}));
 	}

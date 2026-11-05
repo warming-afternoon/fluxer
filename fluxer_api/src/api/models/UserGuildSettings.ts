@@ -8,8 +8,12 @@ import {MuteConfiguration} from '@app/api/models/MuteConfiguration';
 import type {ChannelMessageNotifications} from '@fluxer/constants/src/NotificationConstants';
 
 export class UserGuildSettings {
+	/** 用户选择的原始显示偏好。 */
 	readonly showNsfw: boolean | null;
+
+	/** 显示偏好对应的权威版本。 */
 	readonly nsfwVersion: number;
+
 	readonly userId: UserID;
 	readonly guildId: GuildID;
 	readonly messageNotifications: ChannelMessageNotifications | null;
@@ -23,6 +27,7 @@ export class UserGuildSettings {
 	readonly unreadBadges: ChannelMessageNotifications | null;
 	readonly version: number;
 
+	/** 保存服务依赖并初始化实例状态。 */
 	constructor(row: UserGuildSettingsRow) {
 		this.nsfwVersion = readSafeIntegerVersion(row.nsfw_version ?? 0, 0);
 		this.showNsfw = typeof row.show_nsfw === 'boolean' ? row.show_nsfw : null;
@@ -46,6 +51,7 @@ export class UserGuildSettings {
 		this.version = row.version;
 	}
 
+	/** 将领域模型转换为保留当前版本与设置字段的持久行。 */
 	toRow(): UserGuildSettingsRow {
 		const channelOverridesMap: Map<ChannelID, ChannelOverride> | null =
 			this.channelOverrides.size > 0

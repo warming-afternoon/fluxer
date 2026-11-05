@@ -176,6 +176,7 @@ filter_indexed_for_session(SessionData, IndexedChannels, UpdatedState) ->
             ]
     end.
 
+%% 按会话权限和显示偏好过滤频道载荷。
 -spec filter_permitted_for_session(map(), [{integer() | undefined, map()}], guild_state()) ->
     [map()].
 filter_permitted_for_session(SessionData, IndexedChannels, UpdatedState) ->

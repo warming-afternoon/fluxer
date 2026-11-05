@@ -233,6 +233,7 @@ export class GuildOperationsService {
 		private readonly workerService: IWorkerService<WorkerTaskName>,
 	) {}
 
+	/** 按用户成员或浏览资格加载服务器及可见频道数据。 */
 	async getGuild(params: {userId: UserID; guildId: GuildID}): Promise<GuildResponse> {
 		const guild = await this.helpers.getGuildData(params);
 		if (!isNsfwVisibilityGuild(params.guildId) || !guild.channels?.length) return guild;

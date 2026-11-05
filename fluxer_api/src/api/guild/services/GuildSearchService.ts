@@ -51,6 +51,7 @@ export class GuildSearchService {
 		this.responseMapper = new MessageSearchResponseMapper(this.channelRepository, this.userCacheService);
 	}
 
+	/** 在用户可访问的服务器频道内搜索消息。 */
 	async searchMessages(params: {
 		userId: UserID;
 		viewer: ThreadViewer;
@@ -190,6 +191,7 @@ export class GuildSearchService {
 		});
 	}
 
+	/** 汇总用户可访问服务器的消息搜索结果。 */
 	async searchAllGuilds(params: {
 		userId: UserID;
 		viewer: ThreadViewer;
@@ -356,6 +358,7 @@ export class GuildSearchService {
 		});
 	}
 
+	/** 收集符合原生权限与显示偏好的服务器频道。 */
 	async collectAccessibleGuildChannels(
 		userId: UserID,
 		viewer?: ThreadViewer,

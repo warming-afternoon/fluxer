@@ -2,11 +2,14 @@
 
 import {AsyncLocalStorage} from 'node:async_hooks';
 
+/** 仅在当前异步调用链中传播的受限主帖编辑能力 */
 interface IntegrationStarterEditScope {
 	/** 已由受信 Forum RPC 验证的实际操作人 */
 	actorUserId: string;
+
 	/** 本次受限主帖编辑所属的原生服务器 */
 	guildId: string;
+
 	/** 本次受限主帖编辑的原生讨论区 */
 	threadId: string;
 }
@@ -15,6 +18,7 @@ const scopes = new AsyncLocalStorage<Readonly<IntegrationStarterEditScope>>();
 
 /** 仅由服务端受信内容操作建立上下文，浏览器输入和普通 HTTP 不携带此能力。 */
 export function withIntegrationStarterEditScope<T>(scope: IntegrationStarterEditScope, execute: () => T): T {
+	// 复制并冻结上下文，避免调用方在建立能力后修改其资源范围。
 	return scopes.run(Object.freeze({...scope}), execute);
 }
 

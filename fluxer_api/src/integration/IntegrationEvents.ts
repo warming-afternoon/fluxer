@@ -10,13 +10,20 @@ import {jetstream} from '@nats-io/jetstream';
 import {connect, type NatsConnection} from '@nats-io/transport-node';
 import {getClient} from '@pkgs/cassandra/src/Client';
 
+/** 跨批次复用发布连接，连接失败后允许重建 */
 let connection: Promise<NatsConnection> | null = null;
+/** 阻止关闭期间启动新的恢复或即时投递 */
 let stopped = false;
+/** 每秒触发一次有界恢复的定时器 */
 let timer: ReturnType<typeof setInterval> | undefined;
+/** 当前恢复页的任务，供互斥推进和退出等待 */
 let running: Promise<void> | undefined;
+/** 下次处理的持久事件分片 */
 let shard = 0;
 const reconciliation = new IntegrationReconciliation();
+/** 各分片已完成投递位置，失败时停留在前一事件 */
 const pendingCursors = new Map<number, string>();
+/** 各分片资源对账的位置，与待发事件游标独立 */
 const trackedCursors = new Map<number, string>();
 
 /** 只有远端持久确认才移除待发事件，会话撤销必须先观察到权威失效 */
@@ -42,6 +49,7 @@ async function deliver(event: JournalEvent): Promise<void> {
 			return;
 		}
 	}
+	// 新状态已覆盖旧事件时，只确认旧记录，不再向外发布。
 	if (event.subject.startsWith('events.content.v1.') && Number.isSafeInteger(data.state_version)) {
 		const journal = new IntegrationEventJournal();
 		if (await journal.superseded(event, `thread:${data.thread_id}`, Number(data.state_version))) {
@@ -49,6 +57,7 @@ async function deliver(event: JournalEvent): Promise<void> {
 			return;
 		}
 	}
+	// 原生会话仍存在时延迟失效通知，避免消费者先于权威存储撤销。
 	if (event.subject === 'events.auth.v1.session_invalidated') {
 		const state = await getClient().execute(
 			'SELECT user_id, created_at FROM auth_sessions WHERE session_id_hash = ?',
@@ -116,6 +125,7 @@ export async function recoverIntegrationEventsPage(): Promise<void> {
 export function startIntegrationEvents(): void {
 	if (!process.env.INTEGRATION_NATS_URL || timer) return;
 	stopped = false;
+	/** 同一时刻仅推进一页，避免慢依赖造成恢复任务堆积 */
 	const tick = () => {
 		if (running || stopped) return;
 		running = recoverIntegrationEventsPage()
@@ -133,9 +143,16 @@ export function startIntegrationEvents(): void {
 export async function publishIntegrationEvent(
 	subject: string,
 	data: Record<string, string | number | ReadonlyArray<string>>,
-	options: {defer?: boolean; eventId?: string} = {},
+	options: {
+		/** 仅持久化，由恢复循环异步投递 */
+		defer?: boolean;
+
+		/** 调用方提供的稳定事件标识 */
+		eventId?: string;
+	} = {},
 ): Promise<void> {
 	if (!process.env.INTEGRATION_NATS_URL) return;
+	// 可重放的权威状态使用稳定摘要，其他事件分配独立标识。
 	const stable = data.session_id_hash || data.authority_version !== undefined;
 	const eventId =
 		options.eventId ??

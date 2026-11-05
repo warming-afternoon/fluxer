@@ -2,8 +2,12 @@
 
 import {createServer, type Server} from 'node:http';
 
+/** 提供轻量存活与真实依赖就绪检查 */
 export class IntegrationHealthServer {
+	/** 当前健康检查 HTTP 服务实例 */
 	private server: Server | null = null;
+
+	/** 关闭开始后立即停止报告可用 */
 	private stopping = false;
 
 	/** 注入真实依赖探测，避免健康端点重新启动原生 API */
@@ -25,6 +29,7 @@ export class IntegrationHealthServer {
 				response.writeHead(204).end();
 				return;
 			}
+			// 限制依赖探测耗时；退出期间即使探测成功也不能报告就绪。
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const deadline = new Promise<never>((_, reject) => {
 				timer = setTimeout(() => reject(new Error('Readiness timeout')), 1500);

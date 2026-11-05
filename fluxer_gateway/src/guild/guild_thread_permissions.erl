@@ -35,6 +35,9 @@ resolve_cached(UserId, Thread, Member, State, Cache) ->
         true -> resolve_allowed(UserId, Thread, Member, State, Cache)
     end.
 
+%% 计算已通过显示检查的子频道权限及父级缓存。
+-spec resolve_allowed(integer(), map(), map() | undefined, guild_state(), map()) ->
+    {permission(), map()}.
 resolve_allowed(UserId, Thread, Member, State, Cache) ->
     case parent_channel(Thread, State) of
         undefined ->

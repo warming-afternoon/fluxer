@@ -33,6 +33,7 @@ ensure_table(TableName, Options) ->
             ensure_table_local(TableName, Options)
     end.
 
+%% 初始化共享表及套接字监控状态。
 -spec init([]) -> {ok, state()}.
 init([]) ->
     erlang:process_flag(fullsweep_after, 0),
@@ -49,12 +50,14 @@ handle_call({ensure_table, TableName, Options}, _From, State) when
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
+%% 处理共享表所有者的异步套接字监控请求。
 -spec handle_cast(term(), state()) -> {noreply, state()}.
 handle_cast({watch_nsfw_socket, Pid}, State) when is_pid(Pid) ->
     {noreply, watch_socket(Pid, State)};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+%% 处理清理与监控消息，仅在确认死亡后移除套接字。
 -spec handle_info(term(), state()) -> {noreply, state()}.
 handle_info(sweep_orphan_tables, State) ->
     _ = sweep_orphan_tables(),
@@ -74,10 +77,12 @@ handle_info({'DOWN', Ref, process, _Pid, Reason}, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
+%% 为现存登记套接字补建进程监控。
 -spec watch_registered_sockets(state()) -> state().
 watch_registered_sockets(State) ->
     lists:foldl(fun watch_socket/2, State, gateway_nsfw_preferences:socket_pids()).
 
+%% 避免重复监控，并维护套接字与引用的双向索引。
 -spec watch_socket(pid(), state()) -> state().
 watch_socket(Pid, State) ->
     Pids = maps:get(nsfw_socket_pids, State, #{}),

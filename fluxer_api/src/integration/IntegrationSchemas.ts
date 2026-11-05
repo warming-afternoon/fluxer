@@ -70,9 +70,16 @@ const ServiceAttachmentReference = z.object({id: IdentityId}).strict();
 export const IntegrationSchemas = {
 	'rpc.preferences.v1.get_service': Envelope.extend({actor_user_id: IdentityId, guild_id: IdentityId}).strict(),
 	'rpc.preferences.v1.update_service': Envelope.extend({
+		/** 请求修改偏好的原生用户。 */
 		actor_user_id: IdentityId,
+
+		/** 受配置限制的目标服务器。 */
 		guild_id: IdentityId,
+
+		/** 用户选择的原始显示开关。 */
 		show_nsfw: z.boolean(),
+
+		/** 当前已知权威版本，防止并发覆盖。 */
 		expected_version: z
 			.number()
 			.int()

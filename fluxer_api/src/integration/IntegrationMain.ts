@@ -41,6 +41,7 @@ export async function startIntegrationMain(): Promise<() => Promise<void>> {
 	const url = process.env.INTEGRATION_NATS_URL;
 	if (!url || !process.env.INTEGRATION_NATS_USER || !process.env.INTEGRATION_NATS_PASSWORD)
 		throw new Error('Dedicated integration broker credentials are required');
+	// 资源就绪前登记清理动作，后续初始化失败也按逆序释放。
 	const cleanups: Array<() => Promise<void> | void> = [];
 	let shutdownPromise: Promise<void> | undefined;
 	/** 仅清理已登记的资源，并让重复退出请求共享同一次清理 */
@@ -120,6 +121,7 @@ export async function startIntegrationMain(): Promise<() => Promise<void>> {
 		);
 		cleanups.push(() => rpc.stop());
 		await rpc.start();
+		// 就绪检查同时覆盖外部订阅、内部任务总线和业务依赖。
 		const health = new IntegrationHealthServer(async () => {
 			if (!rpc.isReady() || external.isClosed() || external.isDraining())
 				throw new Error('Integration broker unavailable');

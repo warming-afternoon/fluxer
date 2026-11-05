@@ -21158,8 +21158,8 @@ msgid "Lets you sign in to this account with {providerName}."
 msgstr "Pozwala logować się na to konto przez {providerName}."
 
 #: src/features/ui/components/form/UsernameValidationRules.tsx
-msgid "Letters (a-z, A-Z), numbers (0-9), and underscores (_) only"
-msgstr "Tylko litery (a-z, A-Z), cyfry (0-9) i podkreślenia (_)"
+msgid "Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only"
+msgstr "Tylko litery (a-z, A-Z), cyfry (0-9), podkreślenia (_) i kropki (.)"
 
 #. Error modal body shown when entrance sound library quota is reached.
 #: src/features/user/components/modals/tabs/hooks/useEntranceSound.ts
@@ -25527,8 +25527,8 @@ msgstr "Tylko znajomi mogą do Ciebie dzwonić (zalecane)"
 
 #. Short label in the authentication auth register form core. Keep the tone plain and specific.
 #: src/features/auth/flow/AuthRegisterFormCore.tsx
-msgid "Only letters, numbers, and underscores"
-msgstr "Tylko litery, cyfry i podkreślenia"
+msgid "Only letters, numbers, underscores, and dots"
+msgstr "Tylko litery, cyfry, podkreślenia i kropki"
 
 #: src/features/guild/components/modals/guild_tabs/CloneAllowedToggle.tsx
 msgid "Only members with the \"{manageCommunityPermissionLabel}\" permission can change this."
@@ -40741,8 +40741,8 @@ msgstr "Nazwa użytkownika jest już zajęta"
 
 #. Label in the bot profile section.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
-msgid "Username can only contain letters, numbers, and underscores"
-msgstr "Nazwa użytkownika może zawierać tylko litery, cyfry i podkreślenia"
+msgid "Username can only contain letters, numbers, underscores, and dots"
+msgstr "Nazwa użytkownika może zawierać tylko litery, cyfry, podkreślenia i kropki"
 
 #. Short label in the bot profile section. Keep it concise.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
@@ -40780,8 +40780,8 @@ msgid "Usernames"
 msgstr "Nazwy użytkowników"
 
 #: src/features/user/components/modals/FluxerTagChangeModal.tsx
-msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are case-insensitive."
-msgstr "Nazwy użytkownika mogą zawierać tylko litery (a-z, A-Z), cyfry (0-9) i podkreślenia. W nazwach użytkownika wielkość liter nie ma znaczenia."
+msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are case-insensitive."
+msgstr "Nazwy użytkownika mogą zawierać tylko litery (a-z, A-Z), cyfry (0-9), podkreślenia i kropki. W nazwach użytkownika wielkość liter nie ma znaczenia."
 
 #. Section header in the message search popout listing matching users for from: / mentions: filters. Title Case.
 #. Section heading in the channel and chat autocomplete for user suggestions.

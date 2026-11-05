@@ -15,7 +15,7 @@ import {z} from 'zod';
 
 const EMAIL_LOCAL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+$/;
 const DISCRIMINATOR_REGEX = /^\d{1,4}$/;
-const FLUXER_TAG_REGEX = /^[a-zA-Z0-9_]+$/;
+const FLUXER_TAG_REGEX = /^[a-zA-Z0-9_.]+$/;
 
 function sanitizeUsername(value: string): string {
 	if (value.length > MAX_STRING_PROCESSING_LENGTH) {

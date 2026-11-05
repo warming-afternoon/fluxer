@@ -21158,8 +21158,8 @@ msgid "Lets you sign in to this account with {providerName}."
 msgstr "इससे आप {providerName} से इस खाते में साइन इन कर सकते हैं।"
 
 #: src/features/ui/components/form/UsernameValidationRules.tsx
-msgid "Letters (a-z, A-Z), numbers (0-9), and underscores (_) only"
-msgstr "केवल अक्षर (a-z, A-Z), संख्याएँ (0-9) और अंडरस्कोर (_)"
+msgid "Letters (a-z, A-Z), numbers (0-9), underscores (_), and dots (.) only"
+msgstr "केवल अक्षर (a-z, A-Z), संख्याएँ (0-9), अंडरस्कोर (_) और डॉट (.)"
 
 #. Error modal body shown when entrance sound library quota is reached.
 #: src/features/user/components/modals/tabs/hooks/useEntranceSound.ts
@@ -25527,8 +25527,8 @@ msgstr "केवल दोस्त ही आपको कॉल कर सक
 
 #. Short label in the authentication auth register form core. Keep the tone plain and specific.
 #: src/features/auth/flow/AuthRegisterFormCore.tsx
-msgid "Only letters, numbers, and underscores"
-msgstr "केवल अक्षर, संख्याएँ और अंडरस्कोर"
+msgid "Only letters, numbers, underscores, and dots"
+msgstr "केवल अक्षर, संख्याएँ, अंडरस्कोर और डॉट"
 
 #: src/features/guild/components/modals/guild_tabs/CloneAllowedToggle.tsx
 msgid "Only members with the \"{manageCommunityPermissionLabel}\" permission can change this."
@@ -40741,8 +40741,8 @@ msgstr "यूज़रनेम पहले से मौजूद है"
 
 #. Label in the bot profile section.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
-msgid "Username can only contain letters, numbers, and underscores"
-msgstr "यूज़रनेम में सिर्फ़ अक्षर, नंबर और अंडरस्कोर हो सकते हैं"
+msgid "Username can only contain letters, numbers, underscores, and dots"
+msgstr "यूज़रनेम में सिर्फ़ अक्षर, नंबर, अंडरस्कोर और डॉट हो सकते हैं"
 
 #. Short label in the bot profile section. Keep it concise.
 #: src/features/user/components/modals/tabs/applications_tab/application_detail/BotProfileSection.tsx
@@ -40780,8 +40780,8 @@ msgid "Usernames"
 msgstr "उपयोगकर्ता नाम"
 
 #: src/features/user/components/modals/FluxerTagChangeModal.tsx
-msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), and underscores. Usernames are case-insensitive."
-msgstr "यूज़रनेम में सिर्फ़ अक्षर (a-z, A-Z), नंबर (0-9) और अंडरस्कोर हो सकते हैं। यूज़रनेम केस-इनसेंसिटिव होते हैं।"
+msgid "Usernames can only contain letters (a-z, A-Z), numbers (0-9), underscores, and dots. Usernames are case-insensitive."
+msgstr "यूज़रनेम में सिर्फ़ अक्षर (a-z, A-Z), नंबर (0-9), अंडरस्कोर और डॉट हो सकते हैं। यूज़रनेम केस-इनसेंसिटिव होते हैं।"
 
 #. Section header in the message search popout listing matching users for from: / mentions: filters. Title Case.
 #. Section heading in the channel and chat autocomplete for user suggestions.

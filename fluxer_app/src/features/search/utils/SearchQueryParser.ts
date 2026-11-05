@@ -77,8 +77,8 @@ const KNOWN_KEYS = new Set([
 	'any',
 	'scope',
 ]);
-const USER_TAG_RE = /^([A-Za-z0-9_]+)#(\d{4})$/;
-const BARE_USERNAME_RE = /^[A-Za-z0-9_]+$/;
+const USER_TAG_RE = /^([A-Za-z0-9_.]+)#(\d{4})$/;
+const BARE_USERNAME_RE = /^[A-Za-z0-9_.]+$/;
 const normalizeSpaces = (s: string) => s.replace(/\s+/g, ' ').trim();
 
 type HasFilter = NonNullable<MessageSearchParams['has']>[number];

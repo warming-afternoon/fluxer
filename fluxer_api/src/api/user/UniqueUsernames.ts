@@ -32,7 +32,7 @@ const RESERVATION_TTL_SECONDS = 15;
 const RESERVATION_WAIT_MS = ms('5 seconds');
 const RESERVATION_RETRY_MS = 50;
 const DERIVE_ATTEMPTS = 20;
-const LOGIN_HANDLE_REGEX = /^([a-zA-Z0-9_]{1,32})(?:#(\d{1,4}))?$/;
+const LOGIN_HANDLE_REGEX = /^([a-zA-Z0-9_.]{1,32})(?:#(\d{1,4}))?$/;
 
 function usernameTakenError(): InputValidationError {
 	return InputValidationError.fromCode('username', ValidationErrorCodes.USERNAME_ALREADY_TAKEN);
@@ -110,7 +110,9 @@ export async function reserveUsername(
 	username: string,
 	exceptUserId?: UserID,
 ): Promise<UsernameReservation> {
-	const key = `unique-username:${username.toLowerCase()}`;
+	// Cache lock keys exclude dots; hyphens cannot occur in a valid username.
+	// Preserve existing keys while keeping the encoding injective for dotted names.
+	const key = `unique-username:${username.toLowerCase().replaceAll('.', '-')}`;
 	const token = await acquireReservationLock(deps.cache, key);
 	if (!token) throw usernameTakenError();
 	const release = async () => {

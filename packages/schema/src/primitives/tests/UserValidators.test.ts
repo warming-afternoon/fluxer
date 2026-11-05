@@ -5,6 +5,24 @@ import {GlobalNameType, PasswordType, UsernameType} from '@fluxer/schema/src/pri
 import {describe, expect, it} from 'vitest';
 
 describe('UsernameType', () => {
+	it.each(['discord.name', 'Discord.Name_123', '.name', 'name.', 'a', `${'a'.repeat(31)}.`])(
+		'accepts username %s without changing its case or dots',
+		(username) => {
+			expect(UsernameType.parse(username)).toBe(username);
+		},
+	);
+	it.each(['name-name', 'name@name', 'name name', 'name#1234', 'namé'])(
+		'rejects unsupported characters in %s',
+		(username) => {
+			expect(UsernameType.safeParse(username).success).toBe(false);
+		},
+	);
+	it.each(['', `${'a'.repeat(32)}.`])('keeps username length limits for %s', (username) => {
+		expect(UsernameType.safeParse(username).success).toBe(false);
+	});
+	it('still rejects reserved terms in dotted usernames', () => {
+		expect(UsernameType.safeParse('My.Fluxer').success).toBe(false);
+	});
 	it('rejects "everyone" as username', () => {
 		const result = UsernameType.safeParse('everyone');
 		expect(result.success).toBe(false);

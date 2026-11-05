@@ -2,12 +2,13 @@
 
 import type {ApiContext} from '@app/api/ApiContext';
 import {createUserID, type UserID} from '@app/api/BrandedTypes';
+import {discordUsernameBase} from '@app/integration/DiscordUsername';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {publishIntegrationEvent} from '@app/integration/IntegrationEvents';
 import {type DiscordBinding, IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
 import type {DiscordProfile} from '@app/integration/IntegrationSchemas';
 import {NativeAccountRepository} from '@app/integration/NativeAccountRepository';
-import {GlobalNameType, UsernameType} from '@fluxer/schema/src/primitives/UserValidators';
+import {GlobalNameType} from '@fluxer/schema/src/primitives/UserValidators';
 
 export class DiscordAccountService {
 	/** 使用稳定事件标识恢复首次绑定提交后未完成的发布 */
@@ -40,15 +41,14 @@ export class DiscordAccountService {
 		let binding = await this.identities.find(discordId);
 		if (!binding) {
 			const userId = createUserID(await this.context.services.snowflake.generate());
-			const base = profile.username.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 10) || 'discord';
-			const username = UsernameType.safeParse(`${base}_${userId}`);
+			const username = discordUsernameBase(profile.username);
 			const displayName = GlobalNameType.safeParse(profile.display_name);
 			binding = await this.identities.claim(
 				discordId,
 				userId,
 				operationId,
 				{...profile, display_name: displayName.success ? displayName.data : null},
-				username.success ? username.data : `dc_${userId}`,
+				username,
 			);
 		}
 		// 完成的绑定只读取原生账户，不能重新建号或覆盖已经修改的资料。

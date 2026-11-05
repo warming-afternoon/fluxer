@@ -8,9 +8,15 @@ import {UserSettings} from '@app/api/models/UserSettings';
 import {UserSettings as UserSettingsTable, Users} from '@app/api/Tables';
 import {UserIndexRepository} from '@app/api/user/repositories/account/crud/UserIndexRepository';
 import {UserSearchRepository} from '@app/api/user/repositories/account/crud/UserSearchRepository';
-import {reserveUsername} from '@app/api/user/UniqueUsernames';
+import {
+	isUsernameTaken,
+	isUsernameTakenError,
+	reserveUsername,
+	type UsernameReservation,
+} from '@app/api/user/UniqueUsernames';
 import {USERNAME_MODE_DISCRIMINATOR} from '@app/api/user/UserTag';
 import {importDiscordAvatar} from '@app/integration/DiscordAvatarImport';
+import {discordUsernameCandidate} from '@app/integration/DiscordUsername';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import type {DiscordBinding} from '@app/integration/IntegrationIdentityRepository';
 
@@ -18,49 +24,102 @@ export class NativeAccountRepository {
 	/** 注入原生服务以复用账号索引和配置 */
 	constructor(private readonly context: ApiContext) {}
 
+	/** 在原生名字锁内确认可用；锁繁忙和依赖故障不能被当成真实重名。 */
+	private async reserveInitialUsername(binding: DiscordBinding): Promise<UsernameReservation> {
+		const {users, cache} = this.context.services;
+		for (let attempt = 0; attempt < 20; attempt++) {
+			const username = discordUsernameCandidate(binding.username, binding.user_id, attempt);
+			try {
+				return await reserveUsername({users, cache}, username, binding.user_id);
+			} catch (error) {
+				if (!isUsernameTakenError(error)) throw error;
+				if (!(await isUsernameTaken(users, username, binding.user_id)))
+					throw new IntegrationError('BUSY', 'Username reservation is busy; retry account initialization', true);
+			}
+		}
+		throw new IntegrationError('BUSY', 'No available username candidate; retry account initialization', true);
+	}
+
+	/** 已存在的原生行不能因为恢复撞名而擅自改名或覆盖其他账号的索引。 */
+	private async reserveExistingUsername(user: User): Promise<UsernameReservation> {
+		const {users, cache} = this.context.services;
+		try {
+			return await reserveUsername({users, cache}, user.username, user.id);
+		} catch (error) {
+			if (!isUsernameTakenError(error)) throw error;
+			if (await isUsernameTaken(users, user.username, user.id))
+				throw new IntegrationError('IDENTITY_CONFLICT', 'Native account username is owned by another account');
+			throw new IntegrationError('BUSY', 'Username reservation is busy; retry account initialization', true);
+		}
+	}
+
 	/** 条件创建原生账户，并幂等补齐初始化步骤 */
 	async initialize(binding: DiscordBinding): Promise<User> {
-		const {users, cache} = this.context.services;
-		let user = await users.findUnique(binding.user_id);
+		const {users} = this.context.services;
 		const trait = `discord_identity:${binding.discord_user_id}`;
-		if (!user) {
-			const avatarHash = await importDiscordAvatar(binding);
-			const reservation = await reserveUsername({users, cache}, binding.username, binding.user_id);
+		let initialized: User | null = null;
+		let observedUser = false;
+		for (let attempt = 0; attempt < 20; attempt++) {
+			let user = await users.findUnique(binding.user_id);
+			if (!user && observedUser)
+				throw new IntegrationError('BOUND_ACCOUNT_MISSING', 'Native account disappeared during initialization');
+			if (user && !user.traits.has(trait))
+				throw new IntegrationError('IDENTITY_CONFLICT', 'Native account ownership mismatch');
+			observedUser ||= user !== null;
+			const avatarHash = user ? null : await importDiscordAvatar(binding);
+			const reservation = user ? await this.reserveExistingUsername(user) : await this.reserveInitialUsername(binding);
 			try {
-				const row: UserRow = {
-					...EMPTY_USER_ROW,
-					user_id: binding.user_id,
-					username: binding.username,
-					avatar_hash: avatarHash,
-					discriminator: USERNAME_MODE_DISCRIMINATOR,
-					global_name: binding.display_name,
-					bot: false,
-					system: false,
-					email: null,
-					email_verified: false,
-					email_bounced: false,
-					flags: 0n,
-					has_ever_purchased: false,
-					last_active_at: binding.created_at,
-					acls: new Set<string>(),
-					traits: new Set(['sso', 'discord_integration', trait]),
-					version: 1,
-				};
-				// 条件写入防止并发恢复覆盖任何已存在的原生资料。
-				await executeConditional(Users.insertIfNotExists(row));
+				// 等待名字锁时同一身份可能已完成创建或改名，不能覆盖它的资料。
+				user = await users.findUnique(binding.user_id);
+				if (!user) {
+					if (observedUser)
+						throw new IntegrationError('BOUND_ACCOUNT_MISSING', 'Native account disappeared during initialization');
+					const row: UserRow = {
+						...EMPTY_USER_ROW,
+						user_id: binding.user_id,
+						username: reservation.username,
+						avatar_hash: avatarHash,
+						discriminator: USERNAME_MODE_DISCRIMINATOR,
+						global_name: binding.display_name,
+						bot: false,
+						system: false,
+						email: null,
+						email_verified: false,
+						email_bounced: false,
+						flags: 0n,
+						has_ever_purchased: false,
+						last_active_at: binding.created_at,
+						acls: new Set<string>(),
+						traits: new Set(['sso', 'discord_integration', trait]),
+						version: 1,
+					};
+					// 条件写入防止并发恢复覆盖任何已存在的原生资料。
+					await executeConditional(Users.insertIfNotExists(row));
+					user = await users.findUnique(binding.user_id);
+				}
+				if (!user?.traits.has(trait))
+					throw new IntegrationError('IDENTITY_CONFLICT', 'Native account ownership mismatch');
+				observedUser = true;
+				// 不同名字必须重新预留，不能持旧名字锁发布已改名账户的索引。
+				if (user.username.toLowerCase() !== reservation.username.toLowerCase()) continue;
+				if (await isUsernameTaken(users, user.username, user.id))
+					throw new IntegrationError('IDENTITY_CONFLICT', 'Native account username is owned by another account');
+				// 创建和中断恢复均须先公开原生名字索引，再释放对应名字锁。
+				await new UserIndexRepository().syncIndices(user.toRow(), null);
+				initialized = user;
+				break;
 			} finally {
 				await reservation.release();
 			}
-			user = await users.findUnique(binding.user_id);
 		}
-		if (!user?.traits.has(trait)) throw new IntegrationError('IDENTITY_CONFLICT', 'Native account ownership mismatch');
-		await new UserIndexRepository().syncIndices(user.toRow(), null);
-		await new UserSearchRepository().indexUser(user);
+		if (!initialized)
+			throw new IntegrationError('BUSY', 'Native account username kept changing; retry initialization', true);
+		await new UserSearchRepository().indexUser(initialized);
 		await executeConditional(
 			UserSettingsTable.insertIfNotExists(
-				UserSettings.getDefaultUserSettings({userId: user.id, locale: 'en-US', isAdult: false}),
+				UserSettings.getDefaultUserSettings({userId: initialized.id, locale: 'en-US', isAdult: false}),
 			),
 		);
-		return user;
+		return initialized;
 	}
 }

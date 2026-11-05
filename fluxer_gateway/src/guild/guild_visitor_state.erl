@@ -13,7 +13,7 @@
     by_user := #{session:user_id() => pos_integer()},
     by_ip := #{binary() => pos_integer()},
     focus := #{integer() => #{session:session_id() => true}},
-    views := #{{boolean(), boolean()} => #{integer() => true}}
+    views := #{{boolean(), boolean(), term()} => #{integer() => true}}
 }.
 
 -spec new() -> state().

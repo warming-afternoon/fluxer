@@ -6,6 +6,7 @@
 -export([view/2, build/2]).
 
 -define(MAX_SNAPSHOT_THREADS, 200).
+-define(MAX_SCOPED_VIEW_ENTRIES, 256).
 
 -type visibility() :: #{adult := boolean(), thread_viewer := boolean(), atom() => term()}.
 
@@ -24,7 +25,17 @@ view(#{adult := Adult, thread_viewer := Viewer} = Visibility, State) ->
             {View, State};
         _ ->
             View = compute_view(Visibility, State),
-            {View, guild_visitor_state:put(Visitors#{views => Views#{Key => View}}, State)}
+            BoundedViews = trim_scoped_views(Views, State),
+            {View, guild_visitor_state:put(Visitors#{views => BoundedViews#{Key => View}}, State)}
+    end.
+
+-spec trim_scoped_views(map(), guild_data:guild_state()) -> map().
+trim_scoped_views(Views, State) ->
+    GuildId = maps:get(id, State, undefined),
+    case is_integer(GuildId) andalso GuildId =:= gateway_nsfw_preferences:scope()
+        andalso map_size(Views) >= ?MAX_SCOPED_VIEW_ENTRIES of
+        true -> #{};
+        false -> Views
     end.
 
 -spec compute_view(visibility(), guild_data:guild_state()) -> #{integer() => true}.

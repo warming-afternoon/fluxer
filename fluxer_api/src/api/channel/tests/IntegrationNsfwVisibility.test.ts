@@ -4,6 +4,7 @@ import {createTestAccount} from '@app/api/auth/tests/AuthTestUtils';
 import {createChannelID, createGuildID, createUserID} from '@app/api/BrandedTypes';
 import {createTestBotAccount} from '@app/api/bot/tests/BotTestUtils';
 import {ChannelRepository} from '@app/api/channel/ChannelRepository';
+import {ChannelDataRepository} from '@app/api/channel/repositories/ChannelDataRepository';
 import {
 	acceptInvite,
 	createChannel,
@@ -268,6 +269,18 @@ describe('integration guild NSFW HTTP visibility without a gateway session', () 
 			.body({context_guild_id: s.guild.id, include_nsfw: true})
 			.expect(503)
 			.execute();
+	});
+	it('reports unavailable for failures in new guild and explicit-search classification reads', async () => {
+		const s = await setup();
+		vi.spyOn(ChannelDataRepository.prototype, 'listChannels').mockRejectedValue(new Error('classification offline'));
+		await threadsRequest(harness, s.owner.token).get(`/guilds/${s.guild.id}`).expect(503).execute();
+		for (const scope of ['all', 'all_guilds']) {
+			await threadsRequest(harness, s.owner.token)
+				.post('/search/messages')
+				.body({scope, context_guild_id: s.guild.id, channel_ids: [s.nsfw.id], include_nsfw: true})
+				.expect(503)
+				.execute();
+		}
 	});
 	it('filters active thread lists for bots and cannot bypass hidden thread-member reads', async () => {
 		const s = await setup();

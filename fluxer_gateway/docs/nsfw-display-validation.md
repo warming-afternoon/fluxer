@@ -27,7 +27,7 @@ The stand-alone compile reports `behaviour cowboy_websocket undefined`, because
 this offline invocation does not load the Cowboy dependency. It is not a complete
 `rebar3` release build, dependency validation, Dialyzer or Eqwalizer run.
 
-The final local run on 2026-11-05 passed **51 tests**: 32 new NSFW tests plus
+The final local run on 2026-11-05 passed **54 tests**: 35 new NSFW tests plus
 19 existing tests. `git diff --check -- fluxer_gateway` also passed.
 
 The test suites are:
@@ -60,7 +60,7 @@ production deployment.
 
 ## Timing and query-count measurement
 
-The final local run reports p50 and p95 below;
+The final local run prints p50 and p95 in the test log;
 these machine-dependent values vary across runs. The last test runs 200 events, each selecting 200 device sessions from the actual
 `guild_sessions:filter_sessions_for_channel/4` cached-channel path. It reports p50
 and p95 microseconds for one 200-device fanout. Erlang call tracing on `rpc_client`,
@@ -84,6 +84,10 @@ unrelated user's profile event does not register or revoke a target session.
 Joining or visiting the target later without scoped registration requires a fresh
 identify, instead of borrowing another device's cached allowance. Scope conflicts cannot change the
 configured scope. Missing/malformed target display data denies sensitive content.
+The deployment must use the same `INTEGRATION_GUILD_ID` in API and Gateway and must
+not hot-switch that scope. Synchronization RPCs reject scope conflicts, but this
+patch does not claim complete protection against inconsistent deployment scope
+across every initial-connect and later-join path.
 
 `guild.begin_nsfw_preference_update` validates scope and reads
 `get_nsfw_display_preference` authority before raising `expected_nsfw_version + 1`.
@@ -170,3 +174,15 @@ changing a display preference. It is not newly solved or newly broadened by this
 feature and is not a deployment prerequisite for the requested display switch.
 No global user or policy storage change is part of this Gateway patch. The isolated
 pending-token design experiment was not connected to production.
+
+## Versioned display-cache bounds
+
+Full preference-version keys are retained, including across false/true/false
+transitions. For the target guild only, a visitor view miss clears the old map when
+it has at least 256 entries, and a member viewable-channel cache miss clears the old
+ETS entries when its size is at least 1024. The computed current entry is then added.
+These are cache-size triggers rather than strict concurrent quotas: simultaneous
+ETS writers may temporarily exceed the trigger. Watermarks, permission checks and
+final delivery filtering are unchanged; eviction affects cache hits only.
+Regressions run 1100 preference versions, reject delayed old-generation results even
+when the current boolean equals the old boolean, and preserve other guilds' caches.

@@ -560,6 +560,56 @@ queued_push_is_rechecked_after_disable_and_prefence_test() -> with_test(fun() ->
     ?assertMatch({ok, _}, push_job_publisher:filter_nsfw_job(Job#{<<"guild_id">> => <<"2">>}))
 end).
 
+scoped_version_caches_remain_bounded_across_repeated_toggles_test() -> with_test(fun() ->
+    Table = ets:new(nsfw_version_cache_cap, [set, public]),
+    State0 = (fixture())#{viewable_channels_cache => Table, visitors => guild_visitor_state:new()},
+    State = lists:foldl(fun(Version, Acc) ->
+        Show = Version rem 2 =:= 1,
+        gateway_nsfw_preferences:import(10, pref(Show, Version)),
+        Member = guild_viewable_channels_cache:get(10, [], Acc),
+        {Visitor, Next} = guild_visitor_snapshot:view(
+            #{adult => true, thread_viewer => false, user_id => 10}, Acc),
+        ?assertEqual(Show, maps:is_key(101, Member)),
+        ?assertEqual(Show, maps:is_key(101, Visitor)),
+        ?assert(ets:info(Table, size) =< 1024),
+        ?assert(map_size(maps:get(views, guild_visitor_state:get(Next))) =< 256),
+        Next
+    end, State0, lists:seq(1, 1100)),
+    ?assert(ets:info(Table, size) > 0),
+    ?assert(map_size(maps:get(views, guild_visitor_state:get(State))) > 0)
+end).
+
+same_boolean_new_generation_does_not_reuse_delayed_old_cache_result_test() -> with_test(fun() ->
+    Table = ets:new(nsfw_generation_cache, [set, public]),
+    State0 = (fixture())#{viewable_channels_cache => Table, visitors => guild_visitor_state:new()},
+    gateway_nsfw_preferences:import(10, pref(false, 2)),
+    OldKey = gateway_nsfw_preferences:cache_key(10, State0),
+    gateway_nsfw_preferences:import(10, pref(true, 3)),
+    gateway_nsfw_preferences:import(10, pref(false, 4)),
+    ?assertNotEqual(OldKey, gateway_nsfw_preferences:cache_key(10, State0)),
+    %% Model a computation spanning a toggle that writes an old-generation key late.
+    StaleView = #{100 => true, 101 => true},
+    ets:insert(Table, {{10, {}, OldKey}, StaleView}),
+    Visitors = (guild_visitor_state:new())#{views => #{{true, false, OldKey} => StaleView}},
+    State = State0#{visitors => Visitors},
+    ?assertNot(maps:is_key(101, guild_viewable_channels_cache:get(10, [], State))),
+    {CurrentView, _} = guild_visitor_snapshot:view(
+        #{adult => true, thread_viewer => false, user_id => 10}, State),
+    ?assertNot(maps:is_key(101, CurrentView))
+end).
+
+cache_caps_leave_other_guilds_unchanged_test() -> with_test(fun() ->
+    Table = ets:new(nsfw_other_guild_cache, [set, public]),
+    [ets:insert(Table, {{N, {}, unrestricted}, #{}}) || N <- lists:seq(1000, 2023)],
+    Views = maps:from_list([{{true, false, N}, #{}} || N <- lists:seq(1, 256)]),
+    State = (fixture())#{id => 2, viewable_channels_cache => Table,
+        visitors => (guild_visitor_state:new())#{views => Views}},
+    guild_viewable_channels_cache:get(10, [], State),
+    ?assertEqual(1025, ets:info(Table, size)),
+    {_, Next} = guild_visitor_snapshot:view(#{adult => true, thread_viewer => false, user_id => 10}, State),
+    ?assertEqual(257, map_size(maps:get(views, guild_visitor_state:get(Next))))
+end).
+
 hot_delivery_has_zero_external_calls_test() -> with_test(fun() ->
     State = fixture(),
     gateway_nsfw_preferences:import(10, pref(true, 1)),

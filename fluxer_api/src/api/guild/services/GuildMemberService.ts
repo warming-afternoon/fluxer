@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import type {GuildID, InviteCode, RoleID, UserID} from '@app/api/BrandedTypes';
+import type {GuildID, RoleID, UserID} from '@app/api/BrandedTypes';
 import type {ChannelService} from '@app/api/channel/services/ChannelService';
 import {SYSTEM_USER_ID} from '@app/api/constants/Core';
 import type {GuildAuditLogService} from '@app/api/guild/GuildAuditLogService';
 import type {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
 import {GuildMemberAuditService} from '@app/api/guild/services/member/GuildMemberAuditService';
 import {GuildMemberEventService} from '@app/api/guild/services/member/GuildMemberEventService';
-import {GuildMemberOperationsService} from '@app/api/guild/services/member/GuildMemberOperationsService';
+import {
+	type GuildJoinParams,
+	GuildMemberOperationsService,
+} from '@app/api/guild/services/member/GuildMemberOperationsService';
 import {GuildMemberRoleService} from '@app/api/guild/services/member/GuildMemberRoleService';
 import {GuildMemberSearchIndexService} from '@app/api/guild/services/member/GuildMemberSearchIndexService';
 import {GuildMemberValidationService} from '@app/api/guild/services/member/GuildMemberValidationService';
@@ -18,10 +21,8 @@ import type {LimitConfigService} from '@app/api/limits/LimitConfigService';
 import type {RequestCache} from '@app/api/middleware/RequestCacheMiddleware';
 import type {Guild} from '@app/api/models/Guild';
 import type {GuildMember} from '@app/api/models/GuildMember';
-import type {TierContext} from '@app/api/user/AccountTier';
 import type {UserRepository} from '@app/api/user/repositories/UserRepository';
 import {AuditLogActionType} from '@fluxer/constants/src/AuditLogActionType';
-import type {JoinSourceType} from '@fluxer/constants/src/GuildConstants';
 import {UnknownGuildMemberError} from '@fluxer/errors/src/domains/guild/UnknownGuildMemberError';
 import type {GuildMemberResponse} from '@fluxer/schema/src/domains/guild/GuildMemberSchemas';
 import type {GuildMemberUpdateRequest} from '@fluxer/schema/src/domains/guild/GuildRequestSchemas';
@@ -326,21 +327,7 @@ export class GuildMemberService {
 		});
 	}
 
-	async addUserToGuild(params: {
-		userId: UserID;
-		guildId: GuildID;
-		sendJoinMessage?: boolean;
-		skipGuildLimitCheck?: boolean;
-		skipBanCheck?: boolean;
-		skipAccountLimitCheck?: boolean;
-		isTemporary?: boolean;
-		joinSourceType?: JoinSourceType;
-		sourceInviteCode?: InviteCode;
-		inviterId?: UserID;
-		requestCache: RequestCache;
-		initiatorId?: UserID;
-		tierContext?: TierContext;
-	}): Promise<GuildMember> {
+	async addUserToGuild(params: GuildJoinParams): Promise<GuildMember> {
 		return this.operationsService.addUserToGuild(params, this.eventService);
 	}
 

@@ -13,6 +13,7 @@ import {assertMutableUserId, SYSTEM_USER_ID} from '@app/api/constants/Core';
 import type {GuildMemberRow} from '@app/api/database/types/GuildTypes';
 import type {GuildAuditLogService} from '@app/api/guild/GuildAuditLogService';
 import {resolveMaxGuildMembersLimit} from '@app/api/guild/GuildMemberLimitUtils';
+import {withGuildMembershipLock} from '@app/api/guild/GuildMembershipLock';
 import {mapGuildMemberToResponse} from '@app/api/guild/GuildModel';
 import type {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
 import {assertNotBannedFromGuild} from '@app/api/guild/services/GuildBanChecks';
@@ -29,6 +30,7 @@ import {contentModerationService} from '@app/api/infrastructure/ContentModeratio
 import type {EntityAssetService, PreparedAssetUpload} from '@app/api/infrastructure/EntityAssetService';
 import type {IGatewayService} from '@app/api/infrastructure/IGatewayService';
 import type {UserCacheService} from '@app/api/infrastructure/UserCacheService';
+import {canJoinSingleCommunity} from '@app/api/instance/SingleCommunityService';
 import {Logger} from '@app/api/Logger';
 import type {LimitConfigService} from '@app/api/limits/LimitConfigService';
 import {resolveLimitSafe} from '@app/api/limits/LimitConfigUtils';
@@ -45,7 +47,7 @@ import type {TierContext} from '@app/api/user/AccountTier';
 import {assertTierAllows, NO_TIER_CONTEXT} from '@app/api/user/AccountTier';
 import type {UserRepository} from '@app/api/user/repositories/UserRepository';
 import {dispatchUserGuildSettingsUpdate} from '@app/api/user/UserGuildSettingsThreadView';
-import {isProfileSubstringExempt} from '@app/api/user/UserHelpers';
+import {isAccountClosed, isProfileSubstringExempt} from '@app/api/user/UserHelpers';
 import {mapUserSettingsToResponse} from '@app/api/user/UserMappers';
 import {addGuildToUncategorizedFolder, removeGuildFromUserFolders} from '@app/api/user/utils/GuildFolderUtils';
 import {TierGatedActions} from '@fluxer/constants/src/AccountTierConstants';
@@ -155,6 +157,26 @@ function joinSourceName(type: JoinSourceType): JoinSource {
 			return 'other';
 	}
 }
+
+export interface GuildJoinParams {
+	userId: UserID;
+	guildId: GuildID;
+	sendJoinMessage?: boolean;
+	skipGuildLimitCheck?: boolean;
+	skipBanCheck?: boolean;
+	skipAccountLimitCheck?: boolean;
+	isTemporary?: boolean;
+	joinSourceType?: JoinSourceType;
+	sourceInviteCode?: InviteCode;
+	inviterId?: UserID;
+	requestCache: RequestCache;
+	initiatorId?: UserID;
+	tierContext?: TierContext;
+	/** Stable creation identity and leave snapshot for a durable initialization. */
+	recovery?: {joinedAt: Date; lastLeftAt: string | null};
+}
+
+export class GuildJoinStateChangedError extends Error {}
 
 export class GuildMemberOperationsService {
 	constructor(
@@ -397,38 +419,47 @@ export class GuildMemberOperationsService {
 	}
 
 	private async deleteKickedMember(targetMember: GuildMember, actorId: UserID): Promise<void> {
+		return withGuildMembershipLock(targetMember.guildId, async (assertHeld) => {
+			await assertHeld();
+			const current = await this.guildRepository.getMember(targetMember.guildId, targetMember.userId);
+			if (!current) throw new UnknownGuildMemberError();
+			await this.deleteKickedMemberLocked(current, actorId, assertHeld);
+		});
+	}
+
+	private async deleteKickedMemberLocked(
+		targetMember: GuildMember,
+		actorId: UserID,
+		assertHeld: () => Promise<void>,
+	): Promise<void> {
 		const {guildId, userId: targetId} = targetMember;
-		await this.snapshotMembershipMetadata(targetMember);
+		await this.snapshotMembershipMetadata(targetMember, assertHeld);
 		const guild = await this.guildRepository.findUnique(guildId);
+		await assertHeld();
 		await this.guildRepository.deleteMember(guildId, targetId);
 		if (guild) {
+			await assertHeld();
 			await this.guildRepository.upsertPartial(
 				guildId,
 				{member_count: Math.max(0, guild.memberCount - 1)},
 				guild.toRow(),
 			);
 		}
+		await assertHeld();
 		await this.gatewayService.leaveGuild({userId: targetId, guildId});
 		await emitGuildMemberRemoved({guildId, userId: targetId, actorId, kind: 'kicked'});
 	}
 
-	async addUserToGuild(
-		params: {
-			userId: UserID;
-			guildId: GuildID;
-			sendJoinMessage?: boolean;
-			skipGuildLimitCheck?: boolean;
-			skipBanCheck?: boolean;
-			skipAccountLimitCheck?: boolean;
-			isTemporary?: boolean;
-			joinSourceType?: JoinSourceType;
-			sourceInviteCode?: InviteCode;
-			inviterId?: UserID;
-			requestCache: RequestCache;
-			initiatorId?: UserID;
-			tierContext?: TierContext;
-		},
+	async addUserToGuild(params: GuildJoinParams, eventService: GuildMemberEventService): Promise<GuildMember> {
+		return withGuildMembershipLock(params.guildId, (assertHeld) =>
+			this.addUserToGuildLocked(params, eventService, assertHeld),
+		);
+	}
+
+	private async addUserToGuildLocked(
+		params: GuildJoinParams,
 		eventService: GuildMemberEventService,
+		assertHeld: () => Promise<void>,
 	): Promise<GuildMember> {
 		const {
 			userId,
@@ -444,13 +475,25 @@ export class GuildMemberOperationsService {
 			requestCache,
 		} = params;
 		const initiatorId = params.initiatorId ?? userId;
+		if (
+			params.recovery &&
+			(skipBanCheck ||
+				skipAccountLimitCheck ||
+				skipGuildLimitCheck ||
+				!Number.isFinite(params.recovery.joinedAt.getTime()) ||
+				params.recovery.joinedAt.getTime() > Date.now() + 30_000 ||
+				Date.now() - params.recovery.joinedAt.getTime() >= MEMBERSHIP_METADATA_TTL_SECONDS * 1000)
+		)
+			throw new GuildJoinStateChangedError('Recovery requires current, restricted membership authorization');
 		const guild = await this.guildRepository.findUnique(guildId);
 		if (!guild) throw new UnknownGuildError();
 		const existingMember = await this.guildRepository.getMember(guildId, userId);
-		if (existingMember) return existingMember;
+		if (existingMember && !params.recovery) return existingMember;
 		assertMutableUserId(userId);
 		const user = await this.userRepository.findUnique(userId);
 		if (!user) throw new UnknownGuildError();
+		if (params.recovery && (!canJoinSingleCommunity(user) || isAccountClosed(user)))
+			throw new GuildJoinStateChangedError('Account is unavailable for membership initialization');
 		if (!skipAccountLimitCheck) {
 			assertAccountNotLimited(user);
 		}
@@ -461,71 +504,103 @@ export class GuildMemberOperationsService {
 			await assertNotBannedFromGuild(this.guildRepository, this.userRepository, {userId, guildId});
 		}
 		const userGuildsCount = await this.guildRepository.countUserGuilds(userId);
-		if (!skipGuildLimitCheck) {
+		if (!existingMember && !skipGuildLimitCheck) {
 			await this.enforceGuildLimit(user, userGuildsCount);
 		}
 		const maxGuildMembers = resolveMaxGuildMembersLimit({
 			guildFeatures: guild.features,
 			snapshot: this.limitConfigService.getConfigSnapshot(),
 		});
-		if (guild.memberCount >= maxGuildMembers) {
+		if (!existingMember && guild.memberCount >= maxGuildMembers) {
 			throw new MaxGuildMembersError(maxGuildMembers);
 		}
 		const visit = await guildVisitRepository().get(userId, guildId);
 		const metadata = await this.guildRepository.getMembershipMetadata(guildId, userId);
+		if (
+			params.recovery &&
+			((metadata?.last_left_at?.toISOString() ?? null) !== params.recovery.lastLeftAt ||
+				(existingMember && existingMember.joinedAt.getTime() !== params.recovery.joinedAt.getTime()))
+		)
+			throw new GuildJoinStateChangedError('Membership changed after initialization began');
 		const restoredTimeout =
 			metadata?.communication_disabled_until && metadata.communication_disabled_until.getTime() > Date.now()
 				? metadata.communication_disabled_until
 				: null;
 		const joinRoleIds = await resolveOperatorPassJoinRoleIds(guildId, user, this.guildRepository);
-		const guildMember = await this.guildRepository.upsertMember({
-			guild_id: guildId,
-			user_id: userId,
-			joined_at: new Date(),
-			nick: null,
-			avatar_hash: null,
-			banner_hash: null,
-			bio: null,
-			pronouns: null,
-			accent_color: null,
-			join_source_type: joinSourceType,
-			source_invite_code: sourceInviteCode,
-			inviter_id: inviterId,
-			deaf: false,
-			mute: false,
-			communication_disabled_until: restoredTimeout,
-			role_ids: joinRoleIds,
-			is_premium_sanitized: null,
-			temporary: isTemporary,
-			profile_flags: null,
-			mention_flags: null,
-			version: 1,
-		});
-		await this.guildRepository.upsertPartial(guildId, {member_count: guild.memberCount + 1}, guild.toRow());
+		await assertHeld();
+		const creation = existingMember
+			? {member: existingMember, inserted: false}
+			: await this.guildRepository.createMemberIfAbsent({
+					guild_id: guildId,
+					user_id: userId,
+					joined_at: params.recovery?.joinedAt ?? new Date(),
+					nick: null,
+					avatar_hash: null,
+					banner_hash: null,
+					bio: null,
+					pronouns: null,
+					accent_color: null,
+					join_source_type: joinSourceType,
+					source_invite_code: sourceInviteCode,
+					inviter_id: inviterId,
+					deaf: false,
+					mute: false,
+					communication_disabled_until: restoredTimeout,
+					role_ids: joinRoleIds,
+					is_premium_sanitized: null,
+					temporary: isTemporary,
+					profile_flags: null,
+					mention_flags: null,
+					version: 1,
+				});
+		const guildMember = creation.member;
+		if (!creation.inserted && !params.recovery) return guildMember;
+		if (params.recovery && guildMember.joinedAt.getTime() !== params.recovery.joinedAt.getTime())
+			throw new GuildJoinStateChangedError('Another join created this membership');
+		await assertHeld();
+		await this.guildRepository.ensureMemberUserIndex(guildId, userId);
+		// Recovery cannot infer whether an earlier increment committed. Reconcile from authority under the membership lock.
+		const memberCount =
+			!creation.inserted && params.recovery ? await this.guildRepository.countMembers(guildId) : guild.memberCount + 1;
+		await assertHeld();
+		await this.guildRepository.upsertPartial(guildId, {member_count: memberCount}, guild.toRow());
 		if (visit) {
 			await endGuildVisit({userId, guildId, reason: GuildVisitEndReasons.JOINED, notify: false});
 		}
-		await this.applyJoinUserSettings({userId, guildId, user});
+		await assertHeld();
+		await this.applyJoinUserSettings({userId, guildId, user, preserveExistingGuildSettings: !!params.recovery});
+		await assertHeld();
+		if (!skipBanCheck) await assertNotBannedFromGuild(this.guildRepository, this.userRepository, {userId, guildId});
+		const currentUser = params.recovery ? await this.userRepository.findUnique(userId) : user;
+		if (params.recovery && (!currentUser || !canJoinSingleCommunity(currentUser) || isAccountClosed(currentUser)))
+			throw new GuildJoinStateChangedError('Account changed during membership initialization');
+		await assertHeld();
 		await eventService.dispatchGuildMemberAdd({member: guildMember, requestCache});
+		await assertHeld();
 		await this.gatewayService.joinGuild({userId, guildId});
 		const includeDefault = guild.membersIndexedAt != null;
 		if (includeDefault) {
 			void this.searchIndexService.indexMember(guildMember, user, {includeDefault});
 		}
-		if (sendJoinMessage && !(guild.systemChannelFlags & SystemChannelFlags.SUPPRESS_JOIN_NOTIFICATIONS)) {
+		if (
+			creation.inserted &&
+			sendJoinMessage &&
+			!(guild.systemChannelFlags & SystemChannelFlags.SUPPRESS_JOIN_NOTIFICATIONS)
+		) {
 			await this.channelService.messages.system.sendJoinSystemMessage({guildId, userId});
 		}
-		void emitActivity('guild_joined', userId.toString(), {
-			user_id: userId.toString(),
-			guild_id: guildId.toString(),
-			member_count: guild.memberCount + 1,
-			discoverable: guild.features.has(GuildFeatures.DISCOVERABLE),
-			invite_code: sourceInviteCode,
-			inviter_id: inviterId ? inviterId.toString() : null,
-			join_source: joinSourceName(joinSourceType),
-			from_visit: visit !== null,
-		});
-		if (user.isBot) {
+		if (creation.inserted)
+			void emitActivity('guild_joined', userId.toString(), {
+				user_id: userId.toString(),
+				guild_id: guildId.toString(),
+				member_count: memberCount,
+				discoverable: guild.features.has(GuildFeatures.DISCOVERABLE),
+				invite_code: sourceInviteCode,
+				inviter_id: inviterId ? inviterId.toString() : null,
+				join_source: joinSourceName(joinSourceType),
+				from_visit: visit !== null,
+			});
+		if (creation.inserted && user.isBot) {
 			await this.guildAuditLogService.record({
 				guildId,
 				userId: initiatorId,
@@ -540,6 +615,16 @@ export class GuildMemberOperationsService {
 	}
 
 	async leaveGuild(params: {userId: UserID; guildId: GuildID}): Promise<void> {
+		return withGuildMembershipLock(params.guildId, async (assertHeld) => {
+			await assertHeld();
+			await this.leaveGuildLocked(params, assertHeld);
+		});
+	}
+
+	private async leaveGuildLocked(
+		params: {userId: UserID; guildId: GuildID},
+		assertHeld: () => Promise<void>,
+	): Promise<void> {
 		const {userId, guildId} = params;
 		const guildData = await this.gatewayService.getGuildData({guildId, userId});
 		if (!guildData) throw new UnknownGuildError();
@@ -550,10 +635,12 @@ export class GuildMemberOperationsService {
 		const guild = await this.guildRepository.findUnique(guildId);
 		const leavingMember = await this.guildRepository.getMember(guildId, userId);
 		if (leavingMember) {
-			await this.snapshotMembershipMetadata(leavingMember);
+			await this.snapshotMembershipMetadata(leavingMember, assertHeld);
 		}
+		await assertHeld();
 		await this.guildRepository.deleteMember(guildId, userId);
 		if (guild) {
+			await assertHeld();
 			const newMemberCount = Math.max(0, guild.memberCount - 1);
 			await this.guildRepository.upsertPartial(guildId, {member_count: newMemberCount}, guild.toRow());
 		}
@@ -565,6 +652,7 @@ export class GuildMemberOperationsService {
 				gatewayService: this.gatewayService,
 			});
 		}
+		await assertHeld();
 		await this.gatewayService.leaveGuild({userId, guildId});
 		await emitGuildMemberRemoved({guildId, userId, actorId: null, kind: 'left'});
 	}
@@ -646,7 +734,12 @@ export class GuildMemberOperationsService {
 		if (currentGuildCount >= maxGuilds) throw new MaxGuildsError(maxGuilds);
 	}
 
-	private async applyJoinUserSettings(params: {userId: UserID; guildId: GuildID; user: User}): Promise<void> {
+	private async applyJoinUserSettings(params: {
+		userId: UserID;
+		guildId: GuildID;
+		user: User;
+		preserveExistingGuildSettings?: boolean;
+	}): Promise<void> {
 		const {userId, guildId, user} = params;
 		const userSettings = await this.userRepository.findSettings(userId);
 		if (!userSettings) {
@@ -682,6 +775,7 @@ export class GuildMemberOperationsService {
 		}
 		if (!user.isBot && userSettings.defaultHideMutedChannels) {
 			const existingGuildSettings = await this.userRepository.findGuildSettings(userId, guildId);
+			if (params.preserveExistingGuildSettings && existingGuildSettings) return;
 			const guildSettingsRow = existingGuildSettings
 				? {...existingGuildSettings.toRow(), hide_muted_channels: true}
 				: {
@@ -993,15 +1087,16 @@ export class GuildMemberOperationsService {
 		await Promise.all(rollbackPromises);
 	}
 
-	private async snapshotMembershipMetadata(member: GuildMember): Promise<void> {
+	private async snapshotMembershipMetadata(member: GuildMember, assertHeld: () => Promise<void>): Promise<void> {
 		const existingMetadata = await this.guildRepository.getMembershipMetadata(member.guildId, member.userId);
+		await assertHeld();
 		await this.guildRepository.upsertMembershipMetadata(
 			{
 				guild_id: member.guildId,
 				user_id: member.userId,
 				communication_disabled_until: member.communicationDisabledUntil,
 				first_joined_at: existingMetadata?.first_joined_at ?? member.joinedAt,
-				last_left_at: new Date(),
+				last_left_at: new Date(Math.max(Date.now(), (existingMetadata?.last_left_at?.getTime() ?? 0) + 1)),
 			},
 			MEMBERSHIP_METADATA_TTL_SECONDS,
 		);

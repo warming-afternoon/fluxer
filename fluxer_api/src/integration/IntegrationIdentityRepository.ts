@@ -14,6 +14,10 @@ export interface DiscordBinding {
 	/** 原生账户主键 */
 	user_id: UserID;
 
+	/** 首次占用时固定的来源与论坛入群目标；历史空值不授予入群资格。 */
+	creation_source?: 'forum' | 'other' | null;
+	creation_guild_id?: string | null;
+
 	/** 首次创建操作 */
 	operation_id: string;
 
@@ -154,6 +158,11 @@ export class IntegrationIdentityRepository {
 	/** 验证新增表已安装且权威存储可访问 */
 	async checkHealth(): Promise<void> {
 		await getClient().execute(
+			'SELECT creation_source, creation_guild_id FROM integration_discord_identities WHERE discord_user_id = ?',
+			['__readiness__'],
+			INTEGRATION_QUERY_OPTIONS,
+		);
+		await getClient().execute(
 			'SELECT canonical_user_id, rebind_operation, binding_version, binding_operation FROM integration_user_identities WHERE user_id = ?',
 			[1n],
 			INTEGRATION_QUERY_OPTIONS,
@@ -232,10 +241,23 @@ export class IntegrationIdentityRepository {
 		operationId: string,
 		profile: DiscordProfile,
 		username: string,
+		creation: {source: 'forum' | 'other'; guildId: string | null} = {source: 'other', guildId: null},
 	): Promise<DiscordBinding> {
 		await getClient().execute(
-			'INSERT INTO integration_discord_identities (discord_user_id, user_id, operation_id, username, display_name, avatar_url, state, version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS',
-			[discordId, userId, operationId, username, profile.display_name, profile.avatar_url, 'pending', 1, new Date()],
+			'INSERT INTO integration_discord_identities (discord_user_id, user_id, operation_id, username, display_name, avatar_url, state, version, created_at, creation_source, creation_guild_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS',
+			[
+				discordId,
+				userId,
+				operationId,
+				username,
+				profile.display_name,
+				profile.avatar_url,
+				'pending',
+				1,
+				new Date(),
+				creation.source,
+				creation.guildId,
+			],
 			INTEGRATION_QUERY_OPTIONS,
 		);
 		const binding = await this.find(discordId);

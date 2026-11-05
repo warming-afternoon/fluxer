@@ -5,6 +5,7 @@ import {enqueueRemoveThreadMemberships} from '@app/api/channel/threads/ThreadJob
 import {
 	BatchBuilder,
 	deleteOneOrMany,
+	executeConditional,
 	executeGroupedBatches,
 	fetchMany,
 	fetchOne,
@@ -322,6 +323,20 @@ export class GuildRepository {
 			}),
 		);
 		return new GuildMember({...data, version: result.finalVersion ?? 1});
+	}
+
+	/** Joining must not overwrite a concurrently-created member's roles, timeout or profile. */
+	async createMemberIfAbsent(data: GuildMemberRow): Promise<{member: GuildMember; inserted: boolean}> {
+		const inserted = await executeConditional(GuildMembers.insertIfNotExists(data));
+		const member = await this.getMember(data.guild_id, data.user_id);
+		if (!member) throw new Error('Guild member creation outcome is uncertain');
+		await this.ensureMemberUserIndex(data.guild_id, data.user_id);
+		return {member, inserted};
+	}
+
+	/** Repair the user-to-guild projection without rewriting authoritative member metadata. */
+	async ensureMemberUserIndex(guildId: GuildID, userId: UserID): Promise<void> {
+		await upsertOne(GuildMembersByUserId.insert({user_id: userId, guild_id: guildId}));
 	}
 
 	async listMembersPaginated(guildId: GuildID, limit: number, afterUserId?: UserID): Promise<Array<GuildMember>> {

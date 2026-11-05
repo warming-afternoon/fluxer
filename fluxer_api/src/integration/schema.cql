@@ -2,7 +2,7 @@
 -- 每个身份使用独立分区；身份占用不自动过期，也不会被重新分配。
 CREATE TABLE IF NOT EXISTS integration_discord_identities (
  discord_user_id text PRIMARY KEY, user_id bigint, operation_id text,
- username text, display_name text, avatar_url text, state text, version int, created_at timestamp
+ username text, display_name text, avatar_url text, state text, version int, created_at timestamp, creation_source text, creation_guild_id text
 );
 CREATE TABLE IF NOT EXISTS integration_user_identities (
  user_id bigint PRIMARY KEY, discord_user_id text, canonical_user_id bigint, rebind_operation text, binding_version bigint, binding_operation text

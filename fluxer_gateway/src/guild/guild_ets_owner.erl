@@ -10,7 +10,11 @@
 -define(DEFAULT_CALL_TIMEOUT_MS, 5000).
 -define(ORPHAN_SWEEP_INTERVAL_MS, 60000).
 
--type state() :: #{sweep_timer => reference()}.
+-type state() :: #{
+    sweep_timer => reference(),
+    nsfw_socket_refs => #{reference() => pid()},
+    nsfw_socket_pids => #{pid() => reference()}
+}.
 
 -spec start_link() -> {ok, pid()} | {error, term()}.
 start_link() ->
@@ -33,7 +37,9 @@ ensure_table(TableName, Options) ->
 init([]) ->
     erlang:process_flag(fullsweep_after, 0),
     ok = ensure_core_tables(),
-    {ok, #{sweep_timer => schedule_orphan_sweep()}}.
+    ok = gateway_nsfw_preferences:init(),
+    {ok, watch_registered_sockets(#{sweep_timer => schedule_orphan_sweep(),
+        nsfw_socket_refs => #{}, nsfw_socket_pids => #{}})}.
 
 -spec handle_call(term(), gen_server:from(), state()) -> {reply, ok, state()}.
 handle_call({ensure_table, TableName, Options}, _From, State) when
@@ -44,15 +50,44 @@ handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 -spec handle_cast(term(), state()) -> {noreply, state()}.
+handle_cast({watch_nsfw_socket, Pid}, State) when is_pid(Pid) ->
+    {noreply, watch_socket(Pid, State)};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 -spec handle_info(term(), state()) -> {noreply, state()}.
 handle_info(sweep_orphan_tables, State) ->
     _ = sweep_orphan_tables(),
-    {noreply, State#{sweep_timer => schedule_orphan_sweep()}};
+    {noreply, watch_registered_sockets(State#{sweep_timer => schedule_orphan_sweep()})};
+handle_info({'DOWN', Ref, process, _Pid, Reason}, State) ->
+    Refs = maps:get(nsfw_socket_refs, State, #{}),
+    case maps:take(Ref, Refs) of
+        {Pid, Remaining} ->
+            case Reason of
+                noconnection -> ok; %% Not proof of socket death. Retry monitoring after reconnect.
+                _ -> gateway_nsfw_preferences:forget_socket(Pid)
+            end,
+            {noreply, State#{nsfw_socket_refs => Remaining,
+                nsfw_socket_pids => maps:remove(Pid, maps:get(nsfw_socket_pids, State, #{}))}};
+        error -> {noreply, State}
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
+
+-spec watch_registered_sockets(state()) -> state().
+watch_registered_sockets(State) ->
+    lists:foldl(fun watch_socket/2, State, gateway_nsfw_preferences:socket_pids()).
+
+-spec watch_socket(pid(), state()) -> state().
+watch_socket(Pid, State) ->
+    Pids = maps:get(nsfw_socket_pids, State, #{}),
+    case maps:is_key(Pid, Pids) of
+        true -> State;
+        false ->
+            Ref = erlang:monitor(process, Pid),
+            Refs = maps:get(nsfw_socket_refs, State, #{}),
+            State#{nsfw_socket_pids => Pids#{Pid => Ref}, nsfw_socket_refs => Refs#{Ref => Pid}}
+    end.
 
 -spec schedule_orphan_sweep() -> reference().
 schedule_orphan_sweep() ->

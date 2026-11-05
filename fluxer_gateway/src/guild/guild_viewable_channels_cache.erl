@@ -5,6 +5,8 @@
 
 -export([get/3, invalidate/1]).
 
+-define(MAX_SCOPED_CACHE_ENTRIES, 1024).
+
 -type guild_state() :: #{viewable_channels_cache => ets:tid(), term() => term()}.
 -type user_id() :: integer().
 
@@ -12,7 +14,8 @@
     integer(), [integer()], #{viewable_channels_cache => ets:tid(), term() => term()}
 ) -> map().
 get(UserId, UserRoles, State) ->
-    CacheKey = {UserId, list_to_tuple(lists:sort(UserRoles))},
+    CacheKey = {UserId, list_to_tuple(lists:sort(UserRoles)),
+        gateway_nsfw_preferences:cache_key(UserId, State)},
     CacheTab = viewable_channels_cache_table(State),
     lookup_or_compute_viewable(UserId, CacheKey, CacheTab, State).
 
@@ -27,8 +30,21 @@ lookup_or_compute_viewable(UserId, CacheKey, CacheTab, State) ->
             Map;
         [] ->
             Map = compute_viewable_channel_map(UserId, State),
+            ok = trim_scoped_cache(CacheTab, State),
             ets:insert(CacheTab, {CacheKey, Map}),
             Map
+    end.
+
+%% Keep the full generation key: an old asynchronous computation must never
+%% populate the same cache key after a false/true/false preference transition.
+%% This is a cache-size trigger, not a strict quota under concurrent writers.
+-spec trim_scoped_cache(ets:tid(), guild_state()) -> ok.
+trim_scoped_cache(CacheTab, State) ->
+    GuildId = maps:get(id, State, undefined),
+    case is_integer(GuildId) andalso GuildId =:= gateway_nsfw_preferences:scope()
+        andalso ets:info(CacheTab, size) >= ?MAX_SCOPED_CACHE_ENTRIES of
+        true -> ets:delete_all_objects(CacheTab), ok;
+        false -> ok
     end.
 
 -spec compute_viewable_channel_map(user_id(), guild_state()) -> map().

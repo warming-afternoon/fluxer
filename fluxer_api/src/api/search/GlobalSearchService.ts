@@ -8,6 +8,7 @@ import {
 	getDmChannelIdsForScope,
 	isDmScopeChannelForUser,
 } from '@app/api/channel/services/message/DmScopeUtils';
+import {NsfwVisibility} from '@app/api/channel/utils/NsfwVisibility';
 import type {ThreadViewer} from '@app/api/experiment/ChannelThreadsGate';
 import type {GuildService} from '@app/api/guild/services/GuildService';
 import type {UserCacheService} from '@app/api/infrastructure/UserCacheService';
@@ -89,8 +90,17 @@ export class GlobalSearchService {
 		includeChannelId?: ChannelID | null;
 		requestedChannelIds?: Array<ChannelID>;
 	}): Promise<MessageSearchResponse> {
+		let requestedChannelIds = params.requestedChannelIds;
+		if (requestedChannelIds?.length) {
+			const visibility = new NsfwVisibility(params.userId, this.channelRepository);
+			const channels = await visibility.readChannels(requestedChannelIds);
+			const visible = new Set((await visibility.filter(channels)).map((channel) => channel.id));
+			const hidden = new Set(channels.filter((channel) => !visible.has(channel.id)).map((channel) => channel.id));
+			requestedChannelIds = requestedChannelIds.filter((id) => !hidden.has(id));
+			if (requestedChannelIds.length === 0) return emptyMessageSearchResponse(params.searchParams);
+		}
 		const [guildAccess, includeChannel] = await Promise.all([
-			this.guildService.search.collectAccessibleGuildChannels(params.userId, params.viewer, params.requestedChannelIds),
+			this.guildService.search.collectAccessibleGuildChannels(params.userId, params.viewer, requestedChannelIds),
 			this.findDmScopeContextChannel(params.userId, params.includeChannelId),
 		]);
 		const {accessibleChannels, unindexedChannelIds, guildNsfwLevels, parentCategories, threadParents} = guildAccess;
@@ -106,10 +116,7 @@ export class GlobalSearchService {
 			includeChannel,
 		});
 		const combinedChannelSet = new Set<string>([...guildChannelIds, ...dmChannelIds]);
-		const validatedChannelIds = this.filterRequestedChannelIds(
-			Array.from(combinedChannelSet),
-			params.requestedChannelIds,
-		);
+		const validatedChannelIds = this.filterRequestedChannelIds(Array.from(combinedChannelSet), requestedChannelIds);
 		const includeNsfwRequested = params.searchParams.include_nsfw ?? false;
 		let canIncludeNsfw = false;
 		if (includeNsfwRequested) {

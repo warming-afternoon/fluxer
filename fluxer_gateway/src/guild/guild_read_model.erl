@@ -103,7 +103,11 @@ read_live(Owner, Request, Snapshot) ->
 
 -spec read({atom(), map()}, map()) -> {ok, map()} | miss.
 read({Tag, Request}, Snapshot) ->
-    State = materialize_member(maps:get(user_id, Request, null), Snapshot),
+    BaseState = materialize_member(maps:get(user_id, Request, null), Snapshot),
+    State = case maps:get(api_native_permissions, Request, false) of
+        true -> BaseState#{api_native_permissions => true};
+        false -> BaseState
+    end,
     case Tag of
         get_guild_data ->
             reply(guild_data:get_guild_data(Request, State));

@@ -41,6 +41,7 @@ describe('Integration RPC boundaries', () => {
 		const botRebind = send('rpc.identity.v1.rebind_service', '_INBOX.bot.stolen');
 		const botEligibility = send('rpc.identity.v1.login_eligibility', '_INBOX.bot.stolen');
 		const botContent = send('rpc.content.v1.thread.create_service', '_INBOX.bot.stolen');
+		const botPreferences = send('rpc.preferences.v1.update_service', '_INBOX.bot.stolen');
 		await server.stop();
 		expect(dispatch).not.toHaveBeenCalled();
 		expect(wrongSubject).not.toHaveBeenCalled();
@@ -49,6 +50,7 @@ describe('Integration RPC boundaries', () => {
 		expect(botRebind).not.toHaveBeenCalled();
 		expect(botEligibility).not.toHaveBeenCalled();
 		expect(botContent).not.toHaveBeenCalled();
+		expect(botPreferences).not.toHaveBeenCalled();
 	});
 
 	it('returns native authorization failures as terminal errors instead of dependency outages', async () => {

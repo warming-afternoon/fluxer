@@ -9706,6 +9706,14 @@
 				{
 					"name": "unread_badges",
 					"type": "int"
+				},
+				{
+					"name": "show_nsfw",
+					"type": "boolean"
+				},
+				{
+					"name": "nsfw_version",
+					"type": "bigint"
 				}
 			],
 			"primary_key": "((user_id), guild_id)",

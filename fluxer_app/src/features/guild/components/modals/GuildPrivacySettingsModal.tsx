@@ -8,11 +8,14 @@ import {
 	PRIVACY_SETTINGS_DESCRIPTOR,
 } from '@app/features/i18n/utils/CommonMessageDescriptors';
 import {Switch} from '@app/features/ui/components/form/FormSwitch';
+import {updateNsfwVisibility} from '@app/features/user/commands/UserGuildSettingsCommands';
 import * as UserSettingsCommands from '@app/features/user/commands/UserSettingsCommands';
+import UserGuildSettings from '@app/features/user/state/UserGuildSettings';
 import UserSettings from '@app/features/user/state/UserSettings';
 import {msg} from '@lingui/core/macro';
 import {useLingui} from '@lingui/react/macro';
 import {observer} from 'mobx-react-lite';
+import {useRef, useState} from 'react';
 
 const ALLOW_DIRECT_MESSAGES_FROM_OTHER_MEMBERS_IN_THIS_DESCRIPTOR = msg({
 	message: 'Let members of this community DM you',
@@ -29,6 +32,10 @@ const ALLOW_BOTS_FROM_THIS_COMMUNITY_TO_SEND_YOU_DESCRIPTOR = msg({
 export const GuildPrivacySettingsModal = observer(({guildId}: {guildId: string}) => {
 	const {i18n} = useLingui();
 	const guild = Guilds.getGuild(guildId);
+	const [savingNsfw, setSavingNsfw] = useState(false);
+	const nsfwInFlight = useRef(false);
+	const [nsfwError, setNsfwError] = useState(false);
+	const guildSettings = UserGuildSettings.getSettingsForScope(guildId);
 	const restrictedGuilds = UserSettings.restrictedGuilds;
 	const botRestrictedGuilds = UserSettings.botRestrictedGuilds;
 	if (!guild) return null;
@@ -56,6 +63,20 @@ export const GuildPrivacySettingsModal = observer(({guildId}: {guildId: string})
 			botRestrictedGuilds: newRestrictedGuilds,
 		});
 	};
+	const handleToggleNsfw = async (value: boolean) => {
+		if (nsfwInFlight.current) return;
+		nsfwInFlight.current = true;
+		setSavingNsfw(true);
+		setNsfwError(false);
+		try {
+			await updateNsfwVisibility(guildId, value, guildSettings?.nsfw_version ?? 0);
+		} catch {
+			setNsfwError(true);
+		} finally {
+			nsfwInFlight.current = false;
+			setSavingNsfw(false);
+		}
+	};
 	return (
 		<Modal.Root size="small" centered data-flx="guild.guild-privacy-settings-modal.modal-root">
 			<Modal.Header
@@ -64,6 +85,20 @@ export const GuildPrivacySettingsModal = observer(({guildId}: {guildId: string})
 			/>
 			<Modal.Content data-flx="guild.guild-privacy-settings-modal.modal-content">
 				<div className={styles.container} data-flx="guild.guild-privacy-settings-modal.container">
+					{typeof guildSettings?.show_nsfw === 'boolean' && (
+						<Switch
+							label={i18n._(msg`Show NSFW content`)}
+							description={i18n._(
+								msg`Show NSFW channels and posts in this community. Existing access and age restrictions still apply.`,
+							)}
+							value={guildSettings.show_nsfw}
+							disabled={savingNsfw}
+							onChange={handleToggleNsfw}
+						/>
+					)}
+					{nsfwError && (
+						<div role="alert">{i18n._(msg`Could not confirm the change. Reload your settings and try again.`)}</div>
+					)}
 					<Switch
 						label={i18n._(DIRECT_MESSAGES_DESCRIPTOR)}
 						description={i18n._(ALLOW_DIRECT_MESSAGES_FROM_OTHER_MEMBERS_IN_THIS_DESCRIPTOR)}

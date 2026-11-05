@@ -76,7 +76,7 @@ import type {BotAuthService} from '@app/api/oauth/BotAuthService';
 import {operatorPassPrivateFields} from '@app/api/operator_pass/OperatorPassEntitlementService';
 import {mapReadStateResponse} from '@app/api/read_state/ReadStateResponseMapper';
 import type {ReadStateService} from '@app/api/read_state/ReadStateService';
-import {visibleReadStates} from '@app/api/read_state/ReadStateVisibility';
+import {filterNsfwReadStates, visibleReadStates} from '@app/api/read_state/ReadStateVisibility';
 import {RpcSessionStartService} from '@app/api/rpc/RpcSessionStartService';
 import {
 	createRpcTimingNode,
@@ -88,6 +88,8 @@ import {
 } from '@app/api/rpc/RpcTimings';
 import {getAccountTier} from '@app/api/user/AccountTier';
 import {isDateOfBirthEnforced} from '@app/api/user/DateOfBirth';
+import {forumNsfwGuildId} from '@app/api/user/NsfwDisplayScope';
+import {UserGuildNsfwRepository} from '@app/api/user/repositories/UserGuildNsfwRepository';
 import type {UserRepository} from '@app/api/user/repositories/UserRepository';
 import {CustomStatusValidator} from '@app/api/user/services/CustomStatusValidator';
 import {
@@ -112,6 +114,7 @@ import type {VoiceService} from '@app/api/voice/VoiceService';
 import type {WebhookRepository} from '@app/api/webhook/WebhookRepository';
 import {ensureGuildThreadPermissionsSeeded} from '@app/api/worker/tasks/SeedThreadPermissions';
 import type {WorkerTaskName} from '@app/api/worker/WorkerLaneConfig';
+import {IntegrationError} from '@app/integration/IntegrationError';
 import {
 	AUTOMATIC_VOICE_REGION_ID,
 	ChannelTypes,
@@ -390,6 +393,22 @@ export class RpcService {
 					type: 'voice_state_remove',
 					data: {success: true},
 				};
+			case 'get_nsfw_display_preference': {
+				if (request.guild_id.toString() !== forumNsfwGuildId())
+					throw new IntegrationError('RESOURCE_NOT_ALLOWED', 'Preference is outside the integration scope');
+				const settings = await new UserGuildNsfwRepository().get(
+					createUserID(request.user_id),
+					createGuildID(request.guild_id),
+				);
+				return {
+					type: 'get_nsfw_display_preference',
+					data: {
+						guild_id: request.guild_id.toString(),
+						show_nsfw: settings.showNsfw === true,
+						nsfw_version: settings.nsfwVersion,
+					},
+				};
+			}
 			case 'get_user_guild_settings': {
 				const result = await this.getUserGuildSettings({
 					userIds: request.user_ids.map(createUserID),
@@ -1210,12 +1229,34 @@ export class RpcService {
 		const userGuildSettings = await timings.time('map_user_guild_settings', () =>
 			Promise.all(userData.guildSettings.map((settings) => mapUserGuildSettingsForViewer(settings, sessionViewer))),
 		);
+		const forumGuildId = forumNsfwGuildId();
 		const visitGuildIds =
 			guildVisitsCapable && !isDateOfBirthEnforced(user)
 				? await timings.time('resolve_guild_visits', async () =>
 						resolveSessionGuildVisits({user, ip: ip ?? null, memberGuildIds: userData.guildIds}),
 					)
 				: [];
+		const participatesInForumGuild =
+			forumGuildId !== null &&
+			(userData.guildIds.some((guildId) => guildId.toString() === forumGuildId) ||
+				visitGuildIds.some((visit) => visit.guildId.toString() === forumGuildId));
+		if (forumGuildId && participatesInForumGuild) {
+			const targetSettings = await timings.time('read_nsfw_preference_authority', () =>
+				new UserGuildNsfwRepository().get(user.id, createGuildID(BigInt(forumGuildId))),
+			);
+			const mapped = await mapUserGuildSettingsForViewer(targetSettings, sessionViewer);
+			const index = userGuildSettings.findIndex((settings) => settings.guild_id === forumGuildId);
+			if (index < 0) userGuildSettings.push(mapped);
+			else userGuildSettings[index] = mapped;
+		}
+		const sessionReadStates = await timings.time('filter_nsfw_read_states', () =>
+			filterNsfwReadStates(
+				visibleReadStates(userData.readStates, sessionViewer),
+				user.id,
+				this.channelRepository,
+				this.guildRepository,
+			),
+		);
 		const responseBuildSteps: RpcTimingSteps = {};
 		const responseBuildStartedAtNs = startRpcTiming();
 		const responsePayload = {
@@ -1233,12 +1274,13 @@ export class RpcService {
 						})
 					: null,
 			),
+			forum_nsfw_guild_id: forumNsfwGuildId(),
 			user_guild_settings: userGuildSettings,
 			notes: timeRpcStepSync(responseBuildSteps, 'map_notes', () =>
 				Object.fromEntries(Array.from(userData.notes.entries()).map(([userId, note]) => [userId.toString(), note])),
 			),
 			read_states: timeRpcStepSync(responseBuildSteps, 'map_read_states', () =>
-				visibleReadStates(userData.readStates, sessionViewer).map(mapReadStateResponse),
+				sessionReadStates.map(mapReadStateResponse),
 			),
 			guilds,
 			private_channels: privateChannels,
@@ -1369,7 +1411,7 @@ export class RpcService {
 		const response = mapGuildToGuildResponse(repairedEmbedSplashGuild);
 		return {
 			...this.createGuildCollectionResponse('guild'),
-			guild: response,
+			guild: {...response, forum_nsfw_guild_id: forumNsfwGuildId()},
 		};
 	}
 

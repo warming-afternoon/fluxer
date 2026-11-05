@@ -4,7 +4,7 @@
 -typing([eqwalizer]).
 
 -export([publish_message/8, publish_clear/3, clear_job/4]).
--export([publish_ring/6, request/3, request_batch/3]).
+-export([publish_ring/6, request/3, request_batch/3, filter_nsfw_job/1]).
 
 -define(SUBJECT_MESSAGE, <<"push.job.message">>).
 -define(SUBJECT_CLEAR, <<"push.job.clear">>).
@@ -77,6 +77,7 @@ message_job(
     Job = #{
         <<"v">> => ?JOB_VERSION,
         <<"config_version">> => ?LEGACY_CONFIG_VERSION,
+        <<"__nsfw_sensitive">> => maps:get(<<"__nsfw_sensitive">>, MessageData, true),
         <<"guild_id">> => integer_to_binary(GuildId),
         <<"channel_id">> => integer_to_binary(ChannelId),
         <<"message_id">> => integer_to_binary(MessageId),
@@ -168,7 +169,30 @@ publish_ring(UserId, ChannelId, MessageId, StartedAtMs, ExpiresAtMs, Caller) ->
     }).
 
 -spec request(binary(), binary(), pos_integer()) -> ok | {error, term()}.
-request(Subject, Body, Timeout) ->
+request(<<"push.job.message">> = Subject, Body, Timeout) ->
+    %% Recheck every outbox attempt, after any time spent queued or in backoff.
+    try filter_nsfw_job(json:decode(Body)) of
+        drop -> ok;
+        {ok, Filtered} -> request_unfiltered(Subject, iolist_to_binary(json:encode(Filtered)), Timeout)
+    catch _:_ -> {error, nsfw_visibility_unavailable} end;
+request(Subject, Body, Timeout) -> request_unfiltered(Subject, Body, Timeout).
+
+filter_nsfw_job(Job) ->
+    GuildId = snowflake_id:parse_optional(maps:get(<<"guild_id">>, Job, undefined)),
+    IsScoped = is_integer(GuildId) andalso GuildId =:= gateway_nsfw_preferences:scope(),
+    Sensitive = maps:get(<<"__nsfw_sensitive">>, Job, true) =/= false,
+    PublicJob = maps:remove(<<"__nsfw_sensitive">>, Job),
+    case IsScoped andalso Sensitive of
+        false -> {ok, PublicJob};
+        true ->
+            UserIds = [Id || Id <- maps:get(<<"user_ids">>, Job, []),
+                U <- [snowflake_id:parse_optional(Id)], is_integer(U),
+                not gateway_nsfw_preferences:fenced(GuildId, U),
+                element(1, gateway_nsfw_preferences:current(GuildId, U)) =:= true],
+            case UserIds of [] -> drop; _ -> {ok, PublicJob#{<<"user_ids">> => UserIds}} end
+    end.
+
+request_unfiltered(Subject, Body, Timeout) ->
     case gateway_nats_pool_conn:get_pool_conn() of
         {ok, Conn} -> reply_result(nats:request(Conn, Subject, Body, #{timeout => Timeout}));
         {error, Reason} -> {error, Reason}

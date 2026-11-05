@@ -7,6 +7,7 @@ import {assertThreadAllowed} from '@app/api/channel/services/thread/ThreadDenial
 import {mapThreadMemberToResponse, mapThreadToResponse} from '@app/api/channel/services/thread/ThreadMappers';
 import type {ThreadServiceContext} from '@app/api/channel/services/thread/ThreadServiceContext';
 import {loadThreadViews} from '@app/api/channel/services/thread/ThreadViews';
+import {NsfwVisibility} from '@app/api/channel/utils/NsfwVisibility';
 import type {ThreadViewer} from '@app/api/experiment/ChannelThreadsGate';
 import type {ThreadState} from '@app/api/models/ThreadState';
 import {ChannelTypes} from '@fluxer/constants/src/ChannelConstants';
@@ -42,7 +43,9 @@ export class ThreadListService {
 		const parents = await this.ctx.channelRepository.channelData.listChannels([
 			...new Set(states.map((state) => state.parentId)),
 		]);
-		const parentTypes = new Map(parents.map((parent) => [parent.id, parent.type]));
+		const visibility = new NsfwVisibility(userId, this.ctx.channelRepository, this.ctx.guildRepository);
+		const visibleParents = await visibility.filter(parents);
+		const parentTypes = new Map(visibleParents.map((parent) => [parent.id, parent.type]));
 		const candidates = states.filter(
 			(state) => viewable.has(state.parentId.toString()) && parentTypes.has(state.parentId),
 		);
@@ -71,7 +74,7 @@ export class ThreadListService {
 		const visible = candidates
 			.filter((state) => !state.isPrivate || memberships.has(state.threadId) || moderatedParents.has(state.parentId))
 			.sort((a, b) => compareSnowflakes(b.threadId, a.threadId));
-		return this.respond(visible, memberships, userId);
+		return this.respond(visible, memberships, userId, parents, visibility);
 	}
 
 	private async isTimedOut(guildId: GuildID, userId: UserID): Promise<boolean> {
@@ -176,8 +179,13 @@ export class ThreadListService {
 		memberships: Awaited<ReturnType<ThreadListService['memberships']>>,
 		userId: UserID,
 		parents: Array<AuthenticatedChannel['channel']> = [],
+		visibility = new NsfwVisibility(userId, this.ctx.channelRepository, this.ctx.guildRepository),
 	): Promise<ActiveThreadsResponse> {
-		const views = await loadThreadViews(this.ctx.channelRepository, states, parents);
+		const loadedViews = await loadThreadViews(this.ctx.channelRepository, states, parents);
+		const visible = new Set(
+			(await visibility.filter(loadedViews.map((view) => view.channel))).map((channel) => channel.id),
+		);
+		const views = loadedViews.filter((view) => visible.has(view.channel.id));
 		return {
 			threads: views.map((view) => mapThreadToResponse(view)),
 			members: views.flatMap((view) => {

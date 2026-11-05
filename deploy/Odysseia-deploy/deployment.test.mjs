@@ -153,6 +153,8 @@ test('事件发布账号仅订阅专用确认收件箱，Forum 独占固定内�
 	for (const subject of [
 		'rpc.identity.v1.login_eligibility',
 		'rpc.identity.v1.rebind_service',
+		'rpc.preferences.v1.get_service',
+		'rpc.preferences.v1.update_service',
 		'rpc.content.v1.thread.create_service',
 		'rpc.content.v1.thread.move_service',
 		'rpc.content.v1.thread.policy_service',
@@ -259,4 +261,17 @@ test('渲染拒绝超预算、非整数实例和缺失目标主机预算', () =>
 	assert.throws(() => renderOdysseia(resolvedFixture(), template, {instances: 2, hostMemoryMiB: 8192}), /40%/);
 	assert.throws(() => renderOdysseia(resolvedFixture(), template, {instances: 1.5, hostMemoryMiB: 16384}), /integer/);
 	assert.throws(() => renderOdysseia(resolvedFixture(), template, {instances: 2}), /hostMemoryMiB/);
+});
+
+
+test('NSFW preference native schema upgrade and Gateway scope stay explicit', () => {
+ const target = JSON.parse(fs.readFileSync(path.join(root, 'tools/dev/cassandra_target_schema.json'), 'utf8'));
+ const tables = Array.isArray(target) ? target : target.tables;
+ const table = tables.find((entry) => entry.name === 'user_guild_settings');
+ assert.ok(table.columns.some((entry) => entry.name === 'show_nsfw' && entry.type === 'boolean'));
+ assert.ok(table.columns.some((entry) => entry.name === 'nsfw_version' && entry.type === 'bigint'));
+ const upgrade = fs.readFileSync(path.join(root, 'fluxer_api/src/integration/upgrade-v5-nsfw-display.cql'), 'utf8');
+ assert.match(upgrade, /ALTER TABLE user_guild_settings ADD show_nsfw boolean/);
+ assert.match(upgrade, /ALTER TABLE user_guild_settings ADD nsfw_version bigint/);
+ assert.equal(compose.services.gateway.environment.INTEGRATION_GUILD_ID, compose.services.api.environment.INTEGRATION_GUILD_ID);
 });

@@ -4,6 +4,7 @@ import {createInviteCode, type GuildID, type UserID, vanityCodeToInviteCode} fro
 import {Config} from '@app/api/Config';
 import {mapChannelToResponse} from '@app/api/channel/ChannelMappers';
 import {withThreadParentFieldsMany} from '@app/api/channel/services/thread/ThreadParentSettings';
+import {NsfwVisibility} from '@app/api/channel/utils/NsfwVisibility';
 import type {GuildVisitRow} from '@app/api/database/types/GuildVisitTypes';
 import {type ThreadViewer, viewerActive} from '@app/api/experiment/ChannelThreadsGate';
 import {userGuildVisitsActive} from '@app/api/experiment/GuildVisitsGate';
@@ -387,12 +388,15 @@ export class GuildVisitService {
 
 	private async visitorChannels(
 		access: GuildVisitorAccess,
-		params: {guildId: GuildID; viewer: ThreadViewer; requestCache: RequestCache},
+		params: {userId: UserID; guildId: GuildID; viewer: ThreadViewer; requestCache: RequestCache},
 	): Promise<Array<ChannelResponse>> {
 		const channelRepository = getChannelRepository();
 		const channels = await channelRepository.channelData.listGuildChannels(params.guildId, 'enrolled');
 		const byId = new Map(channels.map((channel) => [channel.id, channel]));
-		const visible = channels.filter((channel) => {
+		const displayChannels = await new NsfwVisibility(params.userId, channelRepository, getGuildRepository()).filter(
+			channels,
+		);
+		const visible = displayChannels.filter((channel) => {
 			if (channel.isThreadOnly() && !viewerActive(params.viewer, params.guildId)) return false;
 			const parent =
 				channel.parentId && channel.type !== ChannelTypes.GUILD_CATEGORY ? (byId.get(channel.parentId) ?? null) : null;

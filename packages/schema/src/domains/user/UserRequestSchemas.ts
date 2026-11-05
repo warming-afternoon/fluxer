@@ -476,6 +476,8 @@ const ChannelOverrideSchema = z.object({
 });
 export const UserGuildSettingsUpdateRequest = z
 	.object({
+		show_nsfw: z.boolean().optional(),
+		nsfw_version: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
 		message_notifications: withFieldDescription(UserNotificationSettingsSchema, 'Default guild notification level'),
 		muted: z.boolean().describe('Guild muted'),
 		mute_config: MuteConfigSchema.describe('Guild mute configuration'),

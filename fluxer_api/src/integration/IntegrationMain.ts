@@ -20,6 +20,7 @@ import {
 	getLimitConfigService,
 } from '@app/api/middleware/ServiceSingletons';
 import {initializeSearch, shutdownSearch} from '@app/api/SearchFactory';
+import {UserGuildNsfwRepository} from '@app/api/user/repositories/UserGuildNsfwRepository';
 import {JetStreamWorkerQueue} from '@app/api/worker/JetStreamWorkerQueue';
 import {WorkerService} from '@app/api/worker/WorkerService';
 import {shutdownIntegrationEvents, startIntegrationEvents} from '@app/integration/IntegrationEvents';
@@ -65,6 +66,7 @@ export async function startIntegrationMain(): Promise<() => Promise<void>> {
 		});
 		cleanups.push(shutdownCassandra, shutdownDatabaseQueryExecutor, closeOwnedKVClient);
 		await new IntegrationIdentityRepository().checkHealth();
+		await new UserGuildNsfwRepository().checkHealth();
 		const snowflake = createSnowflakeService();
 		cleanups.push(async () => {
 			await snowflake.shutdown();

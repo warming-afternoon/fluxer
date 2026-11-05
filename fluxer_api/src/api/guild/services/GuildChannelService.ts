@@ -4,6 +4,7 @@ import {type ChannelID, createChannelID, type GuildID, type UserID} from '@app/a
 import {mapChannelToResponse} from '@app/api/channel/ChannelMappers';
 import type {ChannelRepository} from '@app/api/channel/ChannelRepository';
 import {withThreadParentFieldsMany} from '@app/api/channel/services/thread/ThreadParentSettings';
+import {NsfwVisibility} from '@app/api/channel/utils/NsfwVisibility';
 import {SYSTEM_THREAD_VIEWER, type ThreadViewer, viewerActive} from '@app/api/experiment/ChannelThreadsGate';
 import type {GuildAuditLogService} from '@app/api/guild/GuildAuditLogService';
 import type {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
@@ -27,7 +28,7 @@ export class GuildChannelService {
 
 	constructor(
 		private readonly channelRepository: ChannelRepository,
-		guildRepository: GuildRepository,
+		private readonly guildRepository: GuildRepository,
 		private readonly userCacheService: UserCacheService,
 		private readonly gatewayService: IGatewayService,
 		cacheService: ICacheService,
@@ -68,7 +69,12 @@ export class GuildChannelService {
 		});
 		const channels = await this.channelRepository.channelData.listGuildChannels(params.guildId, 'enrolled');
 		const viewer = params.viewer;
-		const viewableChannels = channels.filter(
+		const visibleChannels = await new NsfwVisibility(
+			params.userId,
+			this.channelRepository,
+			this.guildRepository,
+		).filter(channels);
+		const viewableChannels = visibleChannels.filter(
 			(channel) =>
 				viewableChannelIds.includes(channel.id) &&
 				(!channel.isThreadOnly() || !viewer || viewerActive(viewer, params.guildId)),

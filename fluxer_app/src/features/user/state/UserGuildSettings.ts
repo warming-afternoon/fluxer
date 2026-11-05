@@ -29,6 +29,8 @@ export interface ChannelOverride {
 }
 
 interface StoredGuildSettings {
+	show_nsfw?: boolean | null;
+	nsfw_version?: number;
 	guild_id: string;
 	suppress_everyone: boolean;
 	suppress_roles: boolean;
@@ -47,6 +49,8 @@ interface StoredGuildSettings {
 }
 
 export interface GatewayGuildSettings {
+	show_nsfw?: boolean | null;
+	nsfw_version?: number;
 	guild_id: string;
 	suppress_everyone?: boolean;
 	suppress_roles?: boolean;
@@ -313,6 +317,14 @@ class UserGuildSettings {
 	updateGuildSettings(guildId: string | null, updates: Partial<GatewayGuildSettings>): void {
 		const key = this.storageKeyFor(guildId);
 		const existing = this.ensureGuildSettings(key);
+		if (
+			typeof updates.nsfw_version === 'number' &&
+			(updates.nsfw_version < (existing.nsfw_version ?? 0) ||
+				(updates.nsfw_version === existing.nsfw_version && existing.show_nsfw === false && updates.show_nsfw === true))
+		) {
+			const {show_nsfw: _show, nsfw_version: _version, ...ordinary} = updates;
+			updates = ordinary;
+		}
 		const overridesInput = 'channel_overrides' in updates ? updates.channel_overrides : existing.channel_overrides;
 		const merged: StoredGuildSettings = {
 			...existing,

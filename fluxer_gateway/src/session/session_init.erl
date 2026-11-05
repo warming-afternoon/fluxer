@@ -162,7 +162,13 @@ load_relationships(_) ->
 build_state(SessionData) ->
     BuildStartedAt = gateway_timings:start(),
     GwTimings0 = maps:get(gw_timings, SessionData, gateway_timings:new()),
-    BaseState0 = extract_fields(SessionData),
+    Preference = gateway_nsfw_preferences:attach(
+        maps:get(user_id, SessionData),
+        maps:get(forum_nsfw_preference, SessionData, #{}),
+        maps:get(socket_pid, SessionData, undefined)
+    ),
+    BaseState0 = (extract_fields(SessionData))#{forum_nsfw_preference => Preference,
+        forum_nsfw_channels => maps:get(forum_nsfw_channels, SessionData, #{})},
     VoiceQueueState = session_voice:init_voice_queue(),
     BaseState = maps:merge(BaseState0, VoiceQueueState),
     GwTimings = gateway_timings:record_function(

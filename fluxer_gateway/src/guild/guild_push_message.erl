@@ -76,7 +76,11 @@ push_params(#{
     DefaultMessageNotifications = maps:get(<<"default_message_notifications">>, Guild, 0),
     GuildName = maps:get(<<"name">>, Guild, <<"Unknown">>),
     #{
-        message_data => MessageData,
+        message_data => MessageData#{<<"__nsfw_sensitive">> =>
+            gateway_nsfw_preferences:channel_sensitive(
+                snowflake_id:parse_optional(maps:get(<<"channel_id">>, MessageData, undefined)),
+                #{id => GuildId, data => Data}
+            )},
         guild_id => GuildId,
         author_id => AuthorId,
         guild_default_notifications => DefaultMessageNotifications,

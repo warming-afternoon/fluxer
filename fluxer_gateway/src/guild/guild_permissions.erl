@@ -42,6 +42,12 @@ get_member_permissions(UserId, ChannelId, State) ->
 -spec compute_member_permissions(user_id(), maybe_channel_id(), maybe_member(), guild_state()) ->
     permission().
 compute_member_permissions(UserId, ChannelId, ProvidedMember, State) ->
+    gateway_nsfw_preferences:apply_permissions(
+        unfiltered_member_permissions(UserId, ChannelId, ProvidedMember, State),
+        UserId, ChannelId, State
+    ).
+
+unfiltered_member_permissions(UserId, ChannelId, ProvidedMember, State) ->
     case thread_for_channel(ChannelId, State) of
         undefined ->
             overwrite_permissions(
@@ -65,6 +71,12 @@ member_base_permissions(_, _, _) ->
 -spec channel_permissions(base_permissions(), user_id(), maybe_channel_id(), guild_state()) ->
     permission().
 channel_permissions(Base, UserId, ChannelId, State) ->
+    gateway_nsfw_preferences:apply_permissions(
+        unfiltered_channel_permissions(Base, UserId, ChannelId, State),
+        UserId, ChannelId, State
+    ).
+
+unfiltered_channel_permissions(Base, UserId, ChannelId, State) ->
     case thread_for_channel(ChannelId, State) of
         undefined ->
             overwrite_permissions(Base, UserId, ChannelId, State);

@@ -174,7 +174,7 @@ get_guild_state(UserId, State) ->
 
 -spec get_guild_state(integer(), guild_state(), map()) -> map().
 get_guild_state(UserId, State, Opts) ->
-    GuildState = base_guild_state(UserId, State),
+    GuildState = session_nsfw_backstop:attach_snapshot(base_guild_state(UserId, State), State),
     case guild_thread_gate:needs_variant(State) of
         false -> GuildState;
         true -> apply_thread_view(UserId, Opts, State, GuildState)

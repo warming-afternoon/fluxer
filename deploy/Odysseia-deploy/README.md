@@ -75,3 +75,12 @@ API、worker 和 integration 均需具备各自事件发布凭据、专用确认
 ## Gateway memory limit
 
 The default Gateway memory limit is 10 GiB. Set `FLUXER_GATEWAY_MEMORY_LIMIT` to override this container limit. The separate memory reservation defaults to 384 MiB and can be overridden with `FLUXER_GATEWAY_MEMORY_RESERVATION`; changing the limit does not change the reservation.
+
+
+## 独立 NSFW 显示偏好
+
+本地候选增加原生 `user_guild_settings.show_nsfw/nsfw_version`，仅明确的 `INTEGRATION_GUILD_ID` 生效；它不是年龄证明。现有库须在新 API 启动前执行一次 `fluxer_api/src/integration/upgrade-v5-nsfw-display.cql`（全新目标 schema 已含列），不可只运行 CREATE TABLE IF NOT EXISTS。同步更新先关闭并确认旧 Gateway 会话/重放，再写原生 CAS；故障可能保持关闭，使用同一版本安全重试，不承诺跨库回滚。Forum 只调用明确列出的 preferences RPC，Bot 无权调用。
+
+部署顺序、离线授权、集群预期节点、故障恢复及已签发媒体 URL 的边界见 `docs/maintenance/forum-nsfw-display-preference.md`。必须先排空/替换旧 Gateway，再开放新偏好写入。多节点集群须配置实现要求的预期节点列表，失联不得当作撤销完成。
+
+Clustered Gateway synchronization requires `INTEGRATION_NSFW_GATEWAY_NODES`, a comma-separated list of complete Erlang node names, for example `gateway@10.0.0.11,gateway@10.0.0.12`. Configure the full expected set on every node and pass it into each container. The bundled Compose file passes the variable through; its default is a single non-clustered Gateway. A missing expected set in cluster mode fails closed.

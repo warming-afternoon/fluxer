@@ -2,7 +2,7 @@
 
 使用现有 `fluxer_api` 构建流程，在 API 镜像中运行 `node dist/IntegrationEntrypoint.js`。开发命令为 `pnpm --filter fluxer_api start:integration`。集成进程复用原生仓储、Snowflake ID、账户初始化、资产存储、密码逻辑和会话，不启动原生公共 API 或定时任务。
 
-先使用最新原生目标 schema 创建或升级原生库；已有原生库也可逐条执行一次 `upgrade-v3-thread-policy.cql` 补齐 thread 原生基态列。全新集成部署再应用 `schema.cql`；已安装第一版身份表的环境先逐条执行一次 `upgrade-v2.cql`，再应用 `schema.cql` 创建新增表。不能只运行 `CREATE TABLE IF NOT EXISTS` 升级既有列。身份权威存储仅支持 Cassandra。现有内部 NATS/JetStream 配置保持独立，原生服务、网关调用和任务发布仍使用内部代理。
+先使用最新原生目标 schema 创建或升级原生库；已有原生库也可逐条执行一次 `upgrade-v3-thread-policy.cql` 补齐 thread 原生基态列。全新集成部署再应用 `schema.cql`；已安装第一版身份表的环境先逐条执行一次 `upgrade-v2.cql`，再应用 `schema.cql` 创建新增表。已有集成身份表还须逐条执行一次 `upgrade-v4-forum-guild.cql`，增加首次创建来源和目标服务器列；不回填历史行。不能只运行 `CREATE TABLE IF NOT EXISTS` 升级既有列。身份权威存储仅支持 Cassandra。现有内部 NATS/JetStream 配置保持独立，原生服务、网关调用和任务发布仍使用内部代理。
 
 | 环境变量 | 含义 |
 | --- | --- |
@@ -13,7 +13,7 @@
 | `INTEGRATION_ALLOWED_REPLY_PREFIXES` | 默认 `_INBOX.forum.,_INBOX.bot.` |
 | `INTEGRATION_FORUM_REPLY_PREFIX` | 默认 `_INBOX.forum.`；所有鉴权 RPC 只能回复到此命名空间 |
 | `INTEGRATION_HEALTH_PORT` | 默认 8091；提供 `GET /_ready` 和 `GET /_live` |
-| `INTEGRATION_GUILD_ID` | 内容操作唯一允许的服务器 |
+| `INTEGRATION_GUILD_ID` | 明确指定 Forum 新账号自动加入及内容操作唯一允许的服务器；不得按现有唯一服务器推断 |
 | `INTEGRATION_FORUM_CHANNEL_IDS` | 逗号分隔的四个原生论坛 ID，分别对应普通、普通 NSFW、深渊、深渊 NSFW；未配置时内容操作失败关闭 |
 | `FLUXER_THREAD_POLICY_ENABLED` | 安装 schema 后在 API、worker 和 integration 一致设为 `true`，启用原生 thread 策略与合并主帖能力 |
 
@@ -55,6 +55,20 @@ Bot 预建与 Forum 外部登录共用 `ensureDiscordAccount`。每个 Discord �
 初始账户没有密码、合成邮箱或共享密码，使用原生用户名预留、条件创建、索引和默认设置。显示名经过原生校验；首次创建优先使用 Discord 用户名（支持字母、数字、下划线及句点，最长 32 位），仅在原生大小写不敏感的重名检查确认冲突时添加稳定的原生 ID 后缀，后缀占用时按序追加尝试号。原生不接受的字符、超长名及保留字先按原生校验降级；名字锁繁忙或存储故障不能误判为重名。创建和 pending 恢复期间均在对应名字锁释放前写入用户名索引；持锁后原生名字已变化时释放旧锁并重新预留当前名。用户行已提交、索引尚未发布期间若名字被其他账号占用，恢复返回不可重试的 `IDENTITY_CONFLICT`，保留原 ID、资料和 pending 状态，不发布冲突索引，也不擅自改名；需要受信操作人员核查并解除冲突后再恢复。绑定中的 username 保存首次首选名，实际账号及后续重试以原生用户行为准；已存在绑定和用户自改资料不随新规则改名。原生名字锁仍使用现有缓存租约；跨存储故障恢复不新增持久唯一性协议。头像只从对应 Discord 身份的 CDN 路径导入，禁止重定向、限制为 2 MiB，并经过原生资产处理。没有自定义头像时传 `null`。后续资料以 Fluxer 为权威，不由 Discord 登录覆盖。
 
 交换元数据永久占用操作 ID，令牌密文十分钟过期，并以交换 ID 作为认证附加数据。密文在唯一一次原生会话创建尝试之前持久化。创建结果不确定时重试相同交换，服务只检查原先准备的令牌，不创建第二个会话。`EXCHANGE_UNCERTAIN` 表示尚未观察到已持久化会话；如果原操作始终没有提交，需要重新完成显式身份验证以开始新登录。重放不能复活已撤销会话。各副本及重试期间必须保持加密密钥稳定。
+
+## Forum 新账号自动加入
+
+只有 `rpc.auth.v1.external.exchange` 在**首次占用**身份时标记 `creation_source=forum`，并持久固定当时的 `creation_guild_id`。必须显式配置有效且存在的 `INTEGRATION_GUILD_ID`；未配置时新 Forum 建号失败关闭，不猜测唯一 guild。若实例启用了单社区模式，其 `single_community_guild_id` 必须与此配置一致。正式和隔离测试分别配置各自的目标，代码没有测试环境特例。
+
+自动加入是账号初始化阶段，在绑定变为 ready 和签发新会话之前完成。普通 Bot `ensure_discord`、管理员 rebind、历史空来源、已有 ready 账号的后续登录均不获得新的入群资格；Bot 不能代为完成尚未结束的 Forum 初始化。Bot 已预建的 ready 账号如需加入，必须由单独授权的迁移/成员操作处理。已完成入群后主动退群、被踢或被封不会因普通登录被拉回。
+
+底层复用原生 `GuildMemberService.addUserToGuild`，与原生 SSO 单社区使用同一成员服务，但不采用会吞掉失败且跳过部分账号限制的 stock-community 包装。所有 ban、账号限制、个人 guild 数及 guild 容量检查保留；`ADMIN_FORCE_ADD` 仅记录来源类型，不意味着绕过限制。不授予管理员或其他额外角色，也不批量调用 Admin force-add API。
+
+初始化先把稳定 joined_at、已有成员状态及 last_left_at 快照写入永久操作日志。重试保留原生成员昵称、角色、timeout 和显式 guild 设置，只补反向索引、必要默认设置及原生 ADD/presence 状态。成员创建使用条件写入。主成员服务的 join/leave/kick/ban 共用有界等待的缓存租约并在副作用前续租；退群/踢出/封禁修改后的恢复计划失败关闭。恢复模式禁止 skip 校验，超过成员离开元数据保留期的旧计划需重新审核。
+
+网关 ADD 与 presence join 可重放状态，但事件交付是至少一次，不承诺仅广播一次。自动加入不发欢迎消息；真正的中断恢复会扫描权威成员数以消除增量是否提交的不确定性，正常首次加入不扫描整 guild。大型 guild 恢复可能较慢。租约不是跨数据库/网关的 fencing 事务；后台直接删除和启动时计数修复并未全部纳入此锁，原生 member_count 仍是可修复投影。必须独立验证真实 Cassandra/缓存/消息代理/网关故障恢复。
+
+已有部署先备份并升级列，排空并替换全部旧 integration 副本，再开放新 Forum 创建。不要混跑会忽略新来源字段的旧集成进程。既有保留用户补入是另一项审核迁移：必须覆盖用户名 noop 用户，保留 ready 绑定，不伪造来源字段；先审目标 guild、精确保留清单、现有成员与禁封状态，再使用不跳校验的成员操作。
 
 ## 受限内容 RPC
 

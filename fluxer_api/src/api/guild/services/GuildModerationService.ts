@@ -4,6 +4,7 @@ import type {GuildID, UserID} from '@app/api/BrandedTypes';
 import {isIpBanExempt} from '@app/api/ban/IpBanExemptions';
 import {SYSTEM_USER_ID} from '@app/api/constants/Core';
 import type {GuildAuditLogService} from '@app/api/guild/GuildAuditLogService';
+import {withGuildMembershipLock} from '@app/api/guild/GuildMembershipLock';
 import {mapGuildBansToResponse} from '@app/api/guild/GuildModel';
 import type {GuildRepository} from '@app/api/guild/repositories/GuildRepository';
 import {assertNotBannedFromGuild} from '@app/api/guild/services/GuildBanChecks';
@@ -43,6 +44,17 @@ interface GuildBanOptions {
 	reason?: string | null;
 	banDurationSeconds?: number;
 }
+
+type ApplyGuildBanParams = GuildBanOptions & {
+	targetId: UserID;
+	guildId: GuildID;
+	actorId: UserID;
+	by: BanBy;
+	targetUser: User;
+	targetMember: GuildMember | null;
+	guild: Guild | null;
+	guildAuditLogReason: string | null;
+};
 
 export class GuildModerationService {
 	private readonly searchIndexService: GuildMemberSearchIndexService;
@@ -118,18 +130,20 @@ export class GuildModerationService {
 		});
 	}
 
-	private async applyBan(
-		params: GuildBanOptions & {
-			targetId: UserID;
-			guildId: GuildID;
-			actorId: UserID;
-			by: BanBy;
-			targetUser: User;
-			targetMember: GuildMember | null;
-			guild: Guild | null;
-			guildAuditLogReason: string | null;
-		},
-	): Promise<void> {
+	private async applyBan(params: ApplyGuildBanParams): Promise<void> {
+		return withGuildMembershipLock(params.guildId, async (assertHeld) => {
+			await assertHeld();
+			await this.applyBanLocked(
+				{
+					...params,
+					targetMember: await this.guildRepository.getMember(params.guildId, params.targetId),
+				},
+				assertHeld,
+			);
+		});
+	}
+
+	private async applyBanLocked(params: ApplyGuildBanParams, assertHeld: () => Promise<void>): Promise<void> {
 		const {
 			actorId,
 			guildId,
@@ -160,6 +174,7 @@ export class GuildModerationService {
 			expiresAt = new Date(Date.now() + banDurationSeconds * 1000);
 		}
 		const targetModerator = await this.isGuildModerator(guildId, targetId, guildBeforeBan, targetMember !== null);
+		await assertHeld();
 		const ban = await this.guildRepository.upsertBan({
 			guild_id: guildId,
 			user_id: targetId,
@@ -174,6 +189,7 @@ export class GuildModerationService {
 			effectiveDeleteMessageSeconds && effectiveDeleteMessageSeconds > 0
 				? {delete_message_seconds: String(effectiveDeleteMessageSeconds)}
 				: undefined;
+		await assertHeld();
 		await this.guildAuditLogService.record({
 			guildId,
 			userId: actorId,
@@ -183,6 +199,7 @@ export class GuildModerationService {
 			metadata,
 			changes: this.guildAuditLogService.computeChanges(null, this.serializeBanForAudit(ban)),
 		});
+		await assertHeld();
 		await emitGuildMemberBanned({
 			guildId,
 			userId: targetId,
@@ -193,6 +210,7 @@ export class GuildModerationService {
 			bannedAt: ban.bannedAt,
 			expiresAt: ban.expiresAt,
 		});
+		await assertHeld();
 		await this.gatewayService.dispatchGuild({
 			guildId,
 			event: 'GUILD_BAN_ADD',
@@ -201,18 +219,36 @@ export class GuildModerationService {
 				user: {id: targetId.toString()},
 			},
 		});
+		await assertHeld();
 		await onGuildBanAdded({guildId, targetUserId: targetId, targetIp, gateway: this.gatewayService});
 		if (targetMember) {
+			await assertHeld();
+			const metadata = await this.guildRepository.getMembershipMetadata(guildId, targetId);
+			await assertHeld();
+			await this.guildRepository.upsertMembershipMetadata(
+				{
+					guild_id: guildId,
+					user_id: targetId,
+					communication_disabled_until: targetMember.communicationDisabledUntil,
+					first_joined_at: metadata?.first_joined_at ?? targetMember.joinedAt,
+					last_left_at: new Date(Math.max(Date.now(), (metadata?.last_left_at?.getTime() ?? 0) + 1)),
+				},
+				365 * 24 * 60 * 60,
+			);
+			await assertHeld();
 			await this.guildRepository.deleteMember(guildId, targetId);
 			const guild = await this.guildRepository.findUnique(guildId);
 			if (guild) {
+				await assertHeld();
 				await this.guildRepository.upsertPartial(
 					guildId,
 					{member_count: Math.max(0, guild.memberCount - 1)},
 					guild.toRow(),
 				);
 			}
+			await assertHeld();
 			await this.dispatchGuildMemberRemove({guildId, userId: targetId});
+			await assertHeld();
 			await this.gatewayService.leaveGuild({userId: targetId, guildId});
 			const guildForSearch = await this.guildRepository.findUnique(guildId);
 			if (guildForSearch) {

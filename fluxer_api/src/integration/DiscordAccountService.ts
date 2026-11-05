@@ -5,6 +5,7 @@ import {createUserID, type UserID} from '@app/api/BrandedTypes';
 import {discordUsernameBase} from '@app/integration/DiscordUsername';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {publishIntegrationEvent} from '@app/integration/IntegrationEvents';
+import {IntegrationGuildMembershipService} from '@app/integration/IntegrationGuildMembershipService';
 import {type DiscordBinding, IntegrationIdentityRepository} from '@app/integration/IntegrationIdentityRepository';
 import type {DiscordProfile} from '@app/integration/IntegrationSchemas';
 import {NativeAccountRepository} from '@app/integration/NativeAccountRepository';
@@ -33,13 +34,20 @@ export class DiscordAccountService {
 		private readonly context: ApiContext,
 		private readonly identities = new IntegrationIdentityRepository(),
 		private readonly native = new NativeAccountRepository(context),
+		private readonly membership = new IntegrationGuildMembershipService(context),
 	) {}
 
 	/** Bot 预建和 Forum 登录共享唯一账户创建路径 */
-	async ensureDiscordAccount(discordId: string, profile: DiscordProfile, operationId: string) {
+	async ensureDiscordAccount(
+		discordId: string,
+		profile: DiscordProfile,
+		operationId: string,
+		source: 'forum' | 'other' = 'other',
+	) {
 		// 首次占用保存初始资料，后续请求沿用原绑定以恢复中断的创建。
 		let binding = await this.identities.find(discordId);
 		if (!binding) {
+			const guildId = source === 'forum' ? await this.membership.configuredTarget() : null;
 			const userId = createUserID(await this.context.services.snowflake.generate());
 			const username = discordUsernameBase(profile.username);
 			const displayName = GlobalNameType.safeParse(profile.display_name);
@@ -49,6 +57,7 @@ export class DiscordAccountService {
 				operationId,
 				{...profile, display_name: displayName.success ? displayName.data : null},
 				username,
+				{source, guildId},
 			);
 		}
 		// 完成的绑定只读取原生账户，不能重新建号或覆盖已经修改的资料。
@@ -58,8 +67,11 @@ export class DiscordAccountService {
 			await this.publishBinding(binding, user.id);
 			return {user, created: false, binding};
 		}
+		if (binding.creation_source === 'forum' && source !== 'forum')
+			throw new IntegrationError('IDENTITY_BUSY', 'Forum account initialization must resume through Forum', true);
 		await this.identities.ensureReverse(binding);
 		const user = await this.native.initialize(binding);
+		if (binding.creation_source === 'forum') await this.membership.ensureForCreation(binding);
 		await this.identities.complete(binding);
 		await this.publishBinding(binding, user.id);
 		return {user, created: binding.operation_id === operationId, binding};

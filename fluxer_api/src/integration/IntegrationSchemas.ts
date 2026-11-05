@@ -8,7 +8,7 @@ import {z} from 'zod';
 export const IdentityId = z
 	.string()
 	.regex(/^[1-9][0-9]{0,19}$/)
-	.refine((id) => BigInt(id) <= 9223372036854775807n);
+	.refine((id) => /^[1-9][0-9]{0,19}$/.test(id) && BigInt(id) <= 9223372036854775807n);
 export const OperationId = z
 	.string()
 	.min(16)

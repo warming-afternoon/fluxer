@@ -232,6 +232,7 @@ export class IntegrationService {
 						request.discord_user_id,
 						request.profile,
 						request.exchange_id,
+						'forum',
 					);
 					record = await this.exchanges.allocate(request.exchange_id, fingerprint, user.id);
 				}

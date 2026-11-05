@@ -236,12 +236,11 @@ export class GuildOperationsService {
 	async getGuild(params: {userId: UserID; guildId: GuildID}): Promise<GuildResponse> {
 		const guild = await this.helpers.getGuildData(params);
 		if (!isNsfwVisibilityGuild(params.guildId) || !guild.channels?.length) return guild;
-		const channels = await this.channelRepository.channelData.listChannels(
+		const visibility = new NsfwVisibility(params.userId, this.channelRepository, this.guildRepository);
+		const channels = await visibility.readChannels(
 			guild.channels.map((channel) => createChannelID(BigInt(channel.id))),
 		);
-		const visible = await new NsfwVisibility(params.userId, this.channelRepository, this.guildRepository).filter(
-			channels,
-		);
+		const visible = await visibility.filter(channels);
 		const visibleIds = new Set(visible.map((channel) => channel.id.toString()));
 		return {...guild, channels: guild.channels.filter((channel) => visibleIds.has(channel.id))};
 	}

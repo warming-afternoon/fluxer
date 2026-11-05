@@ -92,10 +92,9 @@ export class GlobalSearchService {
 	}): Promise<MessageSearchResponse> {
 		let requestedChannelIds = params.requestedChannelIds;
 		if (requestedChannelIds?.length) {
-			const channels = await this.channelRepository.channelData.listChannels(requestedChannelIds);
-			const visible = new Set(
-				(await new NsfwVisibility(params.userId, this.channelRepository).filter(channels)).map((channel) => channel.id),
-			);
+			const visibility = new NsfwVisibility(params.userId, this.channelRepository);
+			const channels = await visibility.readChannels(requestedChannelIds);
+			const visible = new Set((await visibility.filter(channels)).map((channel) => channel.id));
 			const hidden = new Set(channels.filter((channel) => !visible.has(channel.id)).map((channel) => channel.id));
 			requestedChannelIds = requestedChannelIds.filter((id) => !hidden.has(id));
 			if (requestedChannelIds.length === 0) return emptyMessageSearchResponse(params.searchParams);

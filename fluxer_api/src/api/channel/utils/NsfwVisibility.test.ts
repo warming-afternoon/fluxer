@@ -26,14 +26,16 @@ function channel(id: bigint, values: Partial<Channel> = {}): Channel {
 function setup(showNsfw: unknown = null, guildNsfw = false, channels: Array<Channel> = []) {
 	const findGuildSettings = vi.fn().mockResolvedValue(showNsfw === null ? null : {showNsfw});
 	const findUnique = vi.fn(async (id: bigint) => channels.find((item) => item.id === id) ?? null);
+	const listChannels = vi.fn(async (ids: Array<bigint>) => channels.filter((item) => ids.includes(item.id)));
 	const findGuild = vi.fn().mockResolvedValue({nsfw: guildNsfw});
-	const repository = {channelData: {findUnique}} as unknown as ChannelRepository;
+	const repository = {channelData: {findUnique, listChannels}} as unknown as ChannelRepository;
 	const guilds = {findUnique: findGuild} as unknown as GuildRepository;
 	const settings = {findGuildSettings} as unknown as UserSettingsRepository;
 	return {
 		visibility: new NsfwVisibility(userId, repository, guilds, settings),
 		findGuildSettings,
 		findUnique,
+		listChannels,
 		findGuild,
 		fresh: () => new NsfwVisibility(userId, repository, guilds, settings),
 	};
@@ -92,6 +94,13 @@ describe('authoritative per-user NSFW display visibility', () => {
 		s.findGuildSettings.mockResolvedValue({showNsfw: true});
 		await expect(s.fresh().isVisible(nsfw)).resolves.toBe(true);
 		expect(s.findGuildSettings).toHaveBeenCalledTimes(2);
+	});
+	it('maps newly introduced batch classification failures to unavailable', async () => {
+		const target = channel(1n, {nsfwOverride: true});
+		const s = setup(false, false, [target]);
+		await expect(s.visibility.readChannels([target.id])).resolves.toEqual([target]);
+		s.listChannels.mockRejectedValue(new Error('classification offline'));
+		await expect(s.visibility.readChannels([target.id])).rejects.toMatchObject({status: 503});
 	});
 	it.each(['setting', 'guild', 'parent'])(
 		'reports a dependency failure, never pretend-404/success: %s',

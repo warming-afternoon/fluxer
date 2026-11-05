@@ -33,6 +33,11 @@ export class NsfwVisibility {
 		> = new UserSettingsRepository(),
 	) {}
 
+	/** New classification reads must fail as an unavailable dependency, never bypass filtering. */
+	async readChannels(channelIds: Array<ChannelID>): Promise<Array<Channel>> {
+		return this.readDependency(() => this.channelRepository.channelData.listChannels(channelIds));
+	}
+
 	async assertVisible(channel: Channel): Promise<void> {
 		if (!(await this.isVisible(channel))) throw new UnknownChannelError();
 	}

@@ -87,7 +87,7 @@ Bot 预建与 Forum 外部登录共用 `ensureDiscordAccount`。每个 Discord �
 
 `initial_policies` 最多一百项，每项为 `{source,policy_version,target_user_id,active,expires_at?}`，仅表示用户发言处罚，不接受任意策略类型。受信 Forum 在作品级串行事务中给创建任务保存完整快照；Fluxer 用已持久化的预分配 ID，在原生频道、首帖和网关事件出现前落全部初始处罚，再检查创建人能否创建。中断重试沿用同一 ID 与版本，旧快照不会覆盖更新的处罚。Discord 主来源作品的处罚仅作用于 Forum 和 Fluxer 子卡帖，不能操作 Discord 主帖。后续新增处罚与创建完成之间的并发差异仍由 Forum 的可靠任务和版本对账补齐。
 
-子帖使用 `defer_open:true`：创建前保存独立 `forum_initializing` 来源，初始版本为零；首次网关创建事件前投影为真实锁定/归档，只有该内部创建流程能忽略这一来源写首帖，其他锁、用户处罚和原生权限仍检查。RPC 返回 `deferred_open:true`，不会自行开放。Forum 持久排入当前完整处罚任务，只有前置任务全部完成才用正 `policy_version` 撤销 `forum_initializing`；失败保持关闭。零版本初始化重试不能覆盖较新的解除记录，完成 RPC 重放也不重新锁帖。这样创建意图之后新增的处罚也必须在新子帖开放前对齐。
+子帖使用 `defer_open:true`：创建前保存独立 `forum_initializing` 来源，初始版本为 1；首次网关创建事件前投影为真实锁定/归档，只有该内部创建流程能忽略这一来源写首帖，其他锁、用户处罚和原生权限仍检查。RPC 返回 `deferred_open:true`，不会自行开放。Forum 持久排入当前完整处罚任务，只有前置任务全部完成才用现有 Forum 任务 ID 作为正 `policy_version` 撤销 `forum_initializing`；失败保持关闭。版本 1 初始化重试不能覆盖较新的解除记录，完成 RPC 重放也不重新锁帖。这样创建意图之后新增的处罚也必须在新子帖开放前对齐。
 
 `kind:"deny_send"` 必须有 `target_user_id`，只禁止该 thread 下发言及新建子帖，不额外禁止正文编辑、读取、收藏、反应或标签；锁定与归档仍按各自规则禁止正文编辑。`kind:"lock"` 不填写目标用户，以 `user_id=0` 保存 thread 级外部来源。服务读取全部持久有效来源，把实际原生 `locked/archived` 投影为“原生基态或外部锁”，同步活动/归档索引、自动归档队列、搜索及网关。原生基态分别保存在 `native_locked/native_archived`；外部生效时原生管理员设置的锁/归档也保留为新基态，不能用原生 unarchive 绕过外部限制。解除一个外部来源不会清除另一个来源或原生基态。首期锁是显式解除，不接受非空 `expires_at`；用户发言处罚仍支持期限。
 
@@ -146,3 +146,5 @@ Both native Fluxer and Forum preference updates use `NsfwDisplayPreferenceServic
 Success requires `{ok: true, data: {user_id, guild_id, show_nsfw, nsfw_version}}` matching the requested identity, scope, boolean and version exactly. A newer Forum version is not success for an older request. Timeout, malformed or mismatched replies retain the durable native intent; reconciliation reads and retries the latest native winner rather than overwriting it. Gateway fencing always precedes Forum application, including CAS-loser recovery.
 
 The requester shares the existing per-process integration publisher connection and server identity. Connection setup is bounded to 3 seconds, each apply request to 8 seconds, with at most 32 apply requests in flight per process. Missing broker URL or credentials fails closed. The deployed ACL permits only `fluxer-api`, `fluxer-worker` and `fluxer-integration` to publish this subject; only `forum-service` subscribes, with bounded reply permission (15 seconds). Forum and bot clients cannot publish this subject. Deploy the Forum receiver and compatible ACL before enabling this synchronized update path; during an unavailable receiver, native changes remain durable but requests fail rather than reporting false synchronization.
+
+默认非延迟创建在成功结果持久化后，以内部版本 2 解除自身 `forum_initializing` 锁。仓储仍只接受正安全整数版本，不允许将全局规则改为接受零。延迟开放继续使用 Forum 任务 ID 版本，不使用内部版本 2 替代；部署前须核对这些任务 ID 严格大于初始化版本 1。

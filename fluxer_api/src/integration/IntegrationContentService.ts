@@ -180,7 +180,8 @@ export class IntegrationContentService {
 			source: 'forum_initializing',
 			kind: 'lock',
 			active: false,
-			version: 1,
+			// 解锁版本高于初始化加锁版本，防止迟到的加锁请求覆盖完成状态。
+			version: 2,
 			expires_at: null,
 		});
 		await new ThreadPolicyProjectionService(this.context).project(createChannelID(BigInt(threadId)));
@@ -342,7 +343,8 @@ export class IntegrationContentService {
 								source: 'forum_initializing',
 								kind: 'lock',
 								active: true,
-								version: 0,
+								// 从正版本开始初始化策略，满足仓库的版本校验。
+								version: 1,
 								expires_at: null,
 							});
 						}

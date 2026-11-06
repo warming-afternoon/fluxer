@@ -138,3 +138,11 @@ API、worker 和 integration 进程启动时恢复日志。每秒推进一个分
 原生 `user_guild_settings.show_nsfw/nsfw_version`，仅明确的 `INTEGRATION_GUILD_ID` 生效；它不是年龄证明。现有库须在新 API 启动前执行一次 `fluxer_api/src/integration/upgrade-v5-nsfw-display.cql`（全新目标 schema 已含列），不可只运行 CREATE TABLE IF NOT EXISTS。同步更新先关闭并确认旧 Gateway 会话/重放，再写原生 CAS；故障可能保持关闭，使用同一版本安全重试，不承诺跨库回滚。Forum 只调用明确列出的 preferences RPC，Bot 无权调用。
 
 部署顺序、离线授权、集群预期节点、故障恢复及已签发媒体 URL 的边界见 `docs/maintenance/forum-nsfw-display-preference.md`。必须先排空/替换旧 Gateway，再开放新偏好写入。多节点集群须配置实现要求的预期节点列表，失联不得当作撤销完成。
+
+### Bidirectional Forum NSFW switch synchronization
+
+Both native Fluxer and Forum preference updates use `NsfwDisplayPreferenceService` and the same Cassandra version authority. After the gateway replay fence is confirmed, Fluxer sends `rpc.forum.v1.nsfw.apply` with exactly `{version: 1, request_id, user_id, guild_id, show_nsfw, nsfw_version}`. The target remains the explicit `INTEGRATION_GUILD_ID`. Forum persists only this display preference and its version guard; it must not call Fluxer back from this receiver.
+
+Success requires `{ok: true, data: {user_id, guild_id, show_nsfw, nsfw_version}}` matching the requested identity, scope, boolean and version exactly. A newer Forum version is not success for an older request. Timeout, malformed or mismatched replies retain the durable native intent; reconciliation reads and retries the latest native winner rather than overwriting it. Gateway fencing always precedes Forum application, including CAS-loser recovery.
+
+The requester shares the existing per-process integration publisher connection and server identity. Connection setup is bounded to 3 seconds, each apply request to 8 seconds, with at most 32 apply requests in flight per process. Missing broker URL or credentials fails closed. The deployed ACL permits only `fluxer-api`, `fluxer-worker` and `fluxer-integration` to publish this subject; only `forum-service` subscribes, with bounded reply permission (15 seconds). Forum and bot clients cannot publish this subject. Deploy the Forum receiver and compatible ACL before enabling this synchronized update path; during an unavailable receiver, native changes remain durable but requests fail rather than reporting false synchronization.

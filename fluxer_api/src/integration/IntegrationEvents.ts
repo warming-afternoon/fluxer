@@ -5,13 +5,14 @@ import {Logger} from '@app/api/Logger';
 import {IntegrationCreationEventGate} from '@app/integration/IntegrationCreationEventGate';
 import {IntegrationEventJournal, type JournalEvent} from '@app/integration/IntegrationEventJournal';
 import {INTEGRATION_QUERY_OPTIONS} from '@app/integration/IntegrationIdentityRepository';
+import {
+	getIntegrationNatsConnection,
+	shutdownIntegrationNatsConnection,
+} from '@app/integration/IntegrationNatsConnection';
 import {IntegrationReconciliation} from '@app/integration/IntegrationReconciliation';
 import {jetstream} from '@nats-io/jetstream';
-import {connect, type NatsConnection} from '@nats-io/transport-node';
 import {getClient} from '@pkgs/cassandra/src/Client';
 
-/** 跨批次复用发布连接，连接失败后允许重建 */
-let connection: Promise<NatsConnection> | null = null;
 /** 阻止关闭期间启动新的恢复或即时投递 */
 let stopped = false;
 /** 每秒触发一次有界恢复的定时器 */
@@ -66,19 +67,7 @@ async function deliver(event: JournalEvent): Promise<void> {
 		);
 		if (state.first()?.created_at != null) return;
 	}
-	connection ??= connect({
-		servers: process.env.INTEGRATION_NATS_URL,
-		user: process.env.INTEGRATION_NATS_USER,
-		pass: process.env.INTEGRATION_NATS_PASSWORD,
-		name: 'fluxer-durable-event-publisher',
-		inboxPrefix: process.env.INTEGRATION_EVENT_INBOX_PREFIX || '_INBOX.integration',
-		timeout: 3000,
-		maxReconnectAttempts: -1,
-	}).catch((error: unknown) => {
-		connection = null;
-		throw error;
-	});
-	const client = await connection;
+	const client = await getIntegrationNatsConnection();
 	await jetstream(client).publish(event.subject, event.payload, {msgID: String(data.event_id), timeout: 3000});
 	await new IntegrationEventJournal().acknowledge(event);
 }
@@ -179,7 +168,5 @@ export async function shutdownIntegrationEvents(): Promise<void> {
 	clearInterval(timer);
 	timer = undefined;
 	await running;
-	const pending = connection;
-	connection = null;
-	if (pending) await (await pending.catch(() => null))?.drain();
+	await shutdownIntegrationNatsConnection();
 }

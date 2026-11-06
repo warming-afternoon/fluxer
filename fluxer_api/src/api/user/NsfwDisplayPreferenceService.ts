@@ -8,6 +8,7 @@ import type {UserGuildSettings} from '@app/api/models/UserGuildSettings';
 import {forumNsfwGuildId} from '@app/api/user/NsfwDisplayScope';
 import {UserGuildNsfwRepository} from '@app/api/user/repositories/UserGuildNsfwRepository';
 import {dispatchUserGuildSettingsUpdate} from '@app/api/user/UserGuildSettingsThreadView';
+import {syncForumNsfwPreference} from '@app/integration/ForumNsfwPreferenceClient';
 import {IntegrationError} from '@app/integration/IntegrationError';
 import {IntegrationEventJournal} from '@app/integration/IntegrationEventJournal';
 
@@ -99,6 +100,8 @@ export async function syncNsfwPreference(
 		!(response && typeof response === 'object' && 'success' in response && response.success === true)
 	)
 		throw new IntegrationError('UNAVAILABLE', 'Gateway preference synchronization is unconfirmed', true);
+	// Forum 确认同一权威版本后，调用方才能清除持久化恢复意图。
+	await syncForumNsfwPreference(userId, guildId, show, version);
 }
 
 /** 仅重放原始持久化意图，不覆盖更新的原生偏好版本。 */

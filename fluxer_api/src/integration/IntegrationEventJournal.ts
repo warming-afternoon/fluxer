@@ -76,10 +76,10 @@ export class IntegrationEventJournal {
 		}
 	}
 
-	/** 在返回调用方前持久化认证事件，失败不能静默退化为尽力发布 */
-	async enqueue(subject: string, data: Record<string, unknown>, eventId: string): Promise<void> {
+	/** 持久化待发送事件，调用方可保留原生操作时间用于历史统计 */
+	async enqueue(subject: string, data: Record<string, unknown>, eventId: string, occurredAt?: string): Promise<void> {
 		const shard = createHash('sha256').update(eventId).digest()[0]! % 16;
-		const payload = JSON.stringify({...data, event_id: eventId, occurred_at: new Date().toISOString()});
+		const payload = JSON.stringify({...data, event_id: eventId, occurred_at: occurredAt ?? new Date().toISOString()});
 		await getClient().execute(
 			'INSERT INTO integration_event_journal (shard, entry_key, subject, payload) VALUES (?, ?, ?, ?) IF NOT EXISTS',
 			[shard, `p:${eventId}`, subject, payload],

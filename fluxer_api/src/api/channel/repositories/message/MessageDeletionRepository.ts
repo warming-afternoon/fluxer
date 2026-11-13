@@ -221,16 +221,18 @@ export class MessageDeletionRepository {
 		await this.postDeleteMaintenance(channelId, new Set([bucket]), [messageId]);
 	}
 
+	/** 分桶批量读取消息后删除关联数据，保留原有分批维护流程 */
 	async bulkDeleteMessages(channelId: ChannelID, messageIds: Array<MessageID>): Promise<void> {
 		if (messageIds.length === 0) return;
 		for (let i = 0; i < messageIds.length; i += BULK_DELETE_BATCH_SIZE) {
 			const chunk = messageIds.slice(i, i + BULK_DELETE_BATCH_SIZE);
-			const messages = await Promise.all(chunk.map((id) => this.messageDataRepo.getMessage(channelId, id)));
+			// 复用分桶批量读取，旧桶修复继续由数据访问层处理。
+			const messages = await this.messageDataRepo.getMessagesByIds(channelId, chunk);
 			const affectedBuckets = new Set<number>();
 			const batch = new BatchBuilder();
 			for (let j = 0; j < chunk.length; j++) {
 				const messageId = chunk[j];
-				const message = messages[j];
+				const message = messages.get(messageId) ?? null;
 				const bucket = BucketUtils.makeBucket(messageId);
 				affectedBuckets.add(bucket);
 				this.addMessageDeletionBatchQueries(batch, channelId, messageId, bucket, message);

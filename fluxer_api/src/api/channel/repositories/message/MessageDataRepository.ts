@@ -7,6 +7,7 @@ import {
 	BatchBuilder,
 	deleteOneOrMany,
 	fetchMany,
+	fetchManyInChunks,
 	fetchOne,
 	upsertOne,
 } from '@app/api/database/CassandraQueryExecution';
@@ -39,6 +40,9 @@ const LEGACY_BUCKETS_TO_CHECK = [0];
 const FETCH_MESSAGE_BY_CHANNEL_BUCKET_AND_MESSAGE_ID = Messages.select({
 	where: [Messages.where.eq('channel_id'), Messages.where.eq('bucket'), Messages.where.eq('message_id')],
 	limit: 1,
+});
+const FETCH_MESSAGES_BY_CHANNEL_BUCKET_AND_IDS = Messages.select({
+	where: [Messages.where.eq('channel_id'), Messages.where.eq('bucket'), Messages.where.in('message_id', 'message_ids')],
 });
 const FETCH_CHANNEL_STATE = ChannelState.select({
 	where: ChannelState.where.eq('channel_id'),
@@ -664,6 +668,42 @@ export class MessageDataRepository {
 		}
 		const repairedMessage = await this.attemptBucketReadRepair(channelId, messageId, bucket);
 		return repairedMessage;
+	}
+
+	/** 按时间桶批量读取去重消息，并沿用现有旧桶修复与损坏行过滤 */
+	async getMessagesByIds(channelId: ChannelID, messageIds: Array<MessageID>): Promise<Map<MessageID, Message>> {
+		const uniqueIds = [...new Set(messageIds)];
+		const buckets = new Map<number, Array<MessageID>>();
+		for (const id of uniqueIds) {
+			const bucket = BucketUtils.makeBucket(id);
+			const ids = buckets.get(bucket) ?? [];
+			ids.push(id);
+			buckets.set(bucket, ids);
+		}
+
+		// 每桶使用有界 IN 查询，避免批量删除为每条消息单独往返数据库。
+		const rows = new Map<MessageID, MessageRow>();
+		for (const [bucket, ids] of buckets) {
+			const found = await fetchManyInChunks<MessageRow, MessageID>(
+				FETCH_MESSAGES_BY_CHANNEL_BUCKET_AND_IDS,
+				ids,
+				(chunk) => ({channel_id: channelId, bucket, message_ids: chunk}),
+			);
+			for (const row of found) rows.set(row.message_id, row);
+		}
+
+		// 仅对目标桶缺失的消息查询旧桶，已有损坏行仍由原有逻辑过滤。
+		for (const bucket of LEGACY_BUCKETS_TO_CHECK) {
+			const missing = uniqueIds.filter((id) => !rows.has(id) && BucketUtils.makeBucket(id) !== bucket);
+			const legacyRows = await fetchManyInChunks<MessageRow, MessageID>(
+				FETCH_MESSAGES_BY_CHANNEL_BUCKET_AND_IDS,
+				missing,
+				(chunk) => ({channel_id: channelId, bucket, message_ids: chunk}),
+			);
+			for (const row of legacyRows) rows.set(row.message_id, row);
+		}
+		const messages = await this.repairAndMapMessages(channelId, [...rows.values()]);
+		return new Map(messages.map((message) => [message.id, message]));
 	}
 
 	async upsertMessage(

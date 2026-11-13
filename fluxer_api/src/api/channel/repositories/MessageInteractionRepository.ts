@@ -10,8 +10,11 @@ import type {Message} from '@app/api/models/Message';
 import {MessageReaction} from '@app/api/models/MessageReaction';
 import {ChannelPins, MessageReactions, Messages} from '@app/api/Tables';
 import {
+	finishIntegrationActivity,
 	finishIntegrationContentChange,
+	prepareIntegrationActivity,
 	prepareIntegrationContentChange,
+	prepareIntegrationReactionClear,
 } from '@app/integration/IntegrationContentHooks';
 import * as BucketUtils from '@fluxer/snowflake/src/SnowflakeBuckets';
 
@@ -175,6 +178,24 @@ export class MessageInteractionRepository {
 		emojiAnimated: boolean = false,
 	): Promise<MessageReaction> {
 		await prepareIntegrationContentChange(channelId);
+		// 只观察首帖的单用户反应，不为普通增删扫描完整反应列表。
+		const activity =
+			messageId.toString() === channelId.toString()
+				? await prepareIntegrationActivity(
+						channelId,
+						'reaction',
+						async () =>
+							(await this.checkUserReactionExists(channelId, messageId, userId, emojiName, emojiId)) ? 0 : 1,
+						{
+							emoji: {
+								id: emojiId && emojiId !== 0n ? emojiId.toString() : null,
+								name: emojiName,
+								animated: emojiAnimated,
+							},
+							operation: 'delta',
+						},
+					)
+				: null;
 		const bucket = BucketUtils.makeBucket(messageId);
 		const normalizedEmojiId = emojiId ? emojiId : createEmojiID(0n);
 		const reactionData: MessageReactionRow = {
@@ -189,6 +210,7 @@ export class MessageInteractionRepository {
 		};
 		await upsertOne(MessageReactions.upsertAll(reactionData));
 		await this.setHasReaction(channelId, messageId, true);
+		await finishIntegrationActivity(activity);
 		await finishIntegrationContentChange(channelId);
 		return new MessageReaction(reactionData);
 	}
@@ -202,6 +224,24 @@ export class MessageInteractionRepository {
 		emojiId?: EmojiID,
 	): Promise<void> {
 		await prepareIntegrationContentChange(channelId);
+		// 只观察首帖的单用户反应，不为普通增删扫描完整反应列表。
+		const activity =
+			messageId.toString() === channelId.toString()
+				? await prepareIntegrationActivity(
+						channelId,
+						'reaction',
+						async () =>
+							(await this.checkUserReactionExists(channelId, messageId, userId, emojiName, emojiId)) ? -1 : 0,
+						{
+							emoji: {
+								id: emojiId && emojiId !== 0n ? emojiId.toString() : null,
+								name: emojiName,
+								animated: false,
+							},
+							operation: 'delta',
+						},
+					)
+				: null;
 		const bucket = BucketUtils.makeBucket(messageId);
 		const normalizedEmojiId = emojiId ?? createEmojiID(0n);
 		await deleteOneOrMany(
@@ -216,12 +256,24 @@ export class MessageInteractionRepository {
 		);
 		const hasReactions = await this.messageHasAnyReactions(channelId, messageId);
 		await this.setHasReaction(channelId, messageId, hasReactions);
+		await finishIntegrationActivity(activity);
 		await finishIntegrationContentChange(channelId);
 	}
 
 	/** 清除消息全部反应并同步内容变更记录。 */
 	async removeAllReactions(channelId: ChannelID, messageId: MessageID): Promise<void> {
 		await prepareIntegrationContentChange(channelId);
+		// 清空只读取一次现有列表，各表情组使用独立事件标识。
+		const activities =
+			messageId.toString() === channelId.toString()
+				? await prepareIntegrationReactionClear(channelId, async () =>
+						(await this.listMessageReactions(channelId, messageId)).map((row) => ({
+							id: row.emojiId === 0n ? null : row.emojiId.toString(),
+							name: row.emojiName,
+							animated: row.isEmojiAnimated,
+						})),
+					)
+				: [];
 		const bucket = BucketUtils.makeBucket(messageId);
 		const deleteQuery = MessageReactions.deleteCql({
 			where: [
@@ -237,6 +289,9 @@ export class MessageInteractionRepository {
 		});
 		const hasReactions = await this.messageHasAnyReactions(channelId, messageId);
 		await this.setHasReaction(channelId, messageId, hasReactions);
+		for (const activity of activities) {
+			await finishIntegrationActivity(activity);
+		}
 		await finishIntegrationContentChange(channelId);
 	}
 
@@ -248,6 +303,26 @@ export class MessageInteractionRepository {
 		emojiId?: EmojiID,
 	): Promise<void> {
 		await prepareIntegrationContentChange(channelId);
+		// 仅清空目标表情组的已有计数，不把所有表情合并为作品点赞。
+		const activity =
+			messageId.toString() === channelId.toString()
+				? await prepareIntegrationActivity(
+						channelId,
+						'reaction',
+						async () =>
+							-(await this.listMessageReactions(channelId, messageId)).filter(
+								(row) => row.emojiId === (emojiId ?? createEmojiID(0n)) && row.emojiName === emojiName,
+							).length,
+						{
+							emoji: {
+								id: emojiId && emojiId !== 0n ? emojiId.toString() : null,
+								name: emojiName,
+								animated: false,
+							},
+							operation: 'clear_emoji',
+						},
+					)
+				: null;
 		const bucket = BucketUtils.makeBucket(messageId);
 		const normalizedEmojiId = emojiId ?? createEmojiID(0n);
 		const deleteQuery = MessageReactions.deleteCql({
@@ -268,6 +343,7 @@ export class MessageInteractionRepository {
 		});
 		const hasReactions = await this.messageHasAnyReactions(channelId, messageId);
 		await this.setHasReaction(channelId, messageId, hasReactions);
+		await finishIntegrationActivity(activity);
 		await finishIntegrationContentChange(channelId);
 	}
 
